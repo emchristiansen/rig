@@ -460,16 +460,84 @@ fn opaque_item() -> AssistantContent {
     })
 }
 
-/// Carried text with known (not opaque) content: past the shared opaque
-/// check, so the renderers' own catch-all arms decide it.
-fn carried_text() -> AssistantContent {
+/// Known text kept independently of its preserved provider payload.
+fn carried_text(text: &str) -> AssistantContent {
     AssistantContent::CarriedText(rig_core::message::CarriedText::new(
-        rig_core::message::CarriedTextContent::Text("carried".to_owned()),
+        rig_core::message::CarriedTextContent::Text(text.to_owned()),
         rig_core::message::CarriedPayload::new(
-            serde_json::json!({"type": "output_text", "text": "carried"}),
+            serde_json::json!({"type": "output_text", "text": "preserved original"}),
             Some("openai".to_owned()),
         ),
     ))
+}
+
+#[test]
+fn every_prompt_format_renders_known_carried_text_like_plain_text() {
+    for (protocol, assistant_text) in [
+        (
+            ConversationProtocol::Llama3,
+            format!("assistant{END_HEADER}\n\nbefore\ncarried\nafter{END_OF_TURN}"),
+        ),
+        (
+            ConversationProtocol::SmolLm2,
+            format!("assistant\nbefore\ncarried\nafter{IM_END}"),
+        ),
+        (
+            ConversationProtocol::Qwen3,
+            format!("assistant\nbeforecarriedafter{IM_END}"),
+        ),
+    ] {
+        let history = |middle| {
+            vec![
+                Message::user("go"),
+                Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+                    AssistantContent::text("before"),
+                    middle,
+                    AssistantContent::text("after"),
+                ])),
+            ]
+        };
+        let mut carried = request(history(carried_text("carried")));
+        carried.tools = Vec::new();
+        let mut plain = request(history(AssistantContent::text("carried")));
+        plain.tools = Vec::new();
+        let prompt = render_prompt(&carried, protocol).expect("known carried text renders");
+        assert_eq!(
+            prompt,
+            render_prompt(&plain, protocol).expect("ordinary text renders"),
+            "{protocol:?}"
+        );
+        assert!(prompt.contains(&assistant_text), "{protocol:?}: {prompt}");
+    }
+}
+
+#[test]
+fn known_carried_text_keeps_the_ordinary_text_reserved_marker_checks() {
+    for protocol in [
+        ConversationProtocol::Llama3,
+        ConversationProtocol::SmolLm2,
+        ConversationProtocol::Qwen3,
+    ] {
+        for marker in reserved_markers(protocol) {
+            let text = format!("before {marker} after");
+            for content in [AssistantContent::text(&text), carried_text(&text)] {
+                let mut request = request(assistant_turn(content));
+                request.tools = Vec::new();
+                let error = render_prompt(&request, protocol)
+                    .expect_err("assistant text containing a reserved marker is refused");
+                assert!(
+                    matches!(
+                        error,
+                        CandleError::ReservedProtocolMarker {
+                            field: "assistant text",
+                            marker: actual,
+                        } if actual == *marker
+                    ),
+                    "{protocol:?}: {error:?}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -503,7 +571,6 @@ fn plain_prompt_formats_refuse_assistant_blocks_they_cannot_render() {
             ),
             (assistant_image(), "image content"),
             (opaque_item(), "provider items"),
-            (carried_text(), "assistant content"),
         ] {
             let mut request = request(assistant_turn(content));
             request.tools = Vec::new();
@@ -525,7 +592,6 @@ fn qwen_prompt_refuses_assistant_blocks_it_cannot_render() {
     for (content, refusal) in [
         (assistant_image(), "assistant image content"),
         (opaque_item(), "provider items"),
-        (carried_text(), "assistant content"),
     ] {
         let error = render_prompt(
             &request(assistant_turn(content)),

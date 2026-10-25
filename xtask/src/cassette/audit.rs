@@ -130,6 +130,13 @@ impl Audit {
                             content.get("text").and_then(Value::as_str)
                                 == Some(text.remove(&part).unwrap_or_default().as_str())
                         }
+                        Some("carried_text")
+                            if content.pointer("/content/type").and_then(Value::as_str)
+                                == Some("text") =>
+                        {
+                            content.pointer("/content/text").and_then(Value::as_str)
+                                == Some(text.remove(&part).unwrap_or_default().as_str())
+                        }
                         Some("toolcall") => {
                             let streamed = arguments.remove(&part).unwrap_or_default();
                             // Arguments that were not a JSON object end as the

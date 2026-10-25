@@ -188,6 +188,110 @@ const IN_SOURCE_READERS: &[InSourceReader] = &[
     InSourceReader::ParityRow,
 ];
 
+#[test]
+fn reader_constants_stay_in_their_file_module_and_function_scopes() {
+    let source = r#"
+        const SHARED: &str = "file/shared.yaml";
+        fn unrelated() { const SHARED: &str = "unrelated.yaml"; }
+        #[ignore] fn ignored() { const SHARED: &str = "ignored.yaml"; }
+        fn file() {
+            recorded_json_request("openai", SHARED);
+            recorded("then", SHARED);
+        }
+        fn local() {
+            const SHARED: &str = "local.yaml";
+            mod unrelated { const SHARED: &str = "unrelated_module.yaml"; }
+            fn nested() {
+                const SHARED: &str = "nested.yaml";
+                recorded_json_request("openai", SHARED);
+                recorded("then", SHARED);
+            }
+            recorded_json_request("openai", SHARED);
+            recorded("then", SHARED);
+        }
+        mod sibling {
+            const SHARED: &str = "module.yaml";
+            fn reader() {
+                recorded_json_request("openai", SHARED);
+                recorded("then", SHARED);
+            }
+        }
+        fn after_module() {
+            recorded_json_request("openai", SHARED);
+            recorded("then", SHARED);
+        }
+    "#;
+    let expected = ["file/shared", "nested", "local", "module", "file/shared"];
+    assert_eq!(
+        read_only_cassettes(source).expect("reader constants"),
+        expected.map(|scenario| ("openai".to_owned(), format!("{scenario}.yaml")))
+    );
+    assert_eq!(
+        in_source_cassettes(source, IN_SOURCE_READERS).expect("in-source constants"),
+        expected.map(|scenario| ("openai".to_owned(), scenario.to_owned()))
+    );
+}
+
+#[test]
+fn reader_parameters_shadow_file_and_enclosing_function_constants() {
+    let source = r#"
+        const PROVIDER: &str = "openai";
+        const SCENARIO: &str = "file.yaml";
+        fn scenario(SCENARIO: &str) {
+            recorded_json_request(PROVIDER, &SCENARIO);
+            recorded("then", SCENARIO);
+            Recorded::named(PROVIDER, SCENARIO);
+        }
+        fn provider(PROVIDER: &str) {
+            recorded_json_request(PROVIDER, SCENARIO);
+            Recorded::named(PROVIDER, SCENARIO);
+        }
+        fn destructured((SCENARIO, _): (&str, bool)) {
+            recorded_json_request(PROVIDER, SCENARIO);
+            recorded("then", SCENARIO);
+        }
+        fn enclosing() {
+            const SCENARIO: &str = "local.yaml";
+            fn nested(SCENARIO: &str) {
+                recorded_json_request(PROVIDER, SCENARIO);
+                recorded("then", SCENARIO);
+            }
+            recorded_json_request(PROVIDER, SCENARIO);
+            recorded("then", SCENARIO);
+        }
+        fn after_parameters() {
+            recorded_json_request(PROVIDER, SCENARIO);
+            recorded("then", SCENARIO);
+        }
+    "#;
+    assert_eq!(
+        read_only_cassettes(source).expect("reader parameters"),
+        ["local.yaml", "file.yaml"].map(|scenario| ("openai".to_owned(), scenario.to_owned()))
+    );
+    assert_eq!(
+        in_source_cassettes(source, IN_SOURCE_READERS).expect("in-source parameters"),
+        ["local", "file"].map(|scenario| ("openai".to_owned(), scenario.to_owned()))
+    );
+
+    let ignored_local = r#"
+        #[test] #[ignore] fn old() { const SCENARIO: &str = "unused.yaml"; }
+        fn helper(SCENARIO: &str) {
+            recorded_json_request("openai", SCENARIO);
+            recorded("then", SCENARIO);
+        }
+    "#;
+    assert!(
+        read_only_cassettes(ignored_local)
+            .expect("ignored local")
+            .is_empty()
+    );
+    assert!(
+        in_source_cassettes(ignored_local, IN_SOURCE_READERS)
+            .expect("ignored in-source local")
+            .is_empty()
+    );
+}
+
 /// Each in-source reader registers the cassettes its literal and same-file
 /// constant paths name. A path built at run time, through a `format!`
 /// helper or a parameter, registers nothing, and a file nothing names stays

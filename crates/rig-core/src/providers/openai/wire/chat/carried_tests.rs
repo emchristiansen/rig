@@ -330,6 +330,137 @@ fn kimi_reasoning_content_reaches_the_plain_text_gateways_and_mistral() {
     }
 }
 
+/// Model precedence and catalog lookup are local request rules. These
+/// synthetic overrides make no claim that a gateway serves the final model.
+#[test]
+fn gateway_reasoning_rewrite_uses_the_final_merged_model() {
+    use crate::providers::openai::wire::{HYPERBOLIC, MISTRAL, PERPLEXITY};
+
+    let ordinary = "mistral-small-latest";
+    for dialect in [&PERPLEXITY, &HYPERBOLIC, &MISTRAL, &GROQ] {
+        for kimi in ["kimi-k3", "moonshotai/kimi-k2.6"] {
+            for (wire_model, typed_model, provider_model, raw_model, effective_model, kept) in [
+                (ordinary, None, None, Some(kimi), kimi, true),
+                (kimi, None, None, Some(ordinary), ordinary, false),
+                (ordinary, Some(kimi), None, None, kimi, true),
+                (kimi, Some(ordinary), None, None, ordinary, false),
+                (ordinary, Some(ordinary), Some(kimi), None, kimi, true),
+                (kimi, Some(kimi), Some(ordinary), None, ordinary, false),
+                (ordinary, Some(kimi), Some(ordinary), Some(kimi), kimi, true),
+                (
+                    kimi,
+                    Some(ordinary),
+                    Some(kimi),
+                    Some(ordinary),
+                    ordinary,
+                    false,
+                ),
+                (
+                    kimi,
+                    None,
+                    None,
+                    Some("unlisted-chat-model"),
+                    "unlisted-chat-model",
+                    false,
+                ),
+            ] {
+                for mode in [Mode::Unary, Mode::Streaming] {
+                    let mut request = CompletionRequest::new("base prompt");
+                    request.model = typed_model.map(str::to_owned);
+                    if let Some(model) = provider_model {
+                        let mut options = json!({});
+                        options[dialect.name] = json!({"*":{"model":model}});
+                        request.provider_options = serde_json::from_value(options)
+                            .expect("provider options are sections of body fields");
+                    }
+                    let mut raw = json!({"messages":[{
+                        "role":"assistant","content":"done","reasoning_content":"plan"
+                    }]});
+                    if let Some(model) = raw_model {
+                        raw["model"] = json!(model);
+                    }
+                    request.additional_params = Some(raw);
+                    let encoded = OpenAIConfig::with_key(dialect, "k")
+                        .chat(wire_model)
+                        .encode(request, mode)
+                        .expect("encodes");
+                    let body = json_body(&encoded.request);
+                    let context = format!(
+                        "{}/{wire_model}/{typed_model:?}/{provider_model:?}/{raw_model:?}/{mode:?}: {body}",
+                        dialect.name
+                    );
+                    assert_eq!(body["model"], effective_model, "{context}");
+                    assert_eq!(body["messages"][0]["content"], "done", "{context}");
+                    assert_eq!(
+                        body["messages"].as_array().expect("messages").len(),
+                        1,
+                        "{context}"
+                    );
+                    assert_eq!(
+                        body["messages"][0].get("reasoning_content"),
+                        (kept && dialect.name != GROQ.name).then_some(&json!("plan")),
+                        "{context}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Mira's raw layer is ignored locally, including model and history
+/// overrides, so no provider recording is needed to establish precedence.
+#[test]
+fn mira_reasoning_rewrite_keeps_ignoring_raw_model_and_messages() {
+    use crate::message::Reasoning;
+    use crate::providers::openai::wire::MIRA;
+
+    for (wire_model, typed_model, raw_model, kept) in [
+        (
+            "mistral-small-latest",
+            "moonshotai/kimi-k2.6",
+            "mistral-small-latest",
+            true,
+        ),
+        (
+            "moonshotai/kimi-k2.6",
+            "mistral-small-latest",
+            "moonshotai/kimi-k2.6",
+            false,
+        ),
+    ] {
+        for mode in [Mode::Unary, Mode::Streaming] {
+            let mut request = CompletionRequest::from(vec![
+                Message::user("first"),
+                Message::Assistant(AssistantMessage {
+                    content: vec![
+                        AssistantContent::Reasoning(Reasoning::new("typed plan")),
+                        AssistantContent::text("typed answer"),
+                    ],
+                    ..Default::default()
+                }),
+                Message::user("next"),
+            ]);
+            request.model = Some(typed_model.to_owned());
+            request.additional_params = Some(json!({"model":raw_model,"messages":[{
+                "role":"assistant","content":"raw answer","reasoning_content":"raw plan"
+            }]}));
+            let encoded = OpenAIConfig::with_key(&MIRA, "k")
+                .chat(wire_model)
+                .encode(request, mode)
+                .expect("encodes");
+            let body = json_body(&encoded.request);
+            let context = format!("{wire_model}/{typed_model}/{raw_model}/{mode:?}: {body}");
+            assert_eq!(body["model"], typed_model, "{context}");
+            assert_eq!(body["messages"][1]["content"], "typed answer", "{context}");
+            assert_eq!(
+                body["messages"][1].get("reasoning_content"),
+                kept.then_some(&json!("typed plan")),
+                "{context}"
+            );
+        }
+    }
+}
+
 #[test]
 fn openrouter_cache_marks_only_the_last_system_part() {
     let mut request = prompt("next");

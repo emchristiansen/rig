@@ -890,6 +890,101 @@ fn schema_request_carries_reference_siblings_and_null_enum_values_faithfully() {
     );
 }
 
+/// These controls inspect caller-supplied instance data at the encoded
+/// request boundary; provider replies cannot establish its preservation.
+#[test]
+fn schema_request_preserves_literal_references_in_annotations() {
+    for reference in ["#/$defs/T", "instance.json", "#/instance/value"] {
+        let literal = json!({
+            "$ref":reference,
+            "const":{"$ref":"nested.json"},
+            "oneOf":[{"$ref":"another.json"}],
+            "enum":[0,1]
+        });
+        let body = encoded_schema_request(json!({
+            "$defs":{"T":{"type":"string"}},
+            "type":"object",
+            "default":literal,
+            "example":[literal]
+        }))
+        .expect("literal annotation references are carried");
+        assert_eq!(
+            body.pointer("/tools/0/functionDeclarations/0"),
+            Some(&json!({
+                "name":"schema_tool", "description":"schema fixture",
+                "parameters":{
+                    "type":"object", "default":literal, "example":[literal]
+                }
+            }))
+        );
+    }
+}
+
+/// Reference-site annotations replace the definition's annotations in the
+/// emitted request, independently of any recorded provider response.
+#[test]
+fn schema_request_replaces_reference_annotations_without_resolving_their_data() {
+    let literal = json!({"$ref":"instance.json","nested":[{"$ref":"#/$defs/T"}]});
+    let body = encoded_schema_request(json!({
+        "$defs":{"T":{
+            "type":"object", "title":"Definition", "description":"Definition description",
+            "default":{"$ref":"definition-default.json"},
+            "example":{"$ref":"definition-example.json"}
+        }},
+        "type":"object",
+        "properties":{"value":{
+            "$ref":"#/$defs/T", "title":"Site", "description":"Site description",
+            "default":literal, "example":[literal]
+        }}
+    }))
+    .expect("site annotations replace definition annotations");
+    assert_eq!(
+        body.pointer("/tools/0/functionDeclarations/0/parameters"),
+        Some(&json!({
+            "type":"object",
+            "properties":{"value":{
+                "type":"object", "title":"Site", "description":"Site description",
+                "default":literal, "example":[literal]
+            }}
+        }))
+    );
+}
+
+/// Property names are caller data; request encoding must still resolve
+/// their schemas when the names also happen to be schema keywords.
+#[test]
+fn schema_request_resolves_properties_named_after_schema_keywords() {
+    let names = [
+        "$ref",
+        "default",
+        "example",
+        "const",
+        "enum",
+        "oneOf",
+        "properties",
+    ];
+    let properties: serde_json::Map<String, Value> = names
+        .iter()
+        .map(|name| ((*name).to_owned(), json!({"$ref":"#/$defs/T"})))
+        .collect();
+    let projected: serde_json::Map<String, Value> = names
+        .iter()
+        .map(|name| ((*name).to_owned(), json!({"type":"string"})))
+        .collect();
+    let body = encoded_schema_request(json!({
+        "$defs":{"T":{"type":"string"}},
+        "type":"object", "properties":properties
+    }))
+    .expect("property schemas are resolved regardless of their names");
+    assert_eq!(
+        body.pointer("/tools/0/functionDeclarations/0"),
+        Some(&json!({
+            "name":"schema_tool", "description":"schema fixture",
+            "parameters":{"type":"object", "properties":projected}
+        }))
+    );
+}
+
 #[test]
 fn schema_constructs_outside_the_subset_are_refused_with_their_path() {
     let place = json!({"Place":{"type":"object","description":"A place"}});
@@ -1078,6 +1173,73 @@ fn one_of_and_const_declarations_go_raw_and_plain_siblings_stay_projected() {
             }}
         ]))
     );
+}
+
+/// Route selection and exact schema preservation are request properties,
+/// so these controls encode through the public wire without provider calls.
+#[test]
+fn reference_sibling_one_of_and_const_keep_the_exact_raw_declaration() {
+    let literal = json!({"$ref":"literal.json","nested":[{"$ref":"#/$defs/T"}]});
+    for (definition, sibling) in [
+        (json!({"type":"string"}), json!({"const":"a"})),
+        (
+            json!({"type":"string"}),
+            json!({"oneOf":[{"type":"string","enum":["a"]},{"type":"string","enum":["b"]}]}),
+        ),
+        (
+            json!({"type":"object"}),
+            json!({"const":literal,"enum":[literal]}),
+        ),
+    ] {
+        let mut choice = sibling.as_object().expect("schema sibling").clone();
+        choice.insert("$ref".to_owned(), json!("#/$defs/T"));
+        let parameters = json!({
+            "$defs":{"T":definition},
+            "type":"object", "properties":{"choice":choice}
+        });
+        let body = encoded_schema_request(parameters.clone()).expect("raw reference sibling");
+        assert_eq!(
+            body.pointer("/tools/0/functionDeclarations/0"),
+            Some(&json!({
+                "name":"schema_tool", "description":"schema fixture",
+                "parametersJsonSchema":parameters
+            }))
+        );
+    }
+}
+
+/// A raw carrier cannot make conflicting reference validation keywords
+/// faithful. Their refusal and path are observable before any provider call.
+#[test]
+fn raw_schema_route_still_refuses_conflicting_reference_siblings() {
+    for (definition, sibling, keyword) in [
+        (
+            json!({"type":"string"}),
+            json!({"const":"a","type":"integer"}),
+            "type",
+        ),
+        (json!({"const":"a"}), json!({"const":"b"}), "const"),
+        (
+            json!({"oneOf":[{"type":"string"}]}),
+            json!({"oneOf":[{"type":"integer"}]}),
+            "oneOf",
+        ),
+    ] {
+        let mut choice = sibling.as_object().expect("schema sibling").clone();
+        choice.insert("$ref".to_owned(), json!("#/$defs/T"));
+        let error = encoded_schema_request(json!({
+            "$defs":{"T":definition},
+            "type":"object", "properties":{"choice":choice}
+        }))
+        .expect_err("conflicting validation siblings are refused");
+        assert!(matches!(&error, ProviderError::Request(_)), "{error:?}");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "RequestError: Tool 'schema_tool' could not be converted to a schema: schema path /properties/choice/{keyword}: differs from the same keyword of #/$defs/T"
+            )
+        );
+    }
 }
 
 #[test]
