@@ -165,23 +165,17 @@ fn resolve_refs(
     Ok(())
 }
 
-/// Visit schema positions only. Instance values in annotations, `const`
-/// and `enum` may contain arbitrary objects, including literal `$ref` keys.
-fn resolve_member_refs(
-    keyword: &str,
-    value: &mut Value,
-    defs: &Map<String, Value>,
-    path: &str,
-) -> Result<(), EncodeError> {
+enum SchemaMember {
+    Map,
+    Schema,
+}
+
+/// Schema positions shared by reference resolution and raw-route detection.
+/// Annotation, `const` and `enum` values are instance data.
+fn schema_member(keyword: &str) -> Option<SchemaMember> {
     match keyword {
         "$defs" | "definitions" | "properties" | "patternProperties" | "dependentSchemas"
-        | "dependencies" => {
-            if let Some(schemas) = value.as_object_mut() {
-                for (name, schema) in schemas {
-                    resolve_refs(schema, defs, &schema_path(path, name))?;
-                }
-            }
-        }
+        | "dependencies" => Some(SchemaMember::Map),
         "items"
         | "additionalItems"
         | "additionalProperties"
@@ -197,10 +191,29 @@ fn resolve_member_refs(
         | "anyOf"
         | "oneOf"
         | "allOf"
-        | "prefixItems" => {
+        | "prefixItems" => Some(SchemaMember::Schema),
+        _ => None,
+    }
+}
+
+fn resolve_member_refs(
+    keyword: &str,
+    value: &mut Value,
+    defs: &Map<String, Value>,
+    path: &str,
+) -> Result<(), EncodeError> {
+    match schema_member(keyword) {
+        Some(SchemaMember::Map) => {
+            if let Some(schemas) = value.as_object_mut() {
+                for (name, schema) in schemas {
+                    resolve_refs(schema, defs, &schema_path(path, name))?;
+                }
+            }
+        }
+        Some(SchemaMember::Schema) => {
             resolve_refs(value, defs, path)?;
         }
-        _ => {}
+        None => {}
     }
     Ok(())
 }
@@ -253,31 +266,27 @@ fn requires_json_schema(value: &Value, path: &str) -> Result<bool, EncodeError> 
                 .get("enum")
                 .and_then(Value::as_array)
                 .is_some_and(|values| values.iter().any(Value::is_number));
-    if let Some(properties) = obj.get("properties").and_then(Value::as_object) {
-        for (name, value) in properties {
-            if value.is_object() {
-                required |= requires_json_schema(
-                    value,
-                    &schema_path(&schema_path(path, "properties"), name),
-                )?;
-            }
-        }
-    }
-    if let Some(value) = obj.get("items")
-        && value.is_object()
-    {
-        required |= requires_json_schema(value, &schema_path(path, "items"))?;
-    }
-    for keyword in ["anyOf", "oneOf", "allOf"] {
-        if let Some(alternatives) = obj.get(keyword).and_then(Value::as_array) {
-            for (index, value) in alternatives.iter().enumerate() {
-                if value.is_object() {
-                    required |= requires_json_schema(
-                        value,
-                        &schema_path(&schema_path(path, keyword), &index.to_string()),
-                    )?;
+    for (keyword, value) in obj {
+        let at = schema_path(path, keyword);
+        match schema_member(keyword) {
+            Some(SchemaMember::Map) => {
+                if let Some(schemas) = value.as_object() {
+                    for (name, schema) in schemas {
+                        required |= requires_json_schema(schema, &schema_path(&at, name))?;
+                    }
                 }
             }
+            Some(SchemaMember::Schema) => {
+                if let Some(schemas) = value.as_array() {
+                    for (index, schema) in schemas.iter().enumerate() {
+                        required |=
+                            requires_json_schema(schema, &schema_path(&at, &index.to_string()))?;
+                    }
+                } else {
+                    required |= requires_json_schema(value, &at)?;
+                }
+            }
+            None => {}
         }
     }
     Ok(required)

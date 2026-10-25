@@ -233,6 +233,53 @@ fn reader_constants_stay_in_their_file_module_and_function_scopes() {
 }
 
 #[test]
+fn nonliteral_local_constants_shadow_outer_reader_constants() {
+    let source = r#"
+        const SCENARIO: &str = "file.yaml";
+        fn helper() {
+            const SCENARIO: &str = concat!("used", ".yaml");
+            recorded_json_request("openai", SCENARIO);
+            recorded("then", SCENARIO);
+        }
+        fn enclosing() {
+            const SCENARIO: &str = "outer.yaml";
+            fn nested() {
+                const SCENARIO: &str = concat!("nested", ".yaml");
+                recorded_json_request("openai", SCENARIO);
+                recorded("then", SCENARIO);
+            }
+            recorded_json_request("openai", SCENARIO);
+            recorded("then", SCENARIO);
+        }
+        mod sibling {
+            const SCENARIO: &str = "module.yaml";
+            fn helper() {
+                const SCENARIO: &str = concat!("module", "/used.yaml");
+                recorded_json_request("openai", SCENARIO);
+                recorded("then", SCENARIO);
+            }
+            fn literal() {
+                recorded_json_request("openai", SCENARIO);
+                recorded("then", SCENARIO);
+            }
+        }
+        fn restored() {
+            recorded_json_request("openai", SCENARIO);
+            recorded("then", SCENARIO);
+        }
+    "#;
+    assert_eq!(
+        read_only_cassettes(source).expect("nonliteral reader constants"),
+        ["outer.yaml", "module.yaml", "file.yaml"]
+            .map(|scenario| ("openai".to_owned(), scenario.to_owned()))
+    );
+    assert_eq!(
+        in_source_cassettes(source, IN_SOURCE_READERS).expect("nonliteral in-source constants"),
+        ["outer", "module", "file"].map(|scenario| ("openai".to_owned(), scenario.to_owned()))
+    );
+}
+
+#[test]
 fn reader_parameters_shadow_file_and_enclosing_function_constants() {
     let source = r#"
         const PROVIDER: &str = "openai";

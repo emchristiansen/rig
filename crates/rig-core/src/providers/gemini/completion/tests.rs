@@ -1208,6 +1208,111 @@ fn reference_sibling_one_of_and_const_keep_the_exact_raw_declaration() {
     }
 }
 
+/// Caller schemas under `additionalProperties` need the same exact raw
+/// carrier as property schemas; this is an outbound encoding control.
+#[test]
+fn additional_properties_one_of_and_const_keep_the_exact_raw_declaration() {
+    for schema in [
+        json!({"const":"a"}),
+        json!({"oneOf":[{"type":"string"},{"type":"integer"}]}),
+    ] {
+        let parameters = json!({"type":"object", "additionalProperties":schema});
+        let body = encoded_schema_request(parameters.clone()).expect("raw additional properties");
+        assert_eq!(
+            body.pointer("/tools/0/functionDeclarations/0"),
+            Some(&json!({
+                "name":"schema_tool", "description":"schema fixture",
+                "parametersJsonSchema":parameters
+            }))
+        );
+    }
+}
+
+/// Schema positions already visited for references must also select the
+/// raw carrier. Exact outbound bodies establish this without provider calls.
+#[test]
+fn raw_schema_route_follows_the_existing_schema_positions() {
+    let literal = json!({"$ref":"instance.json","oneOf":[{"const":"literal"}]});
+    let definition = json!({
+        "type":"object", "const":literal, "enum":[literal],
+        "default":literal, "example":[literal]
+    });
+    for (keyword, value) in [
+        ("properties", json!({"default":{"$ref":"#/$defs/T"}})),
+        ("patternProperties", json!({"const":{"$ref":"#/$defs/T"}})),
+        ("dependentSchemas", json!({"example":{"$ref":"#/$defs/T"}})),
+        ("dependencies", json!({"enum":{"$ref":"#/$defs/T"}})),
+        ("items", json!({"$ref":"#/$defs/T"})),
+        ("items", json!([{"$ref":"#/$defs/T"}])),
+        ("additionalItems", json!({"$ref":"#/$defs/T"})),
+        ("additionalProperties", json!({"$ref":"#/$defs/T"})),
+        ("contains", json!({"$ref":"#/$defs/T"})),
+        ("propertyNames", json!({"$ref":"#/$defs/T"})),
+        ("unevaluatedItems", json!({"$ref":"#/$defs/T"})),
+        ("unevaluatedProperties", json!({"$ref":"#/$defs/T"})),
+        ("not", json!({"$ref":"#/$defs/T"})),
+        ("if", json!({"$ref":"#/$defs/T"})),
+        ("then", json!({"$ref":"#/$defs/T"})),
+        ("else", json!({"$ref":"#/$defs/T"})),
+        ("contentSchema", json!({"$ref":"#/$defs/T"})),
+        ("anyOf", json!([{"$ref":"#/$defs/T"}])),
+        ("oneOf", json!([{"$ref":"#/$defs/T"}])),
+        ("allOf", json!([{"$ref":"#/$defs/T"}])),
+        ("prefixItems", json!([{"$ref":"#/$defs/T"}])),
+    ] {
+        let parameters = json!({"$defs":{"T":definition}, (keyword):value});
+        let body = encoded_schema_request(parameters.clone()).expect("raw schema position");
+        assert_eq!(
+            body.pointer("/tools/0/functionDeclarations/0"),
+            Some(&json!({
+                "name":"schema_tool", "description":"schema fixture",
+                "parametersJsonSchema":parameters
+            })),
+            "{keyword}"
+        );
+    }
+}
+
+/// Raw detection still checks every visited schema. These request failures
+/// pin reference validation and location reporting without provider calls.
+#[test]
+fn raw_schema_positions_keep_reference_and_schema_error_paths() {
+    for (parameters, path, reason) in [
+        (
+            json!({"const":{}, "additionalProperties":{"$defs":{},"$ref":"#/$defs/Missing"}}),
+            "/additionalProperties/$ref",
+            "Reference not found: #/$defs/Missing",
+        ),
+        (
+            json!({"const":{}, "patternProperties":{"a/b~c":{"$defs":[]}}}),
+            "/patternProperties/a~1b~0c/$defs",
+            "$defs must be an object",
+        ),
+        (
+            json!({
+                "$defs":{"T":{"type":"string"}},
+                "additionalProperties":{"$ref":"#/$defs/T","const":"a","type":"integer"}
+            }),
+            "/additionalProperties/type",
+            "differs from the same keyword of #/$defs/T",
+        ),
+        (
+            json!({"oneOf":[{"type":"object"}], "unevaluatedProperties":{"$defs":[]}}),
+            "/unevaluatedProperties/$defs",
+            "$defs must be an object",
+        ),
+    ] {
+        let error = encoded_schema_request(parameters).expect_err("visited schema is checked");
+        assert!(matches!(&error, ProviderError::Request(_)), "{error:?}");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "RequestError: Tool 'schema_tool' could not be converted to a schema: schema path {path}: {reason}"
+            )
+        );
+    }
+}
+
 /// A raw carrier cannot make conflicting reference validation keywords
 /// faithful. Their refusal and path are observable before any provider call.
 #[test]

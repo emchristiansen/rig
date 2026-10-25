@@ -235,8 +235,8 @@ pub fn read_only_cassettes(source: &str) -> Result<Vec<(String, String)>, Scenar
     Ok(visitor.read)
 }
 
-/// String constants by name; a name declared twice with different values is
-/// ambiguous and resolves to nothing.
+/// Constants by name; nonliteral initializers and conflicting declarations
+/// have no known string value.
 #[derive(Default)]
 struct ConstCollector {
     values: std::collections::BTreeMap<String, Option<String>>,
@@ -253,21 +253,21 @@ impl ConstCollector {
 
 impl<'ast> Visit<'ast> for ConstCollector {
     fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
-        if let Expr::Lit(ExprLit {
-            lit: Lit::Str(value),
-            ..
-        }) = node.expr.as_ref()
-        {
-            let value = value.value();
-            self.values
-                .entry(node.ident.to_string())
-                .and_modify(|known| {
-                    if known.as_deref() != Some(value.as_str()) {
-                        *known = None;
-                    }
-                })
-                .or_insert(Some(value));
-        }
+        let value = match node.expr.as_ref() {
+            Expr::Lit(ExprLit {
+                lit: Lit::Str(value),
+                ..
+            }) => Some(value.value()),
+            _ => None,
+        };
+        self.values
+            .entry(node.ident.to_string())
+            .and_modify(|known| {
+                if *known != value {
+                    *known = None;
+                }
+            })
+            .or_insert(value);
     }
 
     fn visit_item_fn(&mut self, _node: &'ast ItemFn) {}
