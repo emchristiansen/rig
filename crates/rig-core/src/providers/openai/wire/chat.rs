@@ -2109,7 +2109,11 @@ impl ChatDecoder {
                 arguments: arguments.as_deref(),
             };
             match kind {
-                CallKind::Function => out.fragment(Some(at), fragment)?,
+                CallKind::Function => out.function_fragment(
+                    Some(at),
+                    fragment,
+                    call.at("/function/name").and_then(Value::as_str),
+                )?,
                 CallKind::Custom | CallKind::Unknown => {
                     out.non_function_fragment(Some(at), fragment)?;
                 }

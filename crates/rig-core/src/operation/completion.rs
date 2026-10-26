@@ -493,8 +493,9 @@ pub struct CallFragment<'a> {
 }
 
 /// Which fragments permit a same-name function-argument continuation.
-enum FragmentKind {
-    Function,
+enum FragmentKind<'a> {
+    CanonicalFunction,
+    Function { boundary_name: Option<&'a str> },
     NonFunction,
 }
 
@@ -2522,7 +2523,22 @@ impl<'id> Out<'id, Completion> {
         index: Option<usize>,
         fragment: CallFragment<'_>,
     ) -> Result<(), ProviderError> {
-        self.fragment_inner(index, fragment, FragmentKind::Function, false)
+        self.fragment_inner(index, fragment, FragmentKind::CanonicalFunction, false)
+    }
+
+    /// Use wire function names for boundaries while assembling the original fields.
+    pub(crate) fn function_fragment(
+        &mut self,
+        index: Option<usize>,
+        fragment: CallFragment<'_>,
+        boundary_name: Option<&str>,
+    ) -> Result<(), ProviderError> {
+        self.fragment_inner(
+            index,
+            fragment,
+            FragmentKind::Function { boundary_name },
+            false,
+        )
     }
 
     /// Preserve named openings for fragments the wire classifies as non-function.
@@ -2543,14 +2559,14 @@ impl<'id> Out<'id, Completion> {
         index: usize,
         fragment: CallFragment<'_>,
     ) -> Result<(), ProviderError> {
-        self.fragment_inner(Some(index), fragment, FragmentKind::Function, true)
+        self.fragment_inner(Some(index), fragment, FragmentKind::CanonicalFunction, true)
     }
 
     fn fragment_inner(
         &mut self,
         index: Option<usize>,
         fragment: CallFragment<'_>,
-        kind: FragmentKind,
+        kind: FragmentKind<'_>,
         pending: bool,
     ) -> Result<(), ProviderError> {
         let mut shared = self.lock();
@@ -2583,16 +2599,37 @@ impl<'id> Out<'id, Completion> {
                     } if new_id.is_some_and(|new| id.wire() != new)
                         && draft.tool_slot_state != Some(ToolSlotState::PendingName) =>
                     {
-                        let opens = names
-                            && (matches!(kind, FragmentKind::NonFunction)
-                                || fragment.arguments.is_none_or(str::is_empty)
-                                || draft.item.get("type").and_then(serde_json::Value::as_str)
-                                    == Some("custom")
-                                || name.is_empty()
-                                || fragment
-                                    .name
-                                    .is_some_and(|incoming| incoming != name.as_str()));
-                        Some((arguments.complete(), opens))
+                        let function = match &kind {
+                            FragmentKind::CanonicalFunction => Some((name.as_str(), fragment.name)),
+                            FragmentKind::Function { boundary_name } => draft
+                                .item
+                                .pointer("/function/name")
+                                .and_then(serde_json::Value::as_str)
+                                .map(|held| (held, *boundary_name)),
+                            FragmentKind::NonFunction => None,
+                        }
+                        .filter(|(held, _)| !held.is_empty())
+                        .filter(|_| {
+                            matches!(
+                                draft.item.get("type").and_then(serde_json::Value::as_str),
+                                None | Some("function")
+                            )
+                        });
+                        match function {
+                            Some((held, incoming)) => {
+                                let complete =
+                                    !arguments.text.trim().is_empty() && arguments.complete();
+                                let opens =
+                                    incoming
+                                        .filter(|name| !name.is_empty())
+                                        .is_some_and(|name| {
+                                            name != held
+                                                || fragment.arguments.is_none_or(str::is_empty)
+                                        });
+                                Some((complete, opens))
+                            }
+                            None => Some((arguments.complete(), names)),
+                        }
                     }
                     _ => None,
                 });

@@ -342,6 +342,138 @@ fn a_changed_id_does_not_split_a_pending_name_slot() {
     assert_eq!(calls[0].function.arguments_value(), json!({"city": "Oslo"}));
 }
 
+/// Feed only call fragments through the actual Chat decoder and reassembler.
+fn chat_call_fragments(fragments: &[Value]) -> Decoded<Completion> {
+    use crate::providers::openai::wire::{OPENAI, OpenAIConfig};
+
+    let chunk = |delta: Value, finish: Option<&str>| {
+        WireFrame::Text(
+            json!({"id": "chatcmpl-boundary", "model": "model",
+            "object": "chat.completion.chunk",
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
+            .to_string(),
+        )
+    };
+    let mut frames: Vec<_> = fragments
+        .iter()
+        .map(|call| chunk(json!({"tool_calls": [call]}), None))
+        .collect();
+    frames.push(chunk(json!({}), Some("tool_calls")));
+    frames.push(WireFrame::Text("[DONE]".to_owned()));
+    let wire = OpenAIConfig::new("key").with_dialect(&OPENAI).chat("model");
+    crate::driver::feed_frames!(
+        wire.decoder_in(Mode::Streaming),
+        wire.reassembler(),
+        "openai",
+        frames
+    )
+}
+
+/// Whole text, rather than blank parameterless normalization, ends an indexed call.
+#[test]
+fn blank_held_arguments_continue_canonically_but_real_objects_split() {
+    for held in ["", " \n\t ", "{}"] {
+        let decoded = chat_call_fragments(&[
+            json!({"index": 0, "id": "call_a", "type": "function",
+                "function": {"name": "get_weather", "arguments": held}}),
+            json!({"index": 0, "id": "call_b", "type": "function",
+                "function": {"name": "get_weather", "arguments": r#"{"city":"#}}),
+            json!({"index": 0, "function": {"arguments": r#""Oslo"}"#}}),
+        ]);
+        let mut expected = vec![];
+        if held == "{}" {
+            expected.push((0, "get_weather".to_owned(), "{}".to_owned()));
+        }
+        let arguments = if held == "{}" {
+            r#"{"city":"Oslo"}"#.to_owned()
+        } else {
+            format!("{held}{}", r#"{"city":"Oslo"}"#)
+        };
+        expected.push((expected.len(), "get_weather".to_owned(), arguments));
+        assert_eq!(call_boundaries(&decoded), expected);
+        let response = decoded.outcome.expect("the function boundaries close");
+        let calls: Vec<_> = response.tool_calls().collect();
+        assert_eq!(calls.len(), if held == "{}" { 2 } else { 1 });
+        let last = calls.last().expect("the completed city call");
+        assert_eq!(last.id, CallId::from_wire("call_b"));
+        assert_eq!(last.function.arguments_value(), json!({"city": "Oslo"}));
+        assert!(last.function.invalid_arguments.is_none());
+        let parameterless =
+            chat_call_fragments(&[json!({"index": 0, "id": "empty", "type": "function",
+                "function": {"name": "get_weather", "arguments": held}})])
+            .outcome
+            .expect("parameterless normalization is unchanged");
+        let call = parameterless
+            .tool_calls()
+            .next()
+            .expect("parameterless call");
+        assert_eq!(call.function.arguments_value(), json!({}));
+        assert!(call.function.invalid_arguments.is_none());
+    }
+}
+
+/// The unchanged name fallback cannot turn custom extras into function boundaries.
+#[test]
+fn unnamed_ordinary_fragments_ignore_custom_extra_names_canonically() {
+    for kind in [Some("function"), None] {
+        for extra_name in ["get_weather", "unrelated"] {
+            let extra = json!({"name": extra_name, "input": " retained input "});
+            let mut incoming = json!({"index": 0, "id": "call_b", "custom": extra,
+                "function": {"arguments": r#""Oslo"}"#}});
+            if let Some(kind) = kind {
+                incoming["type"] = json!(kind);
+            }
+            let decoded = chat_call_fragments(&[
+                json!({"index": 0, "id": "call_a", "type": "function",
+                    "function": {"name": "get_weather", "arguments": r#"{"city":"#}}),
+                incoming,
+            ]);
+            assert_eq!(
+                call_boundaries(&decoded),
+                [(0, "get_weather".to_owned(), r#"{"city":"Oslo"}"#.to_owned())]
+            );
+            let response = decoded.outcome.expect("one ordinary function closes");
+            let calls: Vec<_> = response.tool_calls().collect();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].id, CallId::from_wire("call_b"));
+            assert_eq!(calls[0].function.name, "get_weather");
+            assert_eq!(calls[0].function.arguments_value(), json!({"city": "Oslo"}));
+            assert!(calls[0].function.invalid_arguments.is_none());
+            assert_eq!(
+                response.raw.pointer("/choices/0/message/tool_calls"),
+                Some(
+                    &json!([{"id": "call_b", "type": "function", "custom": extra,
+                    "function": {"name": "get_weather", "arguments": r#"{"city":"Oslo"}"#}}])
+                )
+            );
+        }
+    }
+}
+
+/// A held call named only by the fallback retains its pre-existing split.
+#[test]
+fn a_held_function_without_a_wire_function_name_keeps_its_legacy_boundary() {
+    let decoded = chat_call_fragments(&[
+        json!({"index": 0, "id": "call_a", "type": "function",
+            "function": {"arguments": ""}, "custom": {"name": "get_weather"}}),
+        json!({"index": 0, "id": "call_b", "type": "function",
+            "function": {"name": "get_weather", "arguments": "{}"}}),
+    ]);
+    assert_eq!(
+        call_boundaries(&decoded),
+        [
+            (0, "get_weather".to_owned(), "{}".to_owned()),
+            (1, "get_weather".to_owned(), "{}".to_owned()),
+        ]
+    );
+    let response = decoded.outcome.expect("the legacy openings close");
+    let ids: Vec<_> = response.tool_calls().map(|call| call.id.clone()).collect();
+    assert_eq!(
+        ids,
+        [CallId::from_wire("call_a"), CallId::from_wire("call_b")]
+    );
+}
+
 /// The Chat feeder retains extra fields without changing a function's kind.
 #[test]
 fn a_custom_extra_field_keeps_one_canonical_function_call() {
@@ -489,11 +621,6 @@ fn chat_custom_fragments_keep_the_existing_canonical_boundary() {
         ),
         (
             custom("call_a", "first"),
-            json!({"index": 0, "id": "call_b", "custom": {"input": "second"}}),
-            vec![("call_b", json!({"input": "firstsecond"}))],
-        ),
-        (
-            custom("call_a", "first"),
             function("call_b", "{}"),
             vec![("call_a", json!({})), ("call_b", json!({}))],
         ),
@@ -551,6 +678,32 @@ fn chat_custom_fragments_keep_the_existing_canonical_boundary() {
             .collect();
         assert_eq!(calls, expected);
     }
+}
+
+/// Legacy custom folding drops the unnamed replacement while raw input survives.
+#[test]
+fn an_unnamed_custom_replacement_keeps_the_legacy_canonical_loss() {
+    let decoded = chat_call_fragments(&[
+        json!({"index": 0, "id": "call_a", "type": "custom",
+            "custom": {"name": "get_weather", "input": "first"}}),
+        json!({"index": 0, "id": "call_b", "custom": {"input": "second"}}),
+    ]);
+    assert_eq!(
+        call_boundaries(&decoded),
+        [(0, "get_weather".to_owned(), "{}".to_owned())]
+    );
+    let response = decoded.outcome.expect("the unnamed replacement is omitted");
+    let calls: Vec<_> = response.tool_calls().collect();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, CallId::from_wire("call_a"));
+    assert_eq!(calls[0].function.name, "get_weather");
+    assert_eq!(calls[0].function.arguments_value(), json!({}));
+    assert!(calls[0].function.invalid_arguments.is_none());
+    assert_eq!(
+        response.raw.pointer("/choices/0/message/tool_calls"),
+        Some(&json!([{"id": "call_b", "type": "custom",
+            "custom": {"name": "get_weather", "input": "firstsecond"}}]))
+    );
 }
 
 fn text(value: &str) -> CarriedText {
