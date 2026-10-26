@@ -2046,6 +2046,7 @@ impl ChatDecoder {
     fn call(&mut self, call: &Value, out: &mut Out<'_, Completion>) -> Result<(), ProviderError> {
         self.close_writing(out)?;
         self.saw_content = true;
+        let kind = CallKind::of(call);
         let id = match call.get("id") {
             Some(Value::String(id)) if !id.is_empty() && id != "null" => Some(id.clone()),
             Some(id @ Value::Number(_)) => Some(id.to_string()),
@@ -2088,7 +2089,7 @@ impl ChatDecoder {
                 open.opaque
             }
             None => {
-                let opaque = CallKind::of(call) == CallKind::Unknown;
+                let opaque = kind == CallKind::Unknown;
                 if opaque {
                     out.open(at, Block::Opaque { replay: false }, Value::Null)?;
                 }
@@ -2102,14 +2103,17 @@ impl ChatDecoder {
             }
         };
         if !opaque {
-            out.fragment(
-                Some(at),
-                CallFragment {
-                    id: id.as_deref(),
-                    name,
-                    arguments: arguments.as_deref(),
-                },
-            )?;
+            let fragment = CallFragment {
+                id: id.as_deref(),
+                name,
+                arguments: arguments.as_deref(),
+            };
+            match kind {
+                CallKind::Function => out.fragment(Some(at), fragment)?,
+                CallKind::Custom | CallKind::Unknown => {
+                    out.non_function_fragment(Some(at), fragment)?;
+                }
+            }
         }
         let mut fields = call.as_object().cloned().unwrap_or_default();
         // The index orders the stream; the call it assembles has none.

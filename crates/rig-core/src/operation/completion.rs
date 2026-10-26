@@ -492,6 +492,12 @@ pub struct CallFragment<'a> {
     pub arguments: Option<&'a str>,
 }
 
+/// Which fragments permit a same-name function-argument continuation.
+enum FragmentKind {
+    Function,
+    NonFunction,
+}
+
 /// The first index the writer hands out itself ([`Out::fresh_index`]); a
 /// provider's wire indices stay below it.
 pub const AUTO_INDEX: usize = 1 << 30;
@@ -2516,7 +2522,16 @@ impl<'id> Out<'id, Completion> {
         index: Option<usize>,
         fragment: CallFragment<'_>,
     ) -> Result<(), ProviderError> {
-        self.fragment_inner(index, fragment, false)
+        self.fragment_inner(index, fragment, FragmentKind::Function, false)
+    }
+
+    /// Preserve named openings for fragments the wire classifies as non-function.
+    pub(crate) fn non_function_fragment(
+        &mut self,
+        index: Option<usize>,
+        fragment: CallFragment<'_>,
+    ) -> Result<(), ProviderError> {
+        self.fragment_inner(index, fragment, FragmentKind::NonFunction, false)
     }
 
     /// Opt a preserved Responses function-call slot into pending-name
@@ -2528,13 +2543,14 @@ impl<'id> Out<'id, Completion> {
         index: usize,
         fragment: CallFragment<'_>,
     ) -> Result<(), ProviderError> {
-        self.fragment_inner(Some(index), fragment, true)
+        self.fragment_inner(Some(index), fragment, FragmentKind::Function, true)
     }
 
     fn fragment_inner(
         &mut self,
         index: Option<usize>,
         fragment: CallFragment<'_>,
+        kind: FragmentKind,
         pending: bool,
     ) -> Result<(), ProviderError> {
         let mut shared = self.lock();
@@ -2568,7 +2584,8 @@ impl<'id> Out<'id, Completion> {
                         && draft.tool_slot_state != Some(ToolSlotState::PendingName) =>
                     {
                         let opens = names
-                            && (fragment.arguments.is_none_or(str::is_empty)
+                            && (matches!(kind, FragmentKind::NonFunction)
+                                || fragment.arguments.is_none_or(str::is_empty)
                                 || draft.item.get("type").and_then(serde_json::Value::as_str)
                                     == Some("custom")
                                 || name.is_empty()

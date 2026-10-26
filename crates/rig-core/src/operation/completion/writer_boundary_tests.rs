@@ -399,6 +399,72 @@ fn a_custom_extra_field_keeps_one_canonical_function_call() {
     }
 }
 
+/// The incoming type controls the boundary while function extras stay exact.
+#[test]
+fn a_custom_fragment_with_function_fields_keeps_two_canonical_calls() {
+    use crate::providers::openai::wire::{OPENAI, OpenAIConfig};
+
+    let first = json!({"index": 0, "id": "call_a", "type": "function",
+        "function": {"name": "get_weather", "arguments": r#"{"city":"#}});
+    let second = json!({"index": 0, "id": "call_b", "type": "custom",
+        "function": {"name": "get_weather", "arguments": r#""Oslo"}"#},
+        "custom": {"name": "patch", "input": " raw input "},
+        "future": {"retain": [true, null]}});
+    let chunk = |delta: Value, finish: Option<&str>| {
+        WireFrame::Text(
+            json!({"id": "chatcmpl-boundary", "model": "model",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
+            .to_string(),
+        )
+    };
+    let wire = OpenAIConfig::new("key").with_dialect(&OPENAI).chat("model");
+    let decoded = crate::driver::feed_frames!(
+        wire.decoder_in(Mode::Streaming),
+        wire.reassembler(),
+        "openai",
+        [
+            chunk(json!({"tool_calls": [first]}), None),
+            chunk(json!({"tool_calls": [second]}), None),
+            chunk(json!({}), Some("tool_calls")),
+            WireFrame::Text("[DONE]".to_owned()),
+        ]
+    );
+    assert_eq!(
+        call_boundaries(&decoded),
+        [
+            (0, "get_weather".to_owned(), r#"{"city":"#.to_owned()),
+            (1, "get_weather".to_owned(), r#""Oslo"}"#.to_owned()),
+        ]
+    );
+    let response = decoded.outcome.expect("both original boundaries close");
+    let calls: Vec<_> = response.tool_calls().collect();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].id, CallId::from_wire("call_a"));
+    assert_eq!(calls[1].id, CallId::from_wire("call_b"));
+    assert_eq!(calls[0].function.name, "get_weather");
+    assert_eq!(calls[1].function.name, "get_weather");
+    assert_eq!(
+        calls[0].function.invalid_arguments.as_deref(),
+        Some(r#"{"city":"#)
+    );
+    assert_eq!(
+        calls[1].function.invalid_arguments.as_deref(),
+        Some(r#""Oslo"}"#)
+    );
+    assert_eq!(
+        response.raw.pointer("/choices/0/message/tool_calls"),
+        Some(&json!([
+            {"id": "call_a", "type": "function",
+                "function": {"name": "get_weather", "arguments": r#"{"city":"#}},
+            {"id": "call_b", "type": "custom",
+                "function": {"name": "get_weather", "arguments": r#""Oslo"}"#},
+                "custom": {"name": "patch", "input": " raw input "},
+                "future": {"retain": [true, null]}}
+        ]))
+    );
+}
+
 /// The actual Chat feeder retains its custom-only and cross-part boundaries.
 #[test]
 fn chat_custom_fragments_keep_the_existing_canonical_boundary() {

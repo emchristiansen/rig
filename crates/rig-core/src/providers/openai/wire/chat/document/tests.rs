@@ -309,6 +309,26 @@ fn changed_id_controls_keep_unstated_ids_and_unnamed_calls() {
     );
 }
 
+/// Incoming custom type keeps its opening boundary even with function extras.
+#[test]
+fn a_custom_fragment_with_function_fields_keeps_two_document_calls() {
+    let first = call(Some(0), "call_a", "get_weather", r#"{"city":"#);
+    let second = json!({"index": 0, "id": "call_b", "type": "custom",
+        "function": {"name": "get_weather", "arguments": r#""Oslo"}"#},
+        "custom": {"name": "patch", "input": " raw input "},
+        "future": {"retain": [true, null]}});
+    assert_eq!(
+        rebuilt_calls(&[json!([first]), json!([second])]),
+        json!([
+            call(None, "call_a", "get_weather", r#"{"city":"#),
+            {"id": "call_b", "type": "custom",
+                "function": {"name": "get_weather", "arguments": r#""Oslo"}"#},
+                "custom": {"name": "patch", "input": " raw input "},
+                "future": {"retain": [true, null]}}
+        ])
+    );
+}
+
 /// Custom input stays on its existing boundary; names never cross parts.
 #[test]
 fn custom_fragments_keep_their_changed_id_boundary() {
