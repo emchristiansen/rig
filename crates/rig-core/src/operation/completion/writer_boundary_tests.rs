@@ -10,7 +10,7 @@ use crate::message::{
     CarriedReasoningPart, CarriedText, CarriedTextContent, Origin, ProviderCallId, ToolName,
 };
 use crate::streaming::{DiscardReason, PartKind, SourceOrder, StreamEvent, Transcript};
-use crate::wire::{Fold, Out, Reply};
+use crate::wire::{Fold, Mode, Out, Reply, Wire, WireFrame};
 
 fn origin() -> Origin {
     Origin::new("boundary.api", "turn-provider", "requested-model")
@@ -72,6 +72,418 @@ fn function(id: &str) -> Block {
         id: CallId::from_wire(id),
         name: name("lookup"),
         namespace: None,
+    }
+}
+
+/// Each actual function start and the argument bytes emitted for its part.
+fn call_boundaries(decoded: &Decoded<Completion>) -> Vec<(usize, String, String)> {
+    let events = closed(decoded);
+    let mut calls = Vec::new();
+    for event in events.events() {
+        match event {
+            StreamEvent::Start {
+                part,
+                kind: PartKind::ToolCall,
+                name: Some(name),
+                ..
+            } => calls.push((part.index(), name.as_str().to_owned(), String::new())),
+            StreamEvent::Arguments { part, json } => {
+                let call = calls
+                    .iter_mut()
+                    .find(|(index, _, _)| *index == part.index())
+                    .expect("arguments belong to a started function part");
+                call.2.push_str(json);
+            }
+            _ => {}
+        }
+    }
+    calls
+}
+
+/// These are writer-contract cases, including the original changed-ID
+/// fragment, rather than observations requiring a provider recording.
+#[test]
+fn changed_ids_keep_same_name_argument_fragments_on_one_canonical_call() {
+    for (held, incoming, incoming_name) in [
+        ("", r#"{"city":"#, Some("get_weather")),
+        (r#"{"city":"#, r#""Oslo"}"#, Some("get_weather")),
+        (r#"{"city":"#, r#""Oslo"}"#, None),
+    ] {
+        let decoded = write(|out| {
+            out.fragment(
+                Some(0),
+                CallFragment {
+                    id: Some("call_a"),
+                    name: Some("get_weather"),
+                    arguments: Some(held),
+                },
+            )?;
+            out.fragment(
+                Some(0),
+                CallFragment {
+                    id: Some("call_b"),
+                    name: incoming_name,
+                    arguments: Some(incoming),
+                },
+            )?;
+            if held.is_empty() {
+                out.push(0, r#""Oslo"}"#)?;
+            }
+            out.finish(0)
+        });
+        assert_eq!(
+            call_boundaries(&decoded),
+            [(0, "get_weather".to_owned(), r#"{"city":"Oslo"}"#.to_owned())]
+        );
+        let response = decoded.outcome.expect("one completed call");
+        let calls: Vec<_> = response.tool_calls().collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, CallId::from_wire("call_b"));
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[0].function.arguments_value(), json!({"city": "Oslo"}));
+        assert!(calls[0].function.invalid_arguments.is_none());
+    }
+}
+
+/// A different name or an argument-less opening replaces an incomplete call.
+#[test]
+fn changed_ids_open_distinct_canonical_calls_for_named_openings() {
+    for (incoming_name, incoming) in [
+        ("get_time", Some("{}")),
+        ("get_weather", None),
+        ("get_weather", Some("")),
+    ] {
+        let decoded = write(|out| {
+            out.fragment(
+                Some(0),
+                CallFragment {
+                    id: Some("call_a"),
+                    name: Some("get_weather"),
+                    arguments: Some(r#"{"cut":"#),
+                },
+            )?;
+            out.fragment(
+                Some(0),
+                CallFragment {
+                    id: Some("call_b"),
+                    name: Some(incoming_name),
+                    arguments: incoming,
+                },
+            )?;
+            if incoming != Some("{}") {
+                out.push(0, "{}")?;
+            }
+            out.finish(0)
+        });
+        assert_eq!(
+            call_boundaries(&decoded),
+            [
+                (0, "get_weather".to_owned(), r#"{"cut":"#.to_owned()),
+                (1, incoming_name.to_owned(), "{}".to_owned()),
+            ]
+        );
+        let response = decoded.outcome.expect("both call boundaries close");
+        let calls: Vec<_> = response.tool_calls().collect();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id, CallId::from_wire("call_a"));
+        assert_eq!(
+            calls[0].function.invalid_arguments.as_deref(),
+            Some(r#"{"cut":"#)
+        );
+        assert_eq!(calls[1].id, CallId::from_wire("call_b"));
+        assert_eq!(calls[1].function.name, incoming_name);
+        assert_eq!(calls[1].function.arguments_value(), json!({}));
+        assert!(calls[1].function.invalid_arguments.is_none());
+    }
+}
+
+/// Whole arguments close the first call even when the next fragment is unnamed.
+#[test]
+fn changed_ids_split_whole_canonical_calls_with_or_without_a_new_name() {
+    for incoming_name in [Some("get_weather"), None] {
+        let decoded = write(|out| {
+            for (id, name) in [("call_a", Some("get_weather")), ("call_b", incoming_name)] {
+                out.fragment(
+                    Some(0),
+                    CallFragment {
+                        id: Some(id),
+                        name,
+                        arguments: Some("{}"),
+                    },
+                )?;
+            }
+            out.fragment(
+                Some(0),
+                CallFragment {
+                    id: None,
+                    name: Some("get_weather"),
+                    arguments: None,
+                },
+            )?;
+            out.finish(0)
+        });
+        assert_eq!(
+            call_boundaries(&decoded),
+            [
+                (0, "get_weather".to_owned(), "{}".to_owned()),
+                (1, "get_weather".to_owned(), "{}".to_owned()),
+            ]
+        );
+        let response = decoded.outcome.expect("two complete calls");
+        let ids: Vec<_> = response.tool_calls().map(|call| call.id.clone()).collect();
+        assert_eq!(
+            ids,
+            [CallId::from_wire("call_a"), CallId::from_wire("call_b")]
+        );
+    }
+}
+
+/// Missing IDs keep merging, and a nameless held slot keeps its prior split.
+#[test]
+fn changed_id_controls_preserve_unstated_ids_and_unnamed_canonical_slots() {
+    for held_id in [None, Some(""), Some("null")] {
+        let decoded = write(|out| {
+            out.fragment(
+                Some(0),
+                CallFragment {
+                    id: held_id,
+                    name: Some("get_weather"),
+                    arguments: Some(r#"{"city":"#),
+                },
+            )?;
+            out.fragment(
+                Some(0),
+                CallFragment {
+                    id: Some("call_b"),
+                    name: Some("get_time"),
+                    arguments: Some(r#""Oslo"}"#),
+                },
+            )?;
+            out.finish(0)
+        });
+        assert_eq!(
+            call_boundaries(&decoded),
+            [(0, "get_weather".to_owned(), r#"{"city":"Oslo"}"#.to_owned())]
+        );
+        let response = decoded.outcome.expect("the initially ID-less call closes");
+        let calls: Vec<_> = response.tool_calls().collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, CallId::from_wire("call_b"));
+        assert_eq!(calls[0].function.arguments_value(), json!({"city": "Oslo"}));
+    }
+    let decoded = write(|out| {
+        out.fragment(
+            Some(0),
+            CallFragment {
+                id: Some("call_a"),
+                name: None,
+                arguments: Some("{"),
+            },
+        )?;
+        out.fragment(
+            Some(0),
+            CallFragment {
+                id: Some("call_b"),
+                name: Some("get_weather"),
+                arguments: Some("{}"),
+            },
+        )?;
+        out.finish(0)
+    });
+    assert_eq!(
+        call_boundaries(&decoded),
+        [(1, "get_weather".to_owned(), "{}".to_owned())]
+    );
+    let response = decoded
+        .outcome
+        .expect("the unnamed first slot stays unseen");
+    let calls: Vec<_> = response.tool_calls().collect();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, CallId::from_wire("call_b"));
+}
+
+/// Preserved pending-name slots keep their explicit identity-binding protocol.
+#[test]
+fn a_changed_id_does_not_split_a_pending_name_slot() {
+    let decoded = write(|out| {
+        out.pending_call(
+            0,
+            CallFragment {
+                id: Some("call_a"),
+                name: None,
+                arguments: Some("{"),
+            },
+        )?;
+        out.fragment(
+            Some(0),
+            CallFragment {
+                id: Some("call_b"),
+                name: Some("get_weather"),
+                arguments: Some(r#""city":"Oslo"}"#),
+            },
+        )?;
+        out.finish(0)
+    });
+    let events = closed(&decoded);
+    assert!(events.events().all(|event| event.part().index() == 0));
+    let arguments: String = events
+        .events()
+        .filter_map(|event| match event {
+            StreamEvent::Arguments { json, .. } => Some(json.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(arguments, r#"{"city":"Oslo"}"#);
+    let response = decoded.outcome.expect("the pending slot binds once");
+    let calls: Vec<_> = response.tool_calls().collect();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, CallId::from_wire("call_b"));
+    assert_eq!(calls[0].function.name, "get_weather");
+    assert_eq!(calls[0].function.arguments_value(), json!({"city": "Oslo"}));
+}
+
+/// The Chat feeder retains extra fields without changing a function's kind.
+#[test]
+fn a_custom_extra_field_keeps_one_canonical_function_call() {
+    use crate::providers::openai::wire::{OPENAI, OpenAIConfig};
+
+    for kind in [Some("function"), None] {
+        let extra = json!({"name": "unrelated", "input": "retained extra"});
+        let mut first = json!({"index": 0, "id": "call_a", "custom": extra,
+            "function": {"name": "get_weather", "arguments": r#"{"city":"#}});
+        if let Some(kind) = kind {
+            first["type"] = json!(kind);
+        }
+        let chunk = |delta: Value, finish: Option<&str>| {
+            WireFrame::Text(
+                json!({"id": "chatcmpl-boundary", "model": "model",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
+                .to_string(),
+            )
+        };
+        let wire = OpenAIConfig::new("key").with_dialect(&OPENAI).chat("model");
+        let decoded = crate::driver::feed_frames!(
+            wire.decoder_in(Mode::Streaming),
+            "openai",
+            [
+                chunk(json!({"tool_calls": [first]}), None),
+                chunk(
+                    json!({"tool_calls": [{"index": 0, "id": "call_b",
+                    "function": {"name": "get_weather", "arguments": r#""Oslo"}"#}}]}),
+                    None
+                ),
+                chunk(json!({}), Some("tool_calls")),
+                WireFrame::Text("[DONE]".to_owned()),
+            ]
+        );
+        assert_eq!(
+            call_boundaries(&decoded),
+            [(0, "get_weather".to_owned(), r#"{"city":"Oslo"}"#.to_owned())]
+        );
+        let response = decoded
+            .outcome
+            .expect("one function closes with its extra field");
+        let calls: Vec<_> = response.tool_calls().collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, CallId::from_wire("call_b"));
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[0].function.arguments_value(), json!({"city": "Oslo"}));
+        assert!(calls[0].function.invalid_arguments.is_none());
+        assert_eq!(
+            response.choice[0]
+                .native_item()
+                .and_then(|item| item.get("custom")),
+            Some(&extra)
+        );
+    }
+}
+
+/// The actual Chat feeder retains its custom-only and cross-part boundaries.
+#[test]
+fn chat_custom_fragments_keep_the_existing_canonical_boundary() {
+    use crate::providers::openai::wire::{OPENAI, OpenAIConfig};
+
+    let custom = |id: &str, input: &str| {
+        json!({"index": 0, "id": id, "type": "custom",
+        "custom": {"name": "get_weather", "input": input}})
+    };
+    let function = |id: &str, arguments: &str| {
+        json!({"index": 0, "id": id, "type": "function",
+        "function": {"name": "get_weather", "arguments": arguments}})
+    };
+    for (first, second, expected) in [
+        (
+            custom("call_a", "first"),
+            custom("call_b", "second"),
+            vec![
+                ("call_a", json!({})),
+                ("call_b", json!({"input": "second"})),
+            ],
+        ),
+        (
+            custom("call_a", "first"),
+            json!({"index": 0, "id": "call_b", "custom": {"input": "second"}}),
+            vec![("call_b", json!({"input": "firstsecond"}))],
+        ),
+        (
+            custom("call_a", "first"),
+            function("call_b", "{}"),
+            vec![("call_a", json!({})), ("call_b", json!({}))],
+        ),
+        (
+            function("call_a", r#"{"cut":"#),
+            custom("call_b", "second"),
+            vec![
+                ("call_a", json!({})),
+                ("call_b", json!({"input": "second"})),
+            ],
+        ),
+    ] {
+        let chunk = |delta: Value, finish: Option<&str>| {
+            WireFrame::Text(
+                json!({"id": "chatcmpl-boundary", "model": "model",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
+                .to_string(),
+            )
+        };
+        let wire = OpenAIConfig::new("key").with_dialect(&OPENAI).chat("model");
+        let decoded = crate::driver::feed_frames!(
+            wire.decoder_in(Mode::Streaming),
+            "openai",
+            [
+                chunk(json!({"tool_calls": [first]}), None),
+                chunk(json!({"tool_calls": [second]}), None),
+                chunk(json!({}), Some("tool_calls")),
+                WireFrame::Text("[DONE]".to_owned()),
+            ]
+        );
+        let events = closed(&decoded);
+        let starts: Vec<_> = events
+            .events()
+            .filter_map(|event| match event {
+                StreamEvent::Start {
+                    part,
+                    kind: PartKind::ToolCall,
+                    name,
+                    ..
+                } => Some((part.index(), name.as_deref())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts.len(), expected.len());
+        assert!(starts.iter().all(|(_, name)| *name == Some("get_weather")));
+        let response = decoded.outcome.expect("custom boundary controls close");
+        let calls: Vec<_> = response
+            .tool_calls()
+            .map(|call| (call.id.wire().into_owned(), call.function.arguments_value()))
+            .collect();
+        let expected: Vec<_> = expected
+            .into_iter()
+            .map(|(id, args)| (id.to_owned(), args))
+            .collect();
+        assert_eq!(calls, expected);
     }
 }
 

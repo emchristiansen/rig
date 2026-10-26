@@ -7,7 +7,7 @@ use crate::providers::doubleword::QWEN3_EMBEDDING_8B;
 use crate::providers::mistral::embedding::{CODESTRAL_EMBED, MISTRAL_EMBED};
 use crate::providers::openai::embedding::TEXT_EMBEDDING_ADA_002;
 use crate::providers::openai::wire::{
-    AZURE, DOUBLEWORD, Dialect, LLAMACPP, MISTRAL, OPENAI, OpenAIConfig, TOGETHER,
+    AZURE, DOUBLEWORD, Dialect, GROQ, LLAMACPP, MISTRAL, OPENAI, OpenAIConfig, TOGETHER,
 };
 use crate::test_utils::{RecordingHttpClient, json_body};
 
@@ -82,6 +82,35 @@ async fn a_short_embedding_reply_fails_the_call() {
         error.to_string().contains('1') && error.to_string().contains('3'),
         "the error names both counts: {error}"
     );
+}
+
+/// The model table supplies unstated widths at the request boundary; a
+/// synthetic input table isolates defaults, overrides, and field suppression.
+#[test]
+fn an_unstated_width_resolves_from_the_model_table() {
+    let width = |model: &str, ndims: Option<usize>| -> Option<serde_json::Value> {
+        let encoded = OpenAIConfig::new("sk-test")
+            .embedding(model, ndims)
+            .encode(documents(), Mode::Unary)
+            .expect("the request encodes");
+        let body = json_body(&encoded.request);
+        body.get("dimensions").cloned()
+    };
+
+    assert_eq!(
+        width("text-embedding-3-small", None),
+        Some(serde_json::json!(1536))
+    );
+    assert_eq!(
+        width("text-embedding-3-large", None),
+        Some(serde_json::json!(3072))
+    );
+    assert_eq!(
+        width("text-embedding-3-small", Some(512)),
+        Some(serde_json::json!(512))
+    );
+    assert_eq!(width("some-compatible-embedder", None), None);
+    assert_eq!(width(TEXT_EMBEDDING_ADA_002, None), None);
 }
 
 /// A requested width goes on the wire in the field the dialect spells it
@@ -201,6 +230,25 @@ async fn a_recorded_model_listing_decodes() {
         models.iter().all(|model| !model.id.is_empty()),
         "every entry names a model"
     );
+}
+
+/// A synthetic catalogue isolates the optional owner and limit fields a
+/// Groq entry reports, independently of the recorded OpenAI catalogue.
+#[tokio::test]
+async fn a_listing_entry_keeps_the_limits_a_dialect_reports() {
+    let reply = r#"{"object":"list","data":[{"id":"llama-3.3-70b","object":"model","created":1,"owned_by":"Meta","context_window":131072,"max_completion_tokens":32768}]}"#;
+    let models = crate::driver::Model::new(
+        OpenAIConfig::with_key(&GROQ, "k").models(),
+        RecordingHttpClient::new(reply),
+    )
+    .list()
+    .await
+    .expect("the catalogue decodes");
+    let model = models.iter().next().expect("one entry");
+    assert_eq!(model.id, "llama-3.3-70b");
+    assert_eq!(model.owned_by.as_deref(), Some("Meta"));
+    assert_eq!(model.context_length, Some(131_072));
+    assert_eq!(model.max_output_tokens, Some(32_768));
 }
 
 /// The transcription body is multipart, with the model as a form field
@@ -416,6 +464,25 @@ async fn a_recorded_rerank_reply_folds_its_ranking() {
     );
 }
 
+/// A synthetic reply isolates the score alias and absent model, which the
+/// existing model-bearing ranking cannot exercise.
+#[tokio::test]
+async fn a_rerank_reply_accepts_either_score_key() {
+    let reply = r#"{"results":[{"index":0,"score":0.75}]}"#;
+    let response = crate::driver::Model::new(
+        OpenAIConfig::with_key(&LLAMACPP, "").rerank("r"),
+        RecordingHttpClient::new(reply),
+    )
+    .call(crate::operation::RerankRequest {
+        query: "q".to_owned(),
+        documents: vec!["a".to_owned()],
+    })
+    .await
+    .expect("the reply decodes");
+    assert_eq!(response.results[0].relevance_score, 0.75);
+    assert_eq!(response.model, None);
+}
+
 #[test]
 fn a_rerank_request_is_the_jina_shape() {
     let encoded = OpenAIConfig::with_key(&LLAMACPP, "")
@@ -620,6 +687,22 @@ async fn the_hyperbolic_speech_body_and_reply_differ_from_openais() {
     assert_eq!(openai.audio, b"ID3\x04raw-mp3");
 }
 
+/// Constructor defaults are local configuration behavior, so no provider
+/// cassette is needed to distinguish Azure's version from ordinary OpenAI.
+#[test]
+fn azure_always_carries_an_api_version() {
+    let provider = OpenAIConfig::with_key(&AZURE, "k").with_base_url("https://x.openai.azure.com");
+    assert_eq!(provider.api_version.as_deref(), Some("2024-10-21"));
+    assert!(
+        !provider
+            .uri("/chat/completions", Some("d"))
+            .ends_with("api-version="),
+        "an empty api-version would silently address the wrong API: {}",
+        provider.uri("/chat/completions", Some("d"))
+    );
+    assert_eq!(OpenAIConfig::new("k").api_version, None);
+}
+
 /// The width a dialect's own table documents, and the field suppression that
 /// comes with it.
 ///
@@ -736,6 +819,22 @@ fn an_unhonourable_width_is_refused_before_the_request_is_built() {
         json_body(&encoded.request)["dimensions"],
         serde_json::json!(8_192)
     );
+}
+
+/// Declaration metadata records caller intent before any request is sent,
+/// so a cassette cannot distinguish it from a table-supplied default.
+#[test]
+fn a_table_supplied_width_is_not_a_declaration() {
+    let unasked = OpenAIConfig::with_key(&DOUBLEWORD, "k").embedding(QWEN3_EMBEDDING_8B, None);
+    let capabilities = unasked.describe().capabilities;
+    assert_eq!(capabilities.ndims, 4_096, "the table resolves the width");
+    assert_eq!(
+        capabilities.declared, None,
+        "the caller named no width, so there is nothing for a reply to contradict"
+    );
+
+    let asked = OpenAIConfig::with_key(&DOUBLEWORD, "k").embedding(QWEN3_EMBEDDING_8B, Some(4_096));
+    assert_eq!(asked.describe().capabilities.declared, Some(4_096));
 }
 
 /// A byte-framed reply that is not UTF-8 keeps its exact bytes as the
