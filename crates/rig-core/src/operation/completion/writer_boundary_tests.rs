@@ -145,6 +145,93 @@ fn changed_ids_keep_same_name_argument_fragments_on_one_canonical_call() {
     }
 }
 
+/// Canonical function boundaries do not depend on a provider's native type tag.
+#[test]
+fn public_function_fragments_continue_with_unrelated_provider_native_tags() {
+    for kind in ["function_call", "provider.tool_invocation"] {
+        let native = json!({"type": kind, "future": {"keep": [true, null],
+            "arguments": "native field remains exact"}});
+        let decoded = write(|out| {
+            out.fragment(
+                Some(0),
+                CallFragment {
+                    id: Some("call_a"),
+                    name: Some("f"),
+                    arguments: Some(r#"{"x":"#),
+                },
+            )?;
+            out.edit(0, |item| *item = native.clone())?;
+            out.fragment(
+                Some(0),
+                CallFragment {
+                    id: Some("call_b"),
+                    name: Some("f"),
+                    arguments: Some("1}"),
+                },
+            )?;
+            out.finish(0)
+        });
+        assert_eq!(
+            call_boundaries(&decoded),
+            [(0, "f".to_owned(), r#"{"x":1}"#.to_owned())]
+        );
+        let response = decoded.outcome.expect("one canonical function closes");
+        let calls: Vec<_> = response.tool_calls().collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, CallId::from_wire("call_b"));
+        assert_eq!(calls[0].function.name, "f");
+        assert_eq!(calls[0].function.arguments_value(), json!({"x": 1}));
+        assert!(calls[0].function.invalid_arguments.is_none());
+        assert_eq!(response.choice[0].native_item(), Some(&native));
+    }
+}
+
+/// The public policy retains its existing custom-native named-opening exception.
+#[test]
+fn public_function_fragments_keep_the_custom_native_legacy_split() {
+    let decoded = write(|out| {
+        out.fragment(
+            Some(0),
+            CallFragment {
+                id: Some("call_a"),
+                name: Some("f"),
+                arguments: Some(r#"{"x":"#),
+            },
+        )?;
+        out.edit(0, |item| {
+            *item = json!({"type": "custom", "future": [true, null]})
+        })?;
+        out.fragment(
+            Some(0),
+            CallFragment {
+                id: Some("call_b"),
+                name: Some("f"),
+                arguments: Some("1}"),
+            },
+        )?;
+        out.finish(0)
+    });
+    assert_eq!(
+        call_boundaries(&decoded),
+        [
+            (0, "f".to_owned(), r#"{"x":"#.to_owned()),
+            (1, "f".to_owned(), "1}".to_owned()),
+        ]
+    );
+    let response = decoded
+        .outcome
+        .expect("the retained legacy split closes both calls");
+    let calls: Vec<_> = response.tool_calls().collect();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].id, CallId::from_wire("call_a"));
+    assert_eq!(calls[1].id, CallId::from_wire("call_b"));
+    assert_eq!(
+        calls[0].function.invalid_arguments.as_deref(),
+        Some(r#"{"x":"#)
+    );
+    assert_eq!(calls[1].function.invalid_arguments.as_deref(), Some("1}"));
+}
+
 /// A different name or an argument-less opening replaces an incomplete call.
 #[test]
 fn changed_ids_open_distinct_canonical_calls_for_named_openings() {
