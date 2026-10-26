@@ -92,7 +92,7 @@ async fn explicit_history_is_lifted_on_the_current_agent_boundary() {
         expected
             .as_object_mut()
             .expect("the original request is an object")
-            .remove("instructions"),
+            .shift_remove("instructions"),
         Some(serde_json::json!(instructions))
     );
     expected["input"]

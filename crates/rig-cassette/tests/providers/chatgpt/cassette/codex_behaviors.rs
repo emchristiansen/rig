@@ -13,15 +13,18 @@ use rig::tool::Tool;
 use rig_core::test_utils::{RecordingHttpClient, test_caller_identity};
 use rig_test_support::cassette_models::{MapWire, OpenAiModels};
 
-use super::super::support::{recorded_include, with_chatgpt_cassette};
+use super::super::support::{recorded_include, with_chatgpt_current_outbound};
 use crate::cassettes::recorded_interaction_bodies;
 use crate::support::{Adder, TOOLS_PREAMBLE};
 use rig::completion::CompletionRequest;
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn strict_tools_opt_in_roundtrip() {
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "codex_behaviors/strict_tools_opt_in_roundtrip",
+        recorded_interaction_bodies("chatgpt", "codex_behaviors/strict_tools_opt_in_roundtrip"),
         |client| async move {
             // The recorded request body locks the strict-tools contract:
             // `strict: true` plus the sanitized schema (additionalProperties
@@ -73,11 +76,17 @@ async fn strict_tools_opt_in_roundtrip() {
     .await;
 }
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn store_false_and_prompt_cache_fields_roundtrip() {
     let scenario = "codex_behaviors/store_false_and_prompt_cache_fields_roundtrip";
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "codex_behaviors/store_false_and_prompt_cache_fields_roundtrip",
+        recorded_interaction_bodies(
+            "chatgpt",
+            "codex_behaviors/store_false_and_prompt_cache_fields_roundtrip",
+        ),
         |client| async move {
             let model = client.completion(chatgpt::GPT_5_4);
             // The actual terminal raw keeps provider-only fields; usage is
@@ -200,7 +209,7 @@ async fn default_instructions_merge_with_explicit_preamble() {
         expected
             .as_object_mut()
             .expect("the original request is an object")
-            .remove("instructions"),
+            .shift_remove("instructions"),
         Some(serde_json::json!(instructions))
     );
     expected["input"]

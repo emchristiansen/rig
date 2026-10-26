@@ -415,7 +415,7 @@ fn the_codex_lane_keeps_values_while_moving_instructions_to_input() {
         let instructions = expected
             .as_object_mut()
             .expect("object")
-            .remove("instructions")
+            .shift_remove("instructions")
             .expect("original instructions");
         expected["input"].as_array_mut().expect("input array").insert(0, serde_json::json!({
             "type":"message", "role":"developer",
