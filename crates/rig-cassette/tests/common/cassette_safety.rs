@@ -58,7 +58,6 @@ const PROVIDER_CASSETTE_SUITES: &[ProviderCassetteSuite] = &[
         source_dir: "tests/providers/chatgpt/cassette",
         wrapper_names: &[
             "with_chatgpt_cassette",
-            "with_chatgpt_cassette_default_instructions",
             "with_chatgpt_noninteractive_oauth_cassette",
         ],
     },

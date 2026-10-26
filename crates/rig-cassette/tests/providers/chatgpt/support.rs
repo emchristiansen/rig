@@ -69,22 +69,3 @@ where
 pub(super) fn recorded_include() -> serde_json::Value {
     serde_json::json!({ "include": ["reasoning.encrypted_content"] })
 }
-
-pub(super) async fn with_chatgpt_cassette_default_instructions<F, Fut>(
-    spec: impl Into<CassetteSpec>,
-    default_instructions: impl Into<String>,
-    test_body: F,
-) where
-    F: FnOnce(OpenAiModels) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    let (cassette, client) =
-        chatgpt_cassette_with_default_instructions(spec, default_instructions).await;
-    let result = AssertUnwindSafe(test_body(OpenAiModels::new(
-        client,
-        rig_test_support::cassettes::local_http(),
-    )))
-    .catch_unwind()
-    .await;
-    cassette.finish_after_test(result).await;
-}
