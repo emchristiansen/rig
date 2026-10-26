@@ -933,6 +933,43 @@ fn each_renderer_refuses_custom_calls_and_provider_items_on_its_own() {
     }
 }
 
+/// Common request validation rejects opaque carried text before rendering.
+/// The renderers must also refuse it on direct calls, rather than returning
+/// only the known text on either side of an unrenderable block.
+#[test]
+fn each_renderer_refuses_opaque_carried_text_on_its_own() {
+    use rig_core::message::{CarriedPayload, CarriedText, CarriedTextContent};
+
+    let message = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        AssistantContent::text("before"),
+        AssistantContent::CarriedText(CarriedText::new(
+            CarriedTextContent::Opaque("uninterpreted".to_owned()),
+            CarriedPayload::new(
+                serde_json::json!({"type": "future_part", "payload": [1, 2]}),
+                Some("openai".to_owned()),
+            ),
+        )),
+        AssistantContent::text("after"),
+    ]));
+
+    let error = render_plain_message(&message).expect_err("opaque text is not silently omitted");
+    assert!(matches!(
+        error,
+        CandleError::UnsupportedPromptContent("assistant content")
+    ));
+
+    let mut aliases = HashMap::new();
+    let mut unresolved = HashSet::new();
+    let mut answered = HashSet::new();
+    let error = render_qwen_message(&message, &mut aliases, &mut unresolved, &mut answered)
+        .expect_err("opaque text is not silently omitted");
+    assert!(matches!(
+        error,
+        CandleError::UnsupportedPromptContent("assistant content")
+    ));
+    assert!(aliases.is_empty() && unresolved.is_empty() && answered.is_empty());
+}
+
 /// `render_prompt` sends Qwen3 to its dedicated renderer, and both renderers
 /// only pass `unsupported_user_content` non-text blocks, so these arms answer
 /// only direct calls.
