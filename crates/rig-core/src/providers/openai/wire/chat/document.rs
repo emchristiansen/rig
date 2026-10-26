@@ -272,31 +272,39 @@ fn merge_call(message: &mut Map<String, Value>, fragment: &Value) {
                             .and_then(stated_id)
                             .is_some_and(|held| held != *id)
                     });
-                    let opens = if let Some(name) = fragment
-                        .get("function")
-                        .and_then(|function| function.get("name"))
+                    let function = held
+                        .pointer("/function/name")
                         .and_then(Value::as_str)
                         .filter(|name| !name.is_empty())
                         .filter(|_| {
                             matches!(
                                 fragment.get("type").and_then(Value::as_str),
                                 None | Some("function")
-                            )
-                        }) {
+                            ) && CallKind::of(held) == CallKind::Function
+                        });
+                    let (complete, opens) = if let Some(held_name) = function {
                         let arguments = fragment
                             .get("function")
                             .and_then(|function| function.get("arguments"))
                             .map(crate::json_utils::value_to_json_string);
-                        arguments.as_deref().is_none_or(str::is_empty)
-                            || CallKind::of(held) != CallKind::Function
-                            || held
-                                .pointer("/function/name")
-                                .and_then(Value::as_str)
-                                .is_none_or(|held| held.is_empty() || held != name)
+                        let opens = fragment
+                            .get("function")
+                            .and_then(|function| function.get("name"))
+                            .and_then(Value::as_str)
+                            .filter(|name| !name.is_empty())
+                            .is_some_and(|name| {
+                                name != held_name || arguments.as_deref().is_none_or(str::is_empty)
+                            });
+                        let complete = held
+                            .pointer("/function/arguments")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| !text.trim().is_empty())
+                            && arguments_complete(held);
+                        (complete, opens)
                     } else {
-                        names
+                        (arguments_complete(held), names)
                     };
-                    !(replaced && (arguments_complete(held) || opens))
+                    !(replaced && (complete || opens))
                 })
             }),
         None => match &id {

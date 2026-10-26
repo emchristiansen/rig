@@ -238,6 +238,70 @@ fn changed_ids_distinguish_function_openings_from_argument_continuations() {
     }
 }
 
+/// Blank parameterless normalization does not establish an indexed boundary.
+#[test]
+fn blank_held_function_arguments_continue_but_real_objects_split() {
+    for held in ["", " \n\t ", "{}"] {
+        let calls = rebuilt_calls(&[
+            json!([call(Some(0), "call_a", "get_weather", held)]),
+            json!([call(Some(0), "call_b", "get_weather", r#"{"city":"#)]),
+            json!([{"index": 0, "function": {"arguments": r#""Oslo"}"#}}]),
+        ]);
+        let mut expected = vec![];
+        if held == "{}" {
+            expected.push(call(None, "call_a", "get_weather", held));
+        }
+        let arguments = if held == "{}" {
+            r#"{"city":"Oslo"}"#.to_owned()
+        } else {
+            format!("{held}{}", r#"{"city":"Oslo"}"#)
+        };
+        expected.push(call(None, "call_b", "get_weather", &arguments));
+        assert_eq!(calls, json!(expected));
+    }
+}
+
+/// Ordinary fragments derive boundary names only from the function part.
+#[test]
+fn unnamed_function_fragments_ignore_custom_extra_names_at_the_boundary() {
+    for kind in [Some("function"), None] {
+        for extra_name in ["get_weather", "unrelated"] {
+            let extra = json!({"name": extra_name, "input": " retained input "});
+            let mut incoming = json!({"index": 0, "id": "call_b", "custom": extra,
+                "function": {"arguments": r#""Oslo"}"#}});
+            if let Some(kind) = kind {
+                incoming["type"] = json!(kind);
+            }
+            assert_eq!(
+                rebuilt_calls(&[
+                    json!([call(Some(0), "call_a", "get_weather", r#"{"city":"#)]),
+                    json!([incoming]),
+                ]),
+                json!([{"id": "call_b", "type": "function", "custom": extra,
+                    "function": {"name": "get_weather", "arguments": r#"{"city":"Oslo"}"#}}])
+            );
+        }
+    }
+}
+
+/// A custom-name fallback does not give an unnamed held function a boundary name.
+#[test]
+fn held_function_without_a_function_name_keeps_its_legacy_boundary() {
+    let held = json!({"index": 0, "id": "call_a", "type": "function",
+        "function": {"arguments": ""}, "custom": {"name": "get_weather"}});
+    assert_eq!(
+        rebuilt_calls(&[
+            json!([held]),
+            json!([call(Some(0), "call_b", "get_weather", "{}")]),
+        ]),
+        json!([
+            {"id": "call_a", "type": "function", "function": {"arguments": ""},
+                "custom": {"name": "get_weather"}},
+            call(None, "call_b", "get_weather", "{}")
+        ])
+    );
+}
+
 /// Call kind follows `type`; unrelated extra fields do not split functions.
 #[test]
 fn a_custom_extra_field_keeps_same_named_function_fragments_together() {
