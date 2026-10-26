@@ -3946,3 +3946,127 @@ fn numeric_composition_does_not_hide_a_later_schema_object_error() {
         "RequestError: Tool 'schema_tool' could not be converted to a schema: schema path /properties/choice/anyOf/2/$defs: $defs must be an object"
     );
 }
+
+/// These unsupported schema forms fail before transport. Exact request
+/// errors establish their refusal and location without provider cassettes.
+#[test]
+fn schema_request_reports_reference_and_container_refusals() {
+    for (parameters, path, reason) in [
+        (
+            json!({"type":"object","properties":{"a/b~c":{"definitions":[]}}}),
+            "/properties/a~1b~0c/definitions",
+            "$defs must be an object",
+        ),
+        (
+            json!({
+                "$defs":{"Closed":false},
+                "type":"object",
+                "properties":{"value":{"$ref":"#/$defs/Closed","title":"Value"}}
+            }),
+            "/properties/value/title",
+            "#/$defs/Closed is not a schema object this keyword can join",
+        ),
+        (
+            json!({"$defs":{},"type":"object","properties":[]}),
+            "/properties",
+            "must be an object of schemas",
+        ),
+        (
+            json!({"$defs":{},"type":"object","properties":{"value":{"$ref":17}}}),
+            "/properties/value/$ref",
+            "the reference cannot be resolved",
+        ),
+        (
+            json!({"type":"object","properties":{"value":{"type":[]}}}),
+            "/properties/value/type",
+            "names no type",
+        ),
+    ] {
+        let error = encoded_schema_request(parameters).expect_err("schema is refused");
+        assert!(matches!(&error, ProviderError::Request(_)), "{error:?}");
+        let diagnostic = format!(
+            "Tool 'schema_tool' could not be converted to a schema: schema path {path}: {reason}"
+        );
+        assert_eq!(
+            std::error::Error::source(&error)
+                .expect("request reason")
+                .to_string(),
+            diagnostic
+        );
+        assert_eq!(error.to_string(), format!("RequestError: {diagnostic}"));
+    }
+}
+
+/// A type array naming only null retains that type in the encoded request;
+/// this projection property does not require a provider response.
+#[test]
+fn schema_request_keeps_null_only_type_arrays() {
+    for null_type in ["null", "NULL"] {
+        let body = encoded_schema_request(json!({
+            "type":"object", "properties":{"value":{"type":[null_type]}}
+        }))
+        .expect("null-only type array");
+        assert_eq!(
+            body.pointer("/tools/0/functionDeclarations/0"),
+            Some(&json!({
+                "name":"schema_tool", "description":"schema fixture",
+                "parameters":{
+                    "type":"object", "properties":{"value":{"type":null_type}}
+                }
+            }))
+        );
+    }
+}
+
+/// Gemini count fields use int64. The outbound boundary must carry the
+/// largest bound exactly and refuse a larger value before any provider call.
+#[test]
+fn schema_request_preserves_int64_count_limits_and_refuses_larger_bounds() {
+    let largest = i64::MAX as u64;
+    for keyword in ["minItems", "maxItems"] {
+        let parameters = json!({
+            "type":"array", "items":{"type":"string"}, (keyword):largest
+        });
+        let body = encoded_schema_request(parameters.clone()).expect("int64 count bound");
+        assert_eq!(
+            body.pointer("/tools/0/functionDeclarations/0"),
+            Some(&json!({
+                "name":"schema_tool", "description":"schema fixture",
+                "parameters":parameters
+            }))
+        );
+
+        let error = encoded_schema_request(json!({
+            "type":"array", "items":{"type":"string"}, (keyword):largest + 1
+        }))
+        .expect_err("a bound outside int64 is refused");
+        assert!(matches!(&error, ProviderError::Request(_)), "{error:?}");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "RequestError: Tool 'schema_tool' could not be converted to a schema: schema path /{keyword}: exceeds Gemini's int64 range"
+            )
+        );
+    }
+}
+
+/// Omitted types are inferred from properties and string enums in the
+/// outgoing schema. Provider replies cannot establish those request fields.
+#[test]
+fn schema_request_infers_object_and_string_types() {
+    let body = encoded_schema_request(json!({
+        "properties":{"mode":{"enum":["fast","slow"]}}, "required":["mode"]
+    }))
+    .expect("implicit object and string types");
+    assert_eq!(
+        body.pointer("/tools/0/functionDeclarations/0"),
+        Some(&json!({
+            "name":"schema_tool", "description":"schema fixture",
+            "parameters":{
+                "type":"object",
+                "properties":{"mode":{"type":"string","enum":["fast","slow"]}},
+                "required":["mode"]
+            }
+        }))
+    );
+}
