@@ -2600,21 +2600,25 @@ impl<'id> Out<'id, Completion> {
                         && draft.tool_slot_state != Some(ToolSlotState::PendingName) =>
                     {
                         let function = match &kind {
-                            FragmentKind::CanonicalFunction => Some((name.as_str(), fragment.name)),
+                            FragmentKind::CanonicalFunction => {
+                                (draft.item.get("type").and_then(serde_json::Value::as_str)
+                                    != Some("custom"))
+                                .then_some((name.as_str(), fragment.name))
+                            }
                             FragmentKind::Function { boundary_name } => draft
                                 .item
                                 .pointer("/function/name")
                                 .and_then(serde_json::Value::as_str)
-                                .map(|held| (held, *boundary_name)),
+                                .map(|held| (held, *boundary_name))
+                                .filter(|_| {
+                                    matches!(
+                                        draft.item.get("type").and_then(serde_json::Value::as_str),
+                                        None | Some("function")
+                                    )
+                                }),
                             FragmentKind::NonFunction => None,
                         }
-                        .filter(|(held, _)| !held.is_empty())
-                        .filter(|_| {
-                            matches!(
-                                draft.item.get("type").and_then(serde_json::Value::as_str),
-                                None | Some("function")
-                            )
-                        });
+                        .filter(|(held, _)| !held.is_empty());
                         match function {
                             Some((held, incoming)) => {
                                 let complete =
