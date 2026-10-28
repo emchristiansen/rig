@@ -72,6 +72,192 @@ fn codex_store_sends_store_false_over_any_stored_value() {
 }
 
 #[test]
+fn codex_instruction_rewrite_propagates_invalid_merged_operand_errors() {
+    const INSTRUCTIONS: &str = "Standard Codex instructions must be a string or null";
+    const INPUT: &str = "Standard Codex instructions require an input array or string";
+    for (base, provider, raw, expected) in [
+        (
+            json!({"instructions": false, "input": []}),
+            json!({}),
+            json!({}),
+            INSTRUCTIONS,
+        ),
+        (
+            json!({"instructions": 7, "input": []}),
+            json!({}),
+            json!({}),
+            INSTRUCTIONS,
+        ),
+        (
+            json!({"instructions": [], "input": []}),
+            json!({}),
+            json!({}),
+            INSTRUCTIONS,
+        ),
+        (
+            json!({"instructions": {}, "input": []}),
+            json!({}),
+            json!({}),
+            INSTRUCTIONS,
+        ),
+        (
+            json!({"instructions": "base"}),
+            json!({}),
+            json!({}),
+            INPUT,
+        ),
+        (
+            json!({"instructions": "base", "input": null}),
+            json!({}),
+            json!({}),
+            INPUT,
+        ),
+        (
+            json!({"instructions": "base", "input": false}),
+            json!({}),
+            json!({}),
+            INPUT,
+        ),
+        (
+            json!({"instructions": "base", "input": 7}),
+            json!({}),
+            json!({}),
+            INPUT,
+        ),
+        (
+            json!({"instructions": "base", "input": {}}),
+            json!({}),
+            json!({}),
+            INPUT,
+        ),
+        (
+            json!({"instructions": "base", "input": []}),
+            json!({"instructions": false}),
+            json!({}),
+            INSTRUCTIONS,
+        ),
+        (
+            json!({"instructions": "base", "input": []}),
+            json!({"input": {}}),
+            json!({}),
+            INPUT,
+        ),
+        (
+            json!({"instructions": "base", "input": []}),
+            json!({"instructions": "provider"}),
+            json!({"input": false}),
+            INPUT,
+        ),
+    ] {
+        let request = CompletionRequest::new("hi")
+            .provider_options(
+                serde_json::from_value(json!({"fake": {"fake.chat": provider}}))
+                    .expect("the provider section is an object"),
+            )
+            .additional_params(raw);
+        let error: crate::error::ProviderError = request_params(
+            &Fake(crate::test_utils::refuse_options),
+            &request,
+            |_| Ok(object(base)),
+            RawAt::Top,
+            &[Rewrite::ResponsesCodexInstructions(None)],
+        )
+        .expect_err("the merged malformed operand cannot produce a final body")
+        .into();
+        match error {
+            crate::error::ProviderError::Request(source) => {
+                assert_eq!(source.to_string(), expected);
+            }
+            other => panic!("expected the request refusal {expected:?}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn codex_instruction_rewrite_uses_effective_options_and_preserves_the_whole_body() {
+    let original_input = json!([{"type":"message","role":"user","id":"user-1",
+        "content":[{"type":"input_text","text":"question"}],"extra":7}]);
+    for (instructions, provider, raw, expected) in [
+        (
+            json!("base"),
+            json!({}),
+            json!({}),
+            json!({"model":"m","store":false,"metadata":{"kept":1},"input":[
+                {"type":"message","role":"developer",
+                 "content":[{"type":"input_text","text":"base"}],
+                 "internal_chat_message_metadata_passthrough":{
+                     "content_item_kinds":["model.base_instructions"]}},
+                {"type":"message","role":"user","id":"user-1",
+                 "content":[{"type":"input_text","text":"question"}],"extra":7}]}),
+        ),
+        (
+            json!(false),
+            json!({"instructions":"provider"}),
+            json!({}),
+            json!({"model":"m","store":false,"metadata":{"kept":1},"input":[
+                {"type":"message","role":"developer",
+                 "content":[{"type":"input_text","text":"provider"}],
+                 "internal_chat_message_metadata_passthrough":{
+                     "content_item_kinds":["model.base_instructions"]}},
+                {"type":"message","role":"user","id":"user-1",
+                 "content":[{"type":"input_text","text":"question"}],"extra":7}]}),
+        ),
+        (
+            json!("base"),
+            json!({"instructions":false}),
+            json!({"instructions":""}),
+            json!({"model":"m","store":false,"metadata":{"kept":1},
+                "input":original_input}),
+        ),
+        (
+            json!("base"),
+            json!({"instructions":false}),
+            json!({"instructions":null}),
+            json!({"model":"m","store":false,"metadata":{"kept":1},
+                "input":original_input}),
+        ),
+        (
+            json!("base"),
+            json!({"instructions":null}),
+            json!({}),
+            json!({"model":"m","store":false,"metadata":{"kept":1},
+                "input":original_input}),
+        ),
+        (
+            json!("base"),
+            json!({}),
+            json!({"input":"raw question"}),
+            json!({"model":"m","store":false,"metadata":{"kept":1},"input":[
+                {"type":"message","role":"developer",
+                 "content":[{"type":"input_text","text":"base"}],
+                 "internal_chat_message_metadata_passthrough":{
+                     "content_item_kinds":["model.base_instructions"]}},
+                {"type":"message","role":"user",
+                 "content":[{"type":"input_text","text":"raw question"}]}]}),
+        ),
+    ] {
+        let request = CompletionRequest::new("hi")
+            .provider_options(
+                serde_json::from_value(json!({"fake": {"fake.chat": provider}}))
+                    .expect("the provider section is an object"),
+            )
+            .additional_params(raw);
+        let body = request_params(
+            &Fake(crate::test_utils::refuse_options),
+            &request,
+            |_| {
+                Ok(object(json!({"model":"m","store":false,"metadata":{"kept":1},
+                    "instructions":instructions,"input":original_input})))
+            },
+            RawAt::Top,
+            &[Rewrite::ResponsesCodexInstructions(None)],
+        )
+        .expect("the effective valid options produce a final body");
+        assert_eq!(body, FinalBody(object(expected)));
+    }
+}
+
+#[test]
 fn reasoning_ciphertext_asks_for_the_ciphertext_only_when_the_body_reasons_or_stores_nothing() {
     const CIPHERTEXT: &str = "reasoning.encrypted_content";
     for (always, base, expected) in [

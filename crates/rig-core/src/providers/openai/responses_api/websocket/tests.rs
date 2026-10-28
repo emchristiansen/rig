@@ -953,6 +953,68 @@ fn session_over(script: &Script) -> ResponsesWebSocketSession {
     )
 }
 
+#[test]
+fn input_delta_refuses_empty_input_and_preserves_nonempty_source_provenance() {
+    let error = InputDelta::new(Vec::new()).expect_err("an empty source delta is refused");
+    let _: &EmptyInputDeltaError = &error;
+    assert_eq!(
+        error.to_string(),
+        "an incremental delta must carry at least one input item"
+    );
+    let source = vec![
+        InputDeltaItem::Canonical(crate::message::Message::user("first")),
+        InputDeltaItem::Raw(json!({"type":"message","id":"literal-1","role":"user",
+            "content":[{"type":"input_text","text":"second"}],"extra":{"kept":true}})),
+    ];
+    let delta = InputDelta::new(source.clone()).expect("nonempty source items are accepted");
+    assert_eq!(delta.into_vec(), source);
+}
+
+#[tokio::test]
+async fn continuation_refuses_an_in_flight_turn_without_changing_its_custody() {
+    let script = Script::new().turn([completed_event("resp_guard")]);
+    let mut session = session_over(&script);
+    session
+        .send(user_request("kept"))
+        .await
+        .expect("the full request sends");
+    let sent = script.sent();
+    let unread = script.unread();
+    let envelope = match &session.continuation {
+        Continuation::InFlight(envelope) => envelope.body.clone(),
+        other => panic!("expected the in-flight envelope, got {other:?}"),
+    };
+    assert_eq!(sent.len(), 1);
+    assert_eq!(unread, 1);
+    assert_eq!(session.previous_response_id(), None);
+    assert_eq!(
+        session.continuation().expect_err("the turn has not completed"),
+        IncrementalSendRefused::LastTurnNotCompleted
+    );
+    assert!(session.in_flight);
+    assert_eq!(script.sent(), sent);
+    assert_eq!(script.unread(), unread);
+    assert_eq!(script.flushes(), 0);
+    assert_eq!(session.previous_response_id(), None);
+    match &session.continuation {
+        Continuation::InFlight(current) => assert_eq!(current.body, envelope),
+        other => panic!("the refusal changed the in-flight envelope: {other:?}"),
+    }
+
+    let response = session
+        .wait_for_completed_response()
+        .await
+        .expect("the same queued response completes");
+    assert_eq!(response.get("id"), Some(&json!("resp_guard")));
+    assert!(!session.in_flight);
+    assert_eq!(session.previous_response_id(), Some("resp_guard"));
+    let (current, tip) = session.continuation().expect("the completed tip is eligible");
+    assert_eq!(tip, "resp_guard");
+    assert_eq!(current.body, envelope);
+    assert_eq!(script.sent(), sent);
+    assert_eq!(script.unread(), 0);
+}
+
 /// A session over a connection someone else opened, on the ChatGPT dialect
 /// without the caller's exact identity, refuses every send before a frame
 /// is written: Rig made no handshake of its own to refuse.
