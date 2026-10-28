@@ -157,7 +157,10 @@ fn a_build_dropped_part_way_releases_its_driver_and_socket() {
         })
         .await
     });
-    assert!(abandoned.is_pending(), "the build did not finish in one poll");
+    assert!(
+        abandoned.is_pending(),
+        "the build did not finish in one poll"
+    );
     assert_everything_released(&runtime, port);
 }
 
