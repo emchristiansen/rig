@@ -144,9 +144,13 @@ fn a_failed_negotiation_that_drops_the_peer_releases_its_driver_and_socket() {
 
 #[test]
 fn a_build_dropped_part_way_releases_its_driver_and_socket() {
-    let runtime = runtime();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
     let port = free_udp_port();
-    // One poll starts the construction; dropping the future then abandons it.
+    // The first root poll spawns construction and waits on its handle. A
+    // current-thread runtime prevents construction from completing concurrently.
     let abandoned = runtime.block_on(async {
         tokio::time::timeout(Duration::ZERO, loopback_builder(port).build()).await
     });
