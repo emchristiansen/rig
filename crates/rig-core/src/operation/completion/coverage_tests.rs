@@ -144,6 +144,112 @@ fn carried_reasoning(value: &str) -> CarriedReasoning {
 }
 
 #[test]
+fn reasoning_authority_refusals_leave_items_and_events_unchanged() {
+    use super::{Body, Closing, Items};
+    use crate::streaming::ReasoningAuthority;
+
+    for authority in [
+        ReasoningAuthority::Partial,
+        ReasoningAuthority::ProviderRestated,
+    ] {
+        let mut turn = Turn::new(origin());
+        let mut items = Items::new();
+        let native = json!({"type":"text","text":"kept","extra":{"kept":true}});
+        turn.open_item(&mut items, 0, Block::Text, native.clone())
+            .expect("the text item opens");
+        turn.push_item(&mut items, 0, "kept")
+            .expect("the text fragment is accepted");
+        let before = [
+            start(0, PartKind::Text),
+            StreamEvent::Text {
+                part: Part::new(0),
+                text: "kept".to_owned(),
+            },
+        ];
+
+        for index in [9, 0] {
+            refused(
+                turn.close_item_with_reasoning_authority(
+                    &mut items,
+                    index,
+                    Closing::Complete,
+                    Some(authority),
+                ),
+                &format!(
+                    "the reply assigned reasoning authority to item {index}, which is not reasoning"
+                ),
+            );
+            assert_eq!(turn.open.len(), 1);
+            let draft = turn.open.get(&0).expect("the text item is still open");
+            assert_eq!(draft.item, native);
+            assert_eq!(draft.part, Part::new(0));
+            assert_eq!(draft.source_order, None);
+            assert_eq!(draft.tool_slot_state, None);
+            assert!(draft.started);
+            assert!(draft.citations.is_empty());
+            assert!(matches!(&draft.body, Body::Text(text) if text == "kept"));
+            assert_eq!(turn.next_part, 1);
+            assert!(turn.ended.is_empty());
+            assert!(turn.snapshot().is_empty());
+            assert_eq!(items.len(), before.len());
+            for (actual, expected) in items.iter().zip(&before) {
+                assert!(matches!(actual, Ok(Item::Event(event)) if event == expected));
+            }
+        }
+
+        turn.close_item(&mut items, 0, Closing::Complete)
+            .expect("ordinary text still closes without reasoning authority");
+        let reasoning = json!({"type":"reasoning","id":"reasoning-1"});
+        turn.open_item(
+            &mut items,
+            1,
+            Block::Reasoning { redacted: false },
+            reasoning.clone(),
+        )
+        .expect("the reasoning item opens");
+        turn.push_item(&mut items, 1, "thought")
+            .expect("the reasoning fragment is accepted");
+        turn.close_item_with_reasoning_authority(
+            &mut items,
+            1,
+            Closing::Complete,
+            Some(authority),
+        )
+        .expect("reasoning closes with its stated authority");
+        let expected = [
+            before[0].clone(),
+            before[1].clone(),
+            end(
+                0,
+                AssistantContent::Text(Text::new("kept")).with_native(native),
+            ),
+            start(1, PartKind::Reasoning),
+            StreamEvent::Reasoning {
+                part: Part::new(1),
+                text: "thought".to_owned(),
+            },
+            StreamEvent::End {
+                part: Part::new(1),
+                content: AssistantContent::Reasoning(Reasoning {
+                    text: "thought".to_owned(),
+                    redacted: false,
+                    native: None,
+                })
+                .with_native(reasoning),
+                reasoning_authority: Some(authority),
+            },
+        ];
+        assert!(turn.open.is_empty());
+        assert_eq!(turn.ended.get(&0), Some(&0));
+        assert_eq!(turn.ended.get(&1), Some(&1));
+        assert_eq!(items.len(), expected.len());
+        for (actual, expected) in items.iter().zip(&expected) {
+            assert!(matches!(actual, Ok(Item::Event(event)) if event == expected));
+        }
+    }
+}
+
+#[test]
 fn a_wire_without_a_replay_target_is_refused_by_prepare_and_folds_under_its_own_name() {
     match Completion::prepare(
         CompletionRequest::new("question"),
