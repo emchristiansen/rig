@@ -149,12 +149,15 @@ fn a_build_dropped_part_way_releases_its_driver_and_socket() {
         .build()
         .expect("a runtime");
     let port = free_udp_port();
-    // The first root poll spawns construction and waits on its handle. A
-    // current-thread runtime prevents construction from completing concurrently.
+    // Poll build once, then drop it before this runtime drives construction.
     let abandoned = runtime.block_on(async {
-        tokio::time::timeout(Duration::ZERO, loopback_builder(port).build()).await
+        let mut building = std::pin::pin!(loopback_builder(port).build());
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(building.as_mut(), cx))
+        })
+        .await
     });
-    assert!(abandoned.is_err(), "the build did not finish in one poll");
+    assert!(abandoned.is_pending(), "the build did not finish in one poll");
     assert_everything_released(&runtime, port);
 }
 
