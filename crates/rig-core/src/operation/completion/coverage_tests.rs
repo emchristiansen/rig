@@ -209,13 +209,8 @@ fn reasoning_authority_refusals_leave_items_and_events_unchanged() {
         .expect("the reasoning item opens");
         turn.push_item(&mut items, 1, "thought")
             .expect("the reasoning fragment is accepted");
-        turn.close_item_with_reasoning_authority(
-            &mut items,
-            1,
-            Closing::Complete,
-            Some(authority),
-        )
-        .expect("reasoning closes with its stated authority");
+        turn.close_item_with_reasoning_authority(&mut items, 1, Closing::Complete, Some(authority))
+            .expect("reasoning closes with its stated authority");
         let expected = [
             before[0].clone(),
             before[1].clone(),

@@ -100,12 +100,7 @@ fn codex_instruction_rewrite_propagates_invalid_merged_operand_errors() {
             json!({}),
             INSTRUCTIONS,
         ),
-        (
-            json!({"instructions": "base"}),
-            json!({}),
-            json!({}),
-            INPUT,
-        ),
+        (json!({"instructions": "base"}), json!({}), json!({}), INPUT),
         (
             json!({"instructions": "base", "input": null}),
             json!({}),
@@ -246,8 +241,10 @@ fn codex_instruction_rewrite_uses_effective_options_and_preserves_the_whole_body
             &Fake(crate::test_utils::refuse_options),
             &request,
             |_| {
-                Ok(object(json!({"model":"m","store":false,"metadata":{"kept":1},
-                    "instructions":instructions,"input":original_input})))
+                Ok(object(
+                    json!({"model":"m","store":false,"metadata":{"kept":1},
+                    "instructions":instructions,"input":original_input}),
+                ))
             },
             RawAt::Top,
             &[Rewrite::ResponsesCodexInstructions(None)],

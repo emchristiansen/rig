@@ -988,7 +988,9 @@ async fn continuation_refuses_an_in_flight_turn_without_changing_its_custody() {
     assert_eq!(unread, 1);
     assert_eq!(session.previous_response_id(), None);
     assert_eq!(
-        session.continuation().expect_err("the turn has not completed"),
+        session
+            .continuation()
+            .expect_err("the turn has not completed"),
         IncrementalSendRefused::LastTurnNotCompleted
     );
     assert!(session.in_flight);
@@ -1008,7 +1010,9 @@ async fn continuation_refuses_an_in_flight_turn_without_changing_its_custody() {
     assert_eq!(response.get("id"), Some(&json!("resp_guard")));
     assert!(!session.in_flight);
     assert_eq!(session.previous_response_id(), Some("resp_guard"));
-    let (current, tip) = session.continuation().expect("the completed tip is eligible");
+    let (current, tip) = session
+        .continuation()
+        .expect("the completed tip is eligible");
     assert_eq!(tip, "resp_guard");
     assert_eq!(current.body, envelope);
     assert_eq!(script.sent(), sent);
