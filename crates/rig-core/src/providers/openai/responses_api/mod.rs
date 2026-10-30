@@ -27,6 +27,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value, json};
 
 pub mod codex_identity;
+pub(crate) mod codex_request;
 /// Caller-held observation custody for one Responses operation.
 #[cfg(feature = "completion-observations")]
 pub mod observation;
@@ -1056,6 +1057,9 @@ impl wire::Responses {
         }
         if codex {
             rewrites.push(Rewrite::ResponsesCodex);
+            if self.codex_request_shape.is_standard() {
+                rewrites.push(Rewrite::ResponsesCodexInstructions(identity.cloned()));
+            }
         }
         rewrites.push(Rewrite::ResponsesLite {
             shape: self.codex_request_shape,
@@ -1565,6 +1569,9 @@ impl<'de> Deserialize<'de> for ResponsesRequestTool {
 ///
 /// Serialized because it is a field of the [`wire::Responses`] wire, which is
 /// data a host may store.
+/// In the Standard Codex shape, text lifted by [`Self::Instructions`] or
+/// [`Self::AllInstructions`] becomes a leading developer input message instead
+/// of the top-level `instructions` field.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemInstructionsPlacement {

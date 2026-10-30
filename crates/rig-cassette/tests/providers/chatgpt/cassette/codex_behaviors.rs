@@ -8,21 +8,23 @@
 
 use rig::message::{AssistantContent, Message};
 const CHATGPT_PROVIDER: &str = "chatgpt";
-use rig::providers::chatgpt;
+use rig::providers::{chatgpt, openai::OpenAIConfig};
 use rig::tool::Tool;
-use rig_test_support::cassette_models::MapWire;
+use rig_core::test_utils::{RecordingHttpClient, test_caller_identity};
+use rig_test_support::cassette_models::{MapWire, OpenAiModels};
 
-use super::super::support::{
-    recorded_include, with_chatgpt_cassette, with_chatgpt_cassette_default_instructions,
-};
+use super::super::support::{recorded_include, with_chatgpt_current_outbound};
 use crate::cassettes::recorded_interaction_bodies;
 use crate::support::{Adder, TOOLS_PREAMBLE};
 use rig::completion::CompletionRequest;
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn strict_tools_opt_in_roundtrip() {
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "codex_behaviors/strict_tools_opt_in_roundtrip",
+        recorded_interaction_bodies("chatgpt", "codex_behaviors/strict_tools_opt_in_roundtrip"),
         |client| async move {
             // The recorded request body locks the strict-tools contract:
             // `strict: true` plus the sanitized schema (additionalProperties
@@ -74,11 +76,17 @@ async fn strict_tools_opt_in_roundtrip() {
     .await;
 }
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn store_false_and_prompt_cache_fields_roundtrip() {
     let scenario = "codex_behaviors/store_false_and_prompt_cache_fields_roundtrip";
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "codex_behaviors/store_false_and_prompt_cache_fields_roundtrip",
+        recorded_interaction_bodies(
+            "chatgpt",
+            "codex_behaviors/store_false_and_prompt_cache_fields_roundtrip",
+        ),
         |client| async move {
             let model = client.completion(chatgpt::GPT_5_4);
             // The actual terminal raw keeps provider-only fields; usage is
@@ -125,34 +133,107 @@ async fn store_false_and_prompt_cache_fields_roundtrip() {
     );
 }
 
+/// Captures the current outbound instruction shape and decodes the original SSE.
+/// Classic recorded-request replay and provider acceptance remain unproven.
 #[tokio::test]
 async fn default_instructions_merge_with_explicit_preamble() {
-    with_chatgpt_cassette_default_instructions(
+    let recorded = recorded_interaction_bodies(
+        CHATGPT_PROVIDER,
         "codex_behaviors/default_instructions_merge_with_explicit_preamble",
-        "Default instruction marker: always include DEFAULT-CODEX-MARKER when asked for the default marker.",
-        |client| async move {
-            let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
-                .preamble("Explicit instruction marker: also include EXPLICIT-CODEX-MARKER.")
-                .additional_params(recorded_include())
-                .build();
-            let mut history = Vec::<Message>::new();
+    );
+    assert_eq!(
+        recorded.len(),
+        1,
+        "the original scenario records one interaction"
+    );
+    let (original_request, received_sse) = recorded
+        .into_iter()
+        .next()
+        .expect("the original scenario contains its one interaction");
+    assert_eq!(
+        received_sse.len(),
+        8995,
+        "the original received SSE stays unchanged"
+    );
+    let http = RecordingHttpClient::new(received_sse.into_bytes());
+    let caller_identity = test_caller_identity();
+    let config = OpenAIConfig::with_key(&chatgpt::DIALECT, "synthetic-test-key")
+        .with_caller_identity(caller_identity.clone())
+        .with_account_id("synthetic-account")
+        .with_instructions(
+            "Default instruction marker: always include DEFAULT-CODEX-MARKER when asked for the default marker.",
+        );
+    let client = OpenAiModels::new(config, http.clone());
+    let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
+        .preamble("Explicit instruction marker: also include EXPLICIT-CODEX-MARKER.")
+        .additional_params(recorded_include())
+        .build();
+    let mut history = Vec::<Message>::new();
 
-            let result = agent
-                .chat(
-                    "List the default marker and the explicit marker, and nothing else.",
-                    &mut history,
-                )
-                .await
-                .expect("default and explicit instructions should both reach the backend");
+    let result = agent
+        .chat(
+            "List the default marker and the explicit marker, and nothing else.",
+            &mut history,
+        )
+        .await
+        .expect("the agent should decode the original received SSE");
 
-            assert!(
-                result.output().contains("DEFAULT-CODEX-MARKER")
-                    && result.output().contains("EXPLICIT-CODEX-MARKER"),
-                "merged instructions should influence the answer, got {result:?}"
-            );
-        },
-    )
-    .await;
+    assert!(
+        result.output().contains("DEFAULT-CODEX-MARKER")
+            && result.output().contains("EXPLICIT-CODEX-MARKER"),
+        "the original recorded answer should retain both markers, got {result:?}"
+    );
+
+    let sent = http.requests();
+    assert_eq!(
+        sent.len(),
+        1,
+        "the actual agent chat sends exactly one request"
+    );
+    assert_eq!(sent[0].headers["originator"], caller_identity.originator());
+    assert_eq!(sent[0].headers["user-agent"], caller_identity.user_agent());
+    assert_eq!(
+        sent[0]
+            .headers
+            .get("version")
+            .map(|value| value.to_str().expect("the version header is text")),
+        caller_identity.version()
+    );
+    assert_eq!(sent[0].headers["chatgpt-account-id"], "synthetic-account");
+    let actual: serde_json::Value = serde_json::from_slice(sent[0].body.as_ref())
+        .expect("the captured whole request body is JSON");
+    let mut expected: serde_json::Value =
+        serde_json::from_str(&original_request).expect("the original whole request body is JSON");
+    let instructions = "Default instruction marker: always include DEFAULT-CODEX-MARKER when asked for the default marker.\n\nExplicit instruction marker: also include EXPLICIT-CODEX-MARKER.";
+    assert_eq!(
+        expected
+            .as_object_mut()
+            .expect("the original request is an object")
+            .shift_remove("instructions"),
+        Some(serde_json::json!(instructions))
+    );
+    expected["input"]
+        .as_array_mut()
+        .expect("the original input is an array")
+        .insert(
+            0,
+            serde_json::json!({
+                "type":"message", "role":"developer",
+                "content":[{"type":"input_text", "text":instructions}],
+                "internal_chat_message_metadata_passthrough":{
+                    "content_item_kinds":["model.base_instructions"],
+                },
+            }),
+        );
+    assert_eq!(
+        actual, expected,
+        "only the adopted instruction carrier differs from the original request"
+    );
+    assert!(actual.get("instructions").is_none());
+    assert_eq!(
+        actual["input"][0]["content"][0]["text"].as_str(),
+        Some(instructions)
+    );
 }
 
 #[cfg(test)]

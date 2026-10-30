@@ -22,7 +22,7 @@ use crate::wire::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::request_compression::RequestCompression;
+use super::request_compression::{BodyOrder, RequestCompression};
 use super::request_headers::RequestHeaders;
 use super::responses_lite::{CodexRequestShape, ResponsesLiteError};
 use super::streaming::{IncompleteTerminal, ResponsesDecoder, ResponsesStreamOptions};
@@ -123,7 +123,12 @@ impl Responses {
             "Responses completion request",
             &body,
         );
-        let (builder, body) = self.request_compression.apply(builder, body)?;
+        let order = if codex && self.codex_request_shape.is_standard() {
+            BodyOrder::RoutingFirst
+        } else {
+            BodyOrder::Original
+        };
+        let (builder, body) = self.request_compression.apply(builder, body, order)?;
         let request = builder
             .header(http::header::CONTENT_TYPE, "application/json")
             .body(body.into_body())?;

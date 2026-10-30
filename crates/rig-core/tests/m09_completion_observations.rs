@@ -609,9 +609,17 @@ async fn terminal_only_output_preserves_opaque_parts_usage_and_the_whole_head() 
     handle.inspect(|view| assert_eq!(view.stage, ObservationStage::NativeSucceeded));
     let sent = http.sent_request();
     let request_body: Value = serde_json::from_slice(sent.body()).expect("request JSON");
+    assert!(request_body.get("instructions").is_none());
     assert_eq!(
-        request_body.get("instructions"),
-        Some(&json!("caller preamble"))
+        request_body.pointer("/input/0"),
+        Some(&json!({
+            "type": "message",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "caller preamble"}],
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["model.base_instructions"]
+            }
+        }))
     );
     assert_eq!(
         sent.uri().to_string(),
@@ -1678,9 +1686,17 @@ async fn observed_and_ordinary_streams_send_the_same_request() {
     let ordinary: Value = serde_json::from_slice(ordinary.body()).expect("ordinary request JSON");
     let observed: Value = serde_json::from_slice(observed.body()).expect("observed request JSON");
     assert_eq!(observed, ordinary);
+    assert!(observed.get("instructions").is_none());
     assert_eq!(
-        observed.get("instructions"),
-        Some(&json!("caller preamble"))
+        observed.pointer("/input/0"),
+        Some(&json!({
+            "type": "message",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "caller preamble"}],
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["model.base_instructions"]
+            }
+        }))
     );
     assert_eq!(observed.get("model"), Some(&json!("requested-model")));
     assert_eq!(observed.get("stream"), Some(&json!(true)));

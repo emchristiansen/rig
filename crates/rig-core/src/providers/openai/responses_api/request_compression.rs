@@ -32,6 +32,11 @@ pub enum RequestCompression {
     Zstd,
 }
 
+pub(super) enum BodyOrder {
+    Original,
+    RoutingFirst,
+}
+
 impl RequestCompression {
     /// Whether bodies are sent as they are.
     #[must_use]
@@ -44,8 +49,14 @@ impl RequestCompression {
         self,
         builder: http::request::Builder,
         body: FinalBody,
+        order: BodyOrder,
     ) -> Result<(http::request::Builder, EncodedBody), EncodeError> {
-        let body = serde_json::to_vec(&body)?;
+        let body = match order {
+            BodyOrder::Original => serde_json::to_vec(&body)?,
+            BodyOrder::RoutingFirst => {
+                serde_json::to_vec(&super::codex_request::RoutingFirst(&body))?
+            }
+        };
         match self {
             Self::None => Ok((builder, EncodedBody(body))),
             #[cfg(all(feature = "request-compression", not(target_family = "wasm")))]

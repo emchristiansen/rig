@@ -463,6 +463,115 @@ async fn the_response_create_frame_carries_the_codex_shaping() {
     openapi_schema::assert_invalid(Schema::WebSocketResponseCreate, &bad_envelope);
 }
 
+#[tokio::test]
+async fn standard_codex_prefix_and_routing_survive_full_and_incremental_sends() {
+    let wire = codex_wire()
+        .provider
+        .with_instructions("provider base")
+        .responses("gpt-5.4");
+    let identity =
+        CodexIdentity::from_ids("session-derived", "thread-derived").expect("Codex identity");
+    let script = Script::new()
+        .turn([completed("resp_1")])
+        .turn([completed("resp_2")]);
+    let mut session =
+        CodexWebSocketSession::from_connection(wire, identity, script.connection(), None)
+            .expect("Codex session");
+    session
+        .completion(
+            user_request("first")
+                .preamble("caller base")
+                .additional_params(json!({"service_tier":"priority"})),
+        )
+        .await
+        .expect("full turn completes");
+    session
+        .send_incremental(delta("second"))
+        .await
+        .expect("delta sends");
+
+    let frames = script.sent_json();
+    assert_eq!(frames.len(), 2);
+    assert_eq!(
+        frames[0]["input"][0],
+        json!({
+            "type":"message", "role":"developer",
+            "id":"msg_3333557a-9135-5aeb-b8f2-d31c4d718f4b",
+            "content":[{"type":"input_text", "text":"provider base\n\ncaller base"}],
+            "internal_chat_message_metadata_passthrough":{"content_item_kinds":["model.base_instructions"]},
+        })
+    );
+    assert_eq!(frames[0]["input"][1]["content"][0]["text"], "first");
+    assert_eq!(frames[0]["input"].as_array().expect("input array").len(), 2);
+    assert_eq!(
+        frames[1]["input"],
+        json!([
+            {"type":"message", "role":"user", "content":[{"type":"input_text", "text":"second"}]},
+        ])
+    );
+    assert_eq!(frames[1]["previous_response_id"], "resp_1");
+    for (frame, bytes) in frames.iter().zip(script.sent()) {
+        assert!(frame.get("instructions").is_none());
+        assert_eq!(frame["prompt_cache_key"], "thread-derived");
+        assert_eq!(
+            frame["client_metadata"],
+            json!({"session_id":"session-derived", "thread_id":"thread-derived"})
+        );
+        assert!(
+            bytes.starts_with(r#"{"model":"gpt-5.4","stream":true,"service_tier":"priority","#)
+        );
+    }
+}
+
+#[tokio::test]
+async fn standard_codex_provider_overrides_shape_the_full_prefix_before_a_delta() {
+    let identity =
+        CodexIdentity::from_ids("session-derived", "thread-derived").expect("Codex identity");
+    let script = Script::new()
+        .turn([completed("resp_override")])
+        .turn([completed("resp_delta")]);
+    let mut session =
+        CodexWebSocketSession::from_connection(codex_wire(), identity, script.connection(), None)
+            .expect("Codex session");
+    let user = json!({
+        "type":"message", "role":"user", "content":[{"type":"input_text", "text":"replacement input"}],
+    });
+    session.completion(user_request("superseded input")
+        .preamble("superseded base")
+        .provider_options(serde_json::from_value(json!({
+            "chatgpt": {"openai.responses": {"instructions":"replacement", "input":[user.clone()]}},
+        })).expect("provider options")))
+        .await.expect("full turn completes");
+    session
+        .send_incremental(delta("second"))
+        .await
+        .expect("delta sends");
+    let frames = script.sent_json();
+    assert_eq!(frames.len(), 2);
+    assert_eq!(
+        frames[0]["input"],
+        json!([
+            {
+                "type":"message", "role":"developer",
+                "id":"msg_1a335eab-ab49-5936-ad27-19394011fcaa",
+                "content":[{"type":"input_text", "text":"replacement"}],
+                "internal_chat_message_metadata_passthrough":{"content_item_kinds":["model.base_instructions"]},
+            },
+            user,
+        ])
+    );
+    assert_eq!(
+        frames[1]["input"],
+        json!([
+            {"type":"message", "role":"user", "content":[{"type":"input_text", "text":"second"}]},
+        ])
+    );
+    assert_eq!(frames[1]["previous_response_id"], "resp_override");
+    for frame in frames {
+        assert!(frame.get("instructions").is_none());
+    }
+}
+
 /// Lite full sends carry one deterministic prefix and the per-frame marker;
 /// incremental sends carry the marker and delta only.
 #[tokio::test]
@@ -1609,6 +1718,21 @@ impl crate::ws_client::WebSocketClientExt for ScriptBackend {
 
 // ── the Codex session-start prewarm ─────────────────────────────────────
 
+fn assert_standard_instruction_prefix(frame: &serde_json::Value, text: &str) {
+    assert!(frame.get("instructions").is_none(), "got {frame}");
+    let prefix = &frame["input"][0];
+    assert_eq!(prefix["type"], "message");
+    assert_eq!(prefix["role"], "developer");
+    assert_eq!(
+        prefix["content"],
+        json!([{"type":"input_text", "text":text}])
+    );
+    assert_eq!(
+        prefix["internal_chat_message_metadata_passthrough"]["content_item_kinds"],
+        json!(["model.base_instructions"])
+    );
+}
+
 /// The session's standing request with no conversation yet: its
 /// instructions and nothing else, as Codex's startup prewarm builds it
 /// (`build_prompt(Vec::new(), …)`).
@@ -1619,8 +1743,8 @@ fn prewarm_request() -> completion::CompletionRequest {
     }
 }
 
-/// Codex 0.155.1 opens a fresh session with a prewarm: a `generate: false`
-/// `response.create` with empty input and the prewarm's metadata, waited on
+/// The Standard Codex prewarm sends a `generate: false` `response.create`
+/// with a developer instruction prefix and no conversation items, and waits
 /// until it completes. The first turn then continues it on the same
 /// connection: `previous_response_id` names the prewarm's response, the input
 /// is the turn's items alone, and the turn's own metadata replaces the
@@ -1672,7 +1796,11 @@ async fn the_codex_prewarm_sequence_is_a_warmup_then_an_incremental_first_turn()
 
     assert_eq!(prewarm["generate"], false);
     assert!(prewarm.get("previous_response_id").is_none());
-    assert_eq!(prewarm["input"], json!([]), "the prewarm carries no input");
+    assert_standard_instruction_prefix(
+        prewarm,
+        "You are ChatGPT, a helpful AI assistant.\n\nStanding instructions.",
+    );
+    assert_eq!(prewarm["input"].as_array().expect("input array").len(), 1);
     assert_eq!(prewarm["client_metadata"]["turn_id"], "");
     assert_eq!(
         prewarm["client_metadata"]["x-codex-turn-metadata"],
@@ -1683,6 +1811,13 @@ async fn the_codex_prewarm_sequence_is_a_warmup_then_an_incremental_first_turn()
     assert_eq!(turn["previous_response_id"], "resp_prewarm");
     let input = serde_json::to_string(&turn["input"]).expect("input serializes");
     assert!(input.contains("FIRST_TURN_MARKER"), "got {input}");
+    assert!(turn.get("instructions").is_none());
+    assert_eq!(
+        turn["input"],
+        json!([
+            {"type":"message", "role":"user", "content":[{"type":"input_text", "text":"FIRST_TURN_MARKER"}]},
+        ])
+    );
     assert_eq!(turn["client_metadata"]["turn_id"], "turn-1");
     assert_eq!(
         turn["client_metadata"][TURN_STATE_METADATA_KEY],
@@ -1861,10 +1996,8 @@ async fn the_lite_prewarm_carries_only_the_prefix_and_the_first_turn_only_its_it
 }
 
 /// A ChatGPT wire that lifts only the leading run of system messages into
-/// `instructions`, as a caller that keeps mid-conversation system messages in
-/// place configures it. It carries none of the dialect's default
-/// instructions, so a frame's `instructions` are exactly what the placement
-/// lifted.
+/// the developer prefix and keeps mid-conversation system messages in place.
+/// Without default instructions, the prefix text is exactly what was lifted.
 fn leading_instructions_wire() -> Responses {
     let mut provider = OpenAIConfig::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
         .with_caller_identity(crate::test_utils::test_caller_identity())
@@ -1877,9 +2010,8 @@ fn leading_instructions_wire() -> Responses {
 
 /// Under the leading-run placement a request of only instructions keeps them
 /// in `input` when it generates, so it is not empty. The prewarm generates
-/// nothing, so it lifts them as Codex's prewarm sends them: `instructions`
-/// with an empty input. The first turn continues it with the same
-/// `instructions`, as a delta on the prewarm.
+/// nothing, so it lifts them into the developer prefix without conversation
+/// items. The first turn sends only its delta on the prewarm's context.
 #[tokio::test]
 async fn the_prewarm_lifts_its_instructions_under_the_leading_run_placement() {
     let script = Script::new()
@@ -1907,10 +2039,10 @@ async fn the_prewarm_lifts_its_instructions_under_the_leading_run_placement() {
     assert_eq!(frames.len(), 2);
     let (prewarm, turn) = (&frames[0], &frames[1]);
     assert_eq!(prewarm["generate"], false);
-    assert_eq!(prewarm["input"], json!([]), "got {prewarm}");
-    assert_eq!(prewarm["instructions"], "Standing instructions.");
+    assert_standard_instruction_prefix(prewarm, "Standing instructions.");
+    assert_eq!(prewarm["input"].as_array().expect("input array").len(), 1);
     assert_eq!(turn["previous_response_id"], "resp_prewarm");
-    assert_eq!(turn["instructions"], "Standing instructions.");
+    assert!(turn.get("instructions").is_none());
     let turn_input = serde_json::to_string(&turn["input"]).expect("input serializes");
     assert!(turn_input.contains("FIRST_TURN_MARKER"), "got {turn_input}");
     assert!(
@@ -1964,7 +2096,7 @@ async fn the_lite_prewarm_lifts_its_instructions_under_the_leading_run_placement
 /// Generating requests are unchanged by the prewarm's lift: under the
 /// leading-run placement a request of only system messages still sends them
 /// in `input` with no `instructions`, and a request whose system messages
-/// open a conversation still lifts only that leading run.
+/// open a conversation lifts only that leading run into the developer prefix.
 #[tokio::test]
 async fn generating_requests_keep_the_leading_run_placement() {
     let script = Script::new()
@@ -2010,9 +2142,17 @@ async fn generating_requests_keep_the_leading_run_placement() {
         "got {system_only_input}"
     );
 
-    assert_eq!(conversation["instructions"], "Standing instructions.");
+    assert_standard_instruction_prefix(conversation, "Standing instructions.");
+    assert_eq!(
+        conversation["input"].as_array().expect("input array").len(),
+        3
+    );
+    assert_eq!(conversation["input"][1]["role"], "user");
+    assert_eq!(conversation["input"][1]["content"][0]["text"], "hello");
+    assert_eq!(conversation["input"][2]["role"], "system");
     let conversation_input =
-        serde_json::to_string(&conversation["input"]).expect("input serializes");
+        serde_json::to_string(&conversation["input"].as_array().expect("input array")[1..])
+            .expect("input serializes");
     assert!(
         !conversation_input.contains("Standing instructions."),
         "got {conversation_input}"
@@ -2044,10 +2184,9 @@ async fn a_warmup_without_any_message_is_refused_and_writes_nothing() {
     assert!(script.sent_json().is_empty(), "nothing was written");
 }
 
-/// The generic session's warmup may carry no input too. Over the ChatGPT wire,
-/// which lifts system messages into `instructions`, a request of only
-/// instructions goes out as `generate: false` with an empty input, and the
-/// generic session still leaves `stream` off: only a Codex session states it.
+/// The generic session's Standard Codex warmup needs no conversation items:
+/// its instructions form the developer prefix. It leaves `stream` off;
+/// only a Codex session states it.
 #[tokio::test]
 async fn a_generic_session_warmup_may_carry_no_input() {
     let script = Script::new().turn([completed("resp_warm")]);
@@ -2063,8 +2202,12 @@ async fn a_generic_session_warmup_may_carry_no_input() {
     assert_eq!(frames.len(), 1, "one frame for the warmup: {frames:?}");
     let frame = &frames[0];
     assert_eq!(frame["generate"], false);
-    assert_eq!(frame["input"], json!([]), "the warmup carries no input");
-    assert!(frame["instructions"].is_string(), "got {frame}");
+    assert_standard_instruction_prefix(
+        frame,
+        "You are ChatGPT, a helpful AI assistant.\n\nStanding instructions.",
+    );
+    assert_eq!(frame["input"].as_array().expect("input array").len(), 1);
+    assert!(frame["input"][0].get("id").is_none());
     assert!(frame.get("stream").is_none(), "got {frame}");
 }
 
