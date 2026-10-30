@@ -1,95 +1,97 @@
 //! The operations a [`Wire`](crate::wire::Wire) can perform.
 //!
-//! Each operation declares request, event, response, and fold types.
-//! [`Completion`] streams events; other operations fold buffered replies,
-//! including pages for [`ModelListing`] and [`ContextCache`].
+//! Each operation declares its request, event, end and response types and
+//! the fold one reply goes through. [`Completion`] streams events; most
+//! others answer with one whole document, folded by [`Whole`]. Listings
+//! follow their cursors above the driver: each page is one call.
 //!
 //! ```
-//! use rig_core::{operation::Completion, wire::Operation};
+//! use rig_core::operation::{Completion, Embedding};
+//! use rig_core::wire::Operation;
 //!
-//! assert_eq!(Completion::NAME, "completion");
+//! fn streams<Op: Operation>() {}
+//! streams::<Completion>();
+//! streams::<Embedding>();
 //! ```
 
 use crate::error::ProviderError;
-use crate::wire::{Fold, Operation, Reply, Sink};
+use crate::wire::{Fold, Operation, Reply};
 
-mod cached_content;
-mod completion;
+pub(crate) mod completion;
+mod image_batch;
 mod listing;
 mod modality;
 mod verify;
 
-pub use cached_content::{CachedContentFold, ContextCache};
-pub use completion::{AdapterOutput, Completion, CompletionFold};
-pub use listing::{ModelListing, ModelListingFold};
+pub use completion::{Block, CallFragment, Completion, Finish, Turn, merge};
+pub use image_batch::CohereImageBatch;
+pub use listing::{ModelListing, ModelPage};
 #[cfg(feature = "audio")]
 pub use modality::AudioGeneration;
 #[cfg(feature = "image")]
 pub use modality::ImageGeneration;
-pub use modality::{
-    Embedding, EmbeddingCapabilities, ImageEmbedding, Rerank, RerankRequest, Transcription,
-};
+pub use modality::{Embedding, ImageEmbedding, Rerank, RerankRequest, Transcription};
 pub use verify::{Verify, VerifyDecoder};
 
-/// The sink of an operation whose reply is one event.
-pub struct One<Op: Operation> {
-    items: Vec<Result<Op::Event, ProviderError>>,
+/// The fold of an operation whose reply is one whole answer: it has no
+/// events, and the provider's end is the response. The stamp writes what
+/// the driver learned about the reply onto it.
+///
+/// ```
+/// use std::convert::Infallible;
+/// use rig_core::operation::Whole;
+/// use rig_core::wire::{Call, Free, Operation};
+///
+/// struct Echo;
+///
+/// impl Operation for Echo {
+///     type Request = String;
+///     type Event = Infallible;
+///     type End = String;
+///     type Response = String;
+///     type Fold = Whole<Self>;
+///     type Emit = Free;
+///
+///     fn fold(_request: &String, _call: &mut Call<'_>) -> Whole<Self> {
+///         Whole::<Self>::stamping(|response, reply| response.push_str(&reply.provider))
+///     }
+/// }
+/// ```
+pub struct Whole<Op: Operation> {
+    stamp: fn(&mut Op::Response, &Reply),
 }
 
-impl<Op: Operation> Default for One<Op> {
+impl<Op: Operation> Whole<Op> {
+    /// A fold that stamps nothing.
+    pub fn new() -> Self {
+        Self::stamping(|_, _| {})
+    }
+
+    /// A fold that writes what the driver learned about the reply onto the
+    /// response with `stamp`.
+    pub fn stamping(stamp: fn(&mut Op::Response, &Reply)) -> Self {
+        Self { stamp }
+    }
+}
+
+impl<Op: Operation> Default for Whole<Op> {
     fn default() -> Self {
-        Self { items: Vec::new() }
+        Self::new()
     }
 }
 
-impl<Op: Operation> Sink<Op> for One<Op> {
-    type Laws = ();
-
-    fn push(&mut self, item: Result<Op::Event, ProviderError>) {
-        self.items.push(item);
-    }
-
-    fn drain(&mut self) -> std::vec::Drain<'_, Result<Op::Event, ProviderError>> {
-        self.items.drain(..)
-    }
-
-    fn items(&self) -> &[Result<Op::Event, ProviderError>] {
-        &self.items
-    }
-}
-
-/// Retains the first event and ignores later events. Finishing without an
-/// event returns a decode error; otherwise reply metadata is stamped on the response.
-pub struct Take<Op: Operation> {
-    value: Option<Op::Event>,
-}
-
-impl<Op: Operation> Default for Take<Op> {
-    fn default() -> Self {
-        Self { value: None }
-    }
-}
-
-impl<Op> Fold<Op> for Take<Op>
+impl<Op> Fold<Op> for Whole<Op>
 where
-    Op: Operation,
-    Op::Event: Into<Op::Response>,
+    Op: Operation<Event = std::convert::Infallible>,
+    Op::End: Into<Op::Response>,
 {
-    fn absorb(&mut self, event: Op::Event) -> Result<(), ProviderError> {
-        if self.value.is_none() {
-            self.value = Some(event);
-        }
-        Ok(())
+    fn absorb(&mut self, event: &std::convert::Infallible) -> Result<(), ProviderError> {
+        match *event {}
     }
 
-    fn finish(self, reply: Reply) -> Result<Op::Response, ProviderError> {
-        let mut response: Op::Response = self
-            .value
-            .ok_or_else(|| {
-                ProviderError::Response(format!("{} reply carried no payload", Op::NAME))
-            })?
-            .into();
-        Op::stamp_reply(&mut response, reply);
+    fn finish(self, end: Op::End, reply: Reply) -> Result<Op::Response, ProviderError> {
+        let mut response = end.into();
+        (self.stamp)(&mut response, &reply);
         Ok(response)
     }
 }

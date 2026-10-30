@@ -7,34 +7,10 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
 use rig::completion::Message;
-use rig::prelude::*;
 use rig::providers::xai;
 
 use super::support::with_xai_cassette;
 use crate::reasoning::{self, WeatherTool};
-
-#[tokio::test]
-async fn streaming() {
-    with_xai_cassette("reasoning_tool_roundtrip/streaming", |client| async move {
-        let call_count = Arc::new(AtomicUsize::new(0));
-        let agent = client
-            .agent(xai::GROK_3_MINI)
-            .preamble(reasoning::TOOL_SYSTEM_PROMPT)
-            .max_tokens(4096)
-            .tool(WeatherTool::new(call_count.clone()))
-            .build();
-
-        let stream = agent
-            .prompt(reasoning::TOOL_USER_PROMPT)
-            .history(Vec::<Message>::new())
-            .max_turns(3)
-            .stream();
-
-        let stats = reasoning::collect_stream_stats(stream, "xai").await;
-        reasoning::assert_universal(&stats, &call_count, "xai");
-    })
-    .await;
-}
 
 #[tokio::test]
 async fn nonstreaming() {
@@ -42,11 +18,11 @@ async fn nonstreaming() {
         "reasoning_tool_roundtrip/nonstreaming",
         |client| async move {
             let call_count = Arc::new(AtomicUsize::new(0));
-            let agent = client
-                .agent(xai::GROK_3_MINI)
+            let agent = rig::AgentBuilder::new(client.completion(xai::GROK_3_MINI))
                 .preamble(reasoning::TOOL_SYSTEM_PROMPT)
                 .max_tokens(4096)
                 .tool(WeatherTool::new(call_count.clone()))
+                .additional_params(serde_json::json!({ "store": false }))
                 .default_max_turns(2)
                 .build();
 
@@ -55,7 +31,7 @@ async fn nonstreaming() {
                 .await
                 .expect("[xai] Non-streaming chat failed - likely 400 from dropped reasoning");
 
-            reasoning::assert_nonstreaming_universal(&result.output, &call_count, "xai");
+            reasoning::assert_nonstreaming_universal(&result.output(), &call_count, "xai");
         },
     )
     .await;

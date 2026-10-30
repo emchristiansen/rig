@@ -13,9 +13,9 @@ use aws_sdk_s3vectors::{
 };
 use aws_smithy_types::Document;
 use rig_core::{
-    embeddings::EmbeddingModel,
     vector_store::{
-        InsertDocuments, VectorStoreError, VectorStoreIndex,
+        InsertDocuments, VectorSearchIdResult, VectorSearchResult, VectorStoreError,
+        VectorStoreIndex,
         request::{DynamicSearchFilter, Filter, FilterError, SearchFilter, VectorSearchRequest},
     },
     wasm_compat::WasmCompatSend,
@@ -126,24 +126,24 @@ impl S3SearchFilter {
 
 /// Vector store backed by an S3Vectors index.
 ///
-/// Queries are embedded with the same model `M` that populated the index, so
+/// Queries are embedded with the same model that populated the index, so
 /// results are meaningless under another model.
-pub struct S3VectorsVectorStore<M> {
-    embedding_model: M,
+pub struct S3VectorsVectorStore {
+    embedding_model: rig_core::DynModel<rig_core::operation::Embedding>,
     client: Client,
     bucket_name: String,
     index_name: String,
 }
 
-impl<M: EmbeddingModel> S3VectorsVectorStore<M> {
+impl S3VectorsVectorStore {
     pub fn new(
-        embedding_model: M,
+        embedding_model: impl Into<rig_core::DynModel<rig_core::operation::Embedding>>,
         client: aws_sdk_s3vectors::Client,
         bucket_name: &str,
         index_name: &str,
     ) -> Self {
         Self {
-            embedding_model,
+            embedding_model: embedding_model.into(),
             client,
             bucket_name: bucket_name.to_string(),
             index_name: index_name.to_string(),
@@ -171,10 +171,10 @@ impl<M: EmbeddingModel> S3VectorsVectorStore<M> {
         return_metadata: bool,
     ) -> Result<Vec<(f64, aws_sdk_s3vectors::types::QueryOutputVector)>, VectorStoreError> {
         if req.samples() > i32::MAX as u64 {
-            return Err(VectorStoreError::BuilderError(format!(
-                "The number of samples to return with the `rig` AWS S3Vectors integration cannot be higher than {}",
-                i32::MAX
-            )));
+            return Err(VectorStoreError::SamplesOutOfRange {
+                requested: req.samples(),
+                max: i32::MAX as u64,
+            });
         }
 
         let embedding = self
@@ -228,7 +228,7 @@ impl<M: EmbeddingModel> S3VectorsVectorStore<M> {
     }
 }
 
-impl<M: EmbeddingModel> InsertDocuments for S3VectorsVectorStore<M> {
+impl InsertDocuments for S3VectorsVectorStore {
     async fn insert_documents<Doc: serde::Serialize + rig_core::Embed + WasmCompatSend>(
         &self,
         documents: Vec<(Doc, Vec<rig_core::embeddings::Embedding>)>,
@@ -319,16 +319,16 @@ fn document_to_json_value(value: &Document) -> Value {
     }
 }
 
-impl<M: EmbeddingModel> VectorStoreIndex for S3VectorsVectorStore<M> {
+impl VectorStoreIndex for S3VectorsVectorStore {
     type Filter = S3SearchFilter;
 
-    /// Returns matches as `(distance, vector key, metadata)`, where the metadata
-    /// is the stored [`CreateRecord`] wrapper. Errors when a hit carries no
+    /// Returns matches scored by distance and keyed by vector key. The document
+    /// is the stored [`CreateRecord`] metadata wrapper. Errors when a hit carries no
     /// metadata or it does not deserialize into `T`.
     async fn top_n<T: DeserializeOwned + WasmCompatSend>(
         &self,
         req: VectorSearchRequest<S3SearchFilter>,
-    ) -> Result<Vec<(f64, String, T)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchResult<T>>, VectorStoreError> {
         self.run_query(&req, true)
             .await?
             .into_iter()
@@ -339,22 +339,29 @@ impl<M: EmbeddingModel> VectorStoreIndex for S3VectorsVectorStore<M> {
                 let val = document_to_json_value(&metadata_document);
                 let metadata: T = serde_json::from_value(val)?;
 
-                Ok((distance, x.key, metadata))
+                Ok(VectorSearchResult {
+                    score: distance,
+                    id: x.key,
+                    document: metadata,
+                })
             })
             .collect()
     }
 
-    /// Like `top_n` but returns `(distance, vector key)` without requesting
+    /// Like `top_n` but returns distances and vector keys without requesting
     /// metadata.
     async fn top_n_ids(
         &self,
         req: VectorSearchRequest<S3SearchFilter>,
-    ) -> Result<Vec<(f64, String)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchIdResult>, VectorStoreError> {
         Ok(self
             .run_query(&req, false)
             .await?
             .into_iter()
-            .map(|(distance, x)| (distance, x.key))
+            .map(|(distance, x)| VectorSearchIdResult {
+                score: distance,
+                id: x.key,
+            })
             .collect())
     }
 }

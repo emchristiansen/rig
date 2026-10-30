@@ -5,19 +5,24 @@
 //! (nullable) fields, in both streaming and non-streaming form. Zero-argument
 //! calls are already covered by `agent_tools` and `streaming_tools`.
 //!
+//! The recordings send each schema as `parametersJsonSchema`, which the
+//! port's projection sends as `parameters`, so in replay every cell is an
+//! exact named request-mismatch witness and the argument shapes it pinned
+//! are named losses.
+//!
 //! Run cassette tests in replay mode by default, or set
 //! `RIG_PROVIDER_TEST_MODE=record` to record against the real provider.
 
-use rig::completion::{CompletionModel, Message, ToolDefinition};
-use rig::message::AssistantContent;
-use rig::prelude::*;
+use rig::completion::{Message, ToolDefinition};
 use rig::providers::gemini;
 use rig::tool::Tool;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::super::support::with_gemini_cassette;
-use crate::support::collect_raw_stream_observation;
+use super::super::request_witness_support::{
+    NamedCase, model_result, model_stream_result, with_gemini_request_witness_cassette,
+};
+use rig::completion::CompletionRequest;
 
 const NESTED_ARGS_PREAMBLE: &str = "\
 You are a travel booking assistant. Use the plan_trip tool for every booking request \
@@ -116,255 +121,106 @@ fn plan_trip_parameters() -> serde_json::Value {
     })
 }
 
-fn assert_expected_plan_trip_arguments(arguments: &serde_json::Value) {
-    let itinerary = arguments
-        .get("itinerary")
-        .expect("arguments should contain the nested itinerary object");
-    assert_eq!(
-        itinerary.get("city").and_then(|value| value.as_str()),
-        Some("Kyoto"),
-        "nested city should survive the wire format: {arguments:?}"
-    );
-    assert_eq!(
-        itinerary.get("days").and_then(serde_json::Value::as_u64),
-        Some(3),
-        "nested integer should survive the wire format: {arguments:?}"
-    );
-    assert_eq!(
-        itinerary.get("activities"),
-        Some(&json!(["temples", "tea ceremony"])),
-        "nested string array should survive the wire format: {arguments:?}"
-    );
-    let lodging = itinerary
-        .get("lodging")
-        .expect("arguments should contain the doubly nested lodging object");
-    assert_eq!(
-        lodging.get("name").and_then(|value| value.as_str()),
-        Some("Sakura Inn"),
-        "doubly nested string should survive the wire format: {arguments:?}"
-    );
-    assert_eq!(
-        lodging.get("rooms").and_then(serde_json::Value::as_u64),
-        Some(2),
-        "doubly nested integer should survive the wire format: {arguments:?}"
-    );
-}
-
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 5,
+/// mec-rig-schema-route-1 item 1(b)): the recording is unchanged; the only
+/// request difference is that declaration 0's recorded `parametersJsonSchema`
+/// is sent, value unchanged, as `parameters`, and replay refuses interaction
+/// 0. Named losses: the final answer repeating SAKURA-77 and the history's
+/// plan_trip call carrying the nested itinerary (city Kyoto, 3 days,
+/// activities `["temples", "tea ceremony"]`, lodging Sakura Inn with 2
+/// rooms).
 #[tokio::test]
-async fn nested_arguments_roundtrip_nonstreaming() {
-    with_gemini_cassette(
+async fn nested_arguments_roundtrip_nonstreaming() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
         "generate_tool_args/nested_arguments_roundtrip_nonstreaming",
-        |client| async move {
-            let agent = client
-                .agent(gemini::completion::GEMINI_2_5_FLASH)
-                .preamble(NESTED_ARGS_PREAMBLE)
-                .temperature(0.0)
-                .tool(PlanTrip)
-                .default_max_turns(4)
-                .build();
+        NamedCase::NestedArgumentsUnary,
+        |client, _clock| async move {
+            let agent =
+                rig::AgentBuilder::new(client.completion(gemini::completion::GEMINI_2_5_FLASH))
+                    .preamble(NESTED_ARGS_PREAMBLE)
+                    .temperature(0.0)
+                    .tool(PlanTrip)
+                    .default_max_turns(4)
+                    .build();
             let mut history = Vec::<Message>::new();
 
             let result = agent
                 .chat(NESTED_ARGS_PROMPT, &mut history)
                 .await
-                .expect("nested-args tool chat should succeed");
-
-            assert!(
-                result.output.contains("SAKURA-77"),
-                "final answer should repeat the tool's confirmation code, got {result:?}"
-            );
-
-            let arguments = history
-                .iter()
-                .find_map(|message| match message {
-                    Message::Assistant { content, .. } => {
-                        content.iter().find_map(|item| match item {
-                            AssistantContent::ToolCall(tool_call)
-                                if tool_call.function.name == PlanTrip::NAME =>
-                            {
-                                Some(tool_call.function.arguments.clone())
-                            }
-                            _ => None,
-                        })
-                    }
-                    _ => None,
-                })
-                .expect("chat history should record the plan_trip tool call");
-            assert_expected_plan_trip_arguments(&arguments);
+                .map(|_| ());
+            drop(agent);
+            Ok(result)
         },
     )
-    .await;
+    .await
 }
 
+/// Exact named mismatch witness on the streamed model call: the recording is
+/// unchanged; the only request difference is that declaration 0's recorded
+/// `parametersJsonSchema` is sent, value unchanged, as `parameters`, and
+/// replay refuses interaction 0.
+/// Named losses: a stream without errors whose plan_trip call carries the
+/// nested itinerary (city Kyoto, 3 days, activities
+/// `["temples", "tea ceremony"]`, lodging Sakura Inn with 2 rooms).
 #[tokio::test]
-async fn nested_arguments_streaming() {
-    with_gemini_cassette(
+async fn nested_arguments_streaming() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
         "generate_tool_args/nested_arguments_streaming",
-        |client| async move {
+        NamedCase::NestedArgumentsStreamed,
+        |client, _clock| async move {
             let model = client.completion(gemini::completion::GEMINI_2_5_FLASH);
-            let request = model
-                .completion_request(NESTED_ARGS_PROMPT)
+            let request = CompletionRequest::new(NESTED_ARGS_PROMPT)
                 .preamble(NESTED_ARGS_PREAMBLE.to_string())
                 .temperature(0.0)
-                .tool(rig::tool::tool_definition(&PlanTrip))
-                .build();
+                .tool(rig::tool::tool_definition(&PlanTrip));
 
-            let observation = collect_raw_stream_observation(
-                model
-                    .stream(request)
-                    .await
-                    .expect("nested-args streaming request should start"),
-            )
-            .await;
-
-            assert!(
-                observation.errors.is_empty(),
-                "stream should not emit errors: {:?}",
-                observation.errors
-            );
-            let tool_call = observation
-                .tool_calls
-                .iter()
-                .find(|tool_call| tool_call.function.name == PlanTrip::NAME)
-                .expect("stream should emit the plan_trip tool call");
-            assert_expected_plan_trip_arguments(&tool_call.function.arguments);
+            model_stream_result(model.stream(request)).await
         },
     )
-    .await;
+    .await
 }
 
+/// Exact named mismatch witness on the unary model call: the recording is
+/// unchanged; the only request difference is that declaration 0's recorded
+/// `parametersJsonSchema` (with the `note` member's `nullable: true`) is
+/// sent, value unchanged, as `parameters`, and replay refuses interaction 0. Named losses: the reply's log_event call with
+/// `name` "deploy" and `note` omitted or null.
 #[tokio::test]
-async fn unicode_arguments_streaming() {
-    with_gemini_cassette(
-        "generate_tool_args/unicode_arguments_streaming",
-        |client| async move {
-            let model = client.completion(gemini::completion::GEMINI_2_5_FLASH);
-            let request = model
-                .completion_request(
-                    "Call the echo tool exactly once with the message argument set to \
-                     exactly this text: Grüße aus 東京, from the \"naïve café\"!",
-                )
-                .preamble(
-                    "You must call the echo tool with the exact text the user provides. \
-                     Do not translate, reword, or drop any characters."
-                        .to_string(),
-                )
-                .temperature(0.0)
-                .tool(ToolDefinition {
-                    name: "echo".to_string(),
-                    description: "Echo a message back to the user.".to_string(),
-                    parameters: json!({
-                        "type": "object",
-                        "properties": {
-                            "message": { "type": "string" }
-                        },
-                        "required": ["message"]
-                    }),
-                })
-                .build();
-
-            let observation = collect_raw_stream_observation(
-                model
-                    .stream(request)
-                    .await
-                    .expect("unicode-args streaming request should start"),
-            )
-            .await;
-
-            assert!(
-                observation.errors.is_empty(),
-                "stream should not emit errors: {:?}",
-                observation.errors
-            );
-            let tool_call = observation
-                .tool_calls
-                .iter()
-                .find(|tool_call| tool_call.function.name == "echo")
-                .expect("stream should emit the echo tool call");
-            let message = tool_call
-                .function
-                .arguments
-                .get("message")
-                .and_then(|value| value.as_str())
-                .expect("echo arguments should contain a message string");
-            for expected in ["Grüße", "東京", "naïve café"] {
-                assert!(
-                    message.contains(expected),
-                    "streamed unicode arguments should preserve {expected:?}, got {message:?}"
-                );
-            }
-        },
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn optional_nullable_argument_omitted_when_not_requested() {
-    with_gemini_cassette(
+async fn optional_nullable_argument_omitted_when_not_requested() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
         "generate_tool_args/optional_nullable_argument_omitted_when_not_requested",
-        |client| async move {
+        NamedCase::OptionalNullableArgument,
+        |client, _clock| async move {
             let model = client.completion(gemini::completion::GEMINI_2_5_FLASH);
-            let request = model
-                .completion_request(
-                    "Log an event named \"deploy\" using the log_event tool. \
+            let request = CompletionRequest::new(
+                "Log an event named \"deploy\" using the log_event tool. \
                      Do not attach a note.",
-                )
-                .preamble(
-                    "Use the log_event tool for every logging request. Only fill optional \
+            )
+            .preamble(
+                "Use the log_event tool for every logging request. Only fill optional \
                      arguments when the user explicitly provides them."
-                        .to_string(),
-                )
-                .temperature(0.0)
-                .tool(ToolDefinition {
-                    name: "log_event".to_string(),
-                    description: "Record an event with an optional free-form note.".to_string(),
-                    parameters: json!({
-                        "type": "object",
-                        "properties": {
-                            "name": { "type": "string" },
-                            "note": {
-                                "type": "string",
-                                "nullable": true,
-                                "description": "Optional note; omit when the user gives none."
-                            }
-                        },
-                        "required": ["name"]
-                    }),
-                })
-                .build();
+                    .to_string(),
+            )
+            .temperature(0.0)
+            .tool(ToolDefinition {
+                name: rig_core::message::ToolName::new("log_event").expect("tool name"),
+                description: "Record an event with an optional free-form note.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "note": {
+                            "type": "string",
+                            "nullable": true,
+                            "description": "Optional note; omit when the user gives none."
+                        }
+                    },
+                    "required": ["name"]
+                }),
+            });
 
-            let response = model
-                .completion(request)
-                .await
-                .expect("optional-arg completion should succeed");
-
-            let tool_call = response
-                .choice
-                .iter()
-                .find_map(|content| match content {
-                    AssistantContent::ToolCall(tool_call) => Some(tool_call.clone()),
-                    _ => None,
-                })
-                .expect("response should contain the log_event tool call");
-            assert_eq!(tool_call.function.name, "log_event");
-            assert_eq!(
-                tool_call
-                    .function
-                    .arguments
-                    .get("name")
-                    .and_then(|value| value.as_str()),
-                Some("deploy"),
-                "required argument should be present: {:?}",
-                tool_call.function.arguments
-            );
-            let note = tool_call.function.arguments.get("note");
-            assert!(
-                note.is_none() || note.is_some_and(serde_json::Value::is_null),
-                "optional nullable argument should be omitted or null when not requested, \
-                 got {:?}",
-                tool_call.function.arguments
-            );
+            Ok(model_result(model.call(request).await))
         },
     )
-    .await;
+    .await
 }

@@ -1,41 +1,9 @@
-//! Live Chat Completions matrix for the outer-reason truncation contract.
+//! OpenAI Chat Completions tool truncation across 24 retained fixtures.
 //!
-//! A live budget sweep on 2026-08-16 found the same deterministic boundary on
-//! `gpt-4o-mini` and `gpt-4.1-mini`: 16 and 32 output tokens end with
-//! `finish_reason: length` and a non-empty, unparseable tool argument string;
-//! 48 tokens carries the complete object and `tool_calls`. OpenAI rejects caps
-//! below 16, so empty/no-call states are not live-producible on these models;
-//! the shared unit suite covers those synthetic policies.
-//!
-//! The complete recorded space is 2 transports × 2 models × 3 budgets × 2
-//! public surfaces = 24 cells. Model cells read the normalized blocking reply
-//! the driver decodes from the provider-native response, or drive the
-//! normalized stream; agent cells prove that a partial call is never invoked
-//! and a complete control is invoked exactly once. Every cell asserts its own
-//! request, finish reason, and accumulated
-//! argument bytes from the fixture.
-//!
-//! | dimension | values |
-//! |---|---|
-//! | transport | blocking, streaming |
-//! | model | `gpt-4o-mini`, `gpt-4.1-mini` |
-//! | output cap | 16 partial, 32 partial, 48 complete |
-//! | surface | raw/normalized model, one-turn agent |
-//!
-//! Coverage ledger: the provider-supported pre-pruning product is 24 and all
-//! 24 cells are recorded. Exploratory caps below 16 are not cassette cells
-//! because OpenAI rejects those requests before generation; the shared unit
-//! suite supplies the otherwise-unproducible empty/no-call `length` shapes.
-//! Each explicit test maps to
-//! `crates/rig-cassette/fixtures/cassettes/openai/chat_tool_truncation_matrix/<test-name>.yaml`.
-//! The two inexpensive mini models were selected because both expose a stable
-//! truncation boundary. Assertions cover exact wire arguments and reason,
-//! blocking normalization, raw streaming assembly, agent rejection of
-//! incomplete calls, and exact-once invocation of the complete control.
-//!
-//! | recorded cells | exact fixture set |
-//! |---|---|
-//! | all 24 | `crates/rig-cassette/fixtures/cassettes/openai/chat_tool_truncation_matrix/{blocking,streaming}_{gpt4o,gpt41}_{low,mid,complete}_{model,agent}.yaml` |
+//! Original 16- and 32-token partial-call predicates remain distinct from the
+//! 48-token complete-call controls, across both models, transports and
+//! model/agent surfaces. Partial calls are dropped and never invoked; complete
+//! calls retain the exact incident summary and are invoked once.
 
 use std::sync::{
     Arc, Mutex,
@@ -44,11 +12,8 @@ use std::sync::{
 
 use anyhow::Result;
 use futures::StreamExt as _;
-use rig::completion::{AssistantContent, CompletionModel, FinishReason};
-use rig::driver::Bound;
-use rig::prelude::*;
-use rig::providers::openai::wire::Chat;
-use rig::streaming::StreamEvent;
+use rig::completion::{AssistantContent, CompletionRequest, FinishReason};
+use rig::streaming::{Item, StreamEvent};
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -127,7 +92,7 @@ fn max_tokens(budget: Budget) -> u64 {
 
 fn tool_definition() -> rig::completion::ToolDefinition {
     rig::completion::ToolDefinition {
-        name: "file_report".to_owned(),
+        name: rig_core::message::ToolName::new("file_report").expect("tool name"),
         description: "File an incident report".to_owned(),
         parameters: json!({
             "type": "object",
@@ -137,21 +102,19 @@ fn tool_definition() -> rig::completion::ToolDefinition {
     }
 }
 
-fn request(model: &Bound<Chat>, cell: Cell) -> rig::completion::CompletionRequest {
-    model
-        .completion_request(PROMPT)
+fn request(cell: Cell) -> rig::completion::CompletionRequest {
+    CompletionRequest::new(PROMPT)
         .preamble(PREAMBLE.to_owned())
         .tool(tool_definition())
         .additional_params(json!({ "tool_choice": "required" }))
         .max_tokens(max_tokens(cell.budget))
-        .build()
 }
 
 fn calls(choice: &[AssistantContent]) -> Vec<Value> {
     choice
         .iter()
         .filter_map(|content| match content {
-            AssistantContent::ToolCall(call) => Some(call.function.arguments.clone()),
+            AssistantContent::ToolCall(call) => Some(call.function.arguments_value()),
             _ => None,
         })
         .collect()
@@ -200,7 +163,7 @@ async fn run_model(client: OpenAiCassette, cell: Cell) -> Observation {
         // The provider-native reply and the normalized view are one call now:
         // the driver decodes the native response and hands back the
         // normalization, keeping the native value on `CompletionResponse::raw`.
-        Transport::Blocking => match model.completion(request(&model, cell)).await {
+        Transport::Blocking => match model.call(request(cell)).await {
             Ok(response) => Observation {
                 finish_reason: response.finish_reason(),
                 arguments: calls(&response.choice),
@@ -212,7 +175,7 @@ async fn run_model(client: OpenAiCassette, cell: Cell) -> Observation {
             },
         },
         Transport::Streaming => {
-            let mut stream = match model.stream(request(&model, cell)).await {
+            let mut stream = match model.stream(request(cell)) {
                 Ok(stream) => stream,
                 Err(error) => {
                     return Observation {
@@ -224,18 +187,21 @@ async fn run_model(client: OpenAiCassette, cell: Cell) -> Observation {
             let mut observation = Observation::default();
             while let Some(item) = stream.next().await {
                 match item {
-                    Ok(StreamEvent::BlockEnd {
-                        block: Some(AssistantContent::ToolCall(tool_call)),
+                    Ok(Item::Event(StreamEvent::End {
+                        content: AssistantContent::ToolCall(tool_call),
                         ..
-                    }) => {
-                        observation.arguments.push(tool_call.function.arguments);
-                    }
-                    Ok(StreamEvent::Final(terminal)) => {
-                        observation.finish_reason = terminal.finish_reason;
+                    })) => {
+                        observation
+                            .arguments
+                            .push(tool_call.function.arguments_value());
                     }
                     Ok(_) => {}
                     Err(error) => observation.errors.push(error.to_string()),
                 }
+            }
+            match stream.finish().await {
+                Ok(terminal) => observation.finish_reason = terminal.finish_reason(),
+                Err(error) => observation.errors.push(error.to_string()),
             }
             observation
         }
@@ -244,9 +210,7 @@ async fn run_model(client: OpenAiCassette, cell: Cell) -> Observation {
 
 async fn run_agent(client: OpenAiCassette, cell: Cell) -> Observation {
     let invocations = Arc::new(AtomicUsize::new(0));
-    let agent = client
-        .chat
-        .agent(model_name(cell.model))
+    let agent = rig::AgentBuilder::new(client.chat.completion(model_name(cell.model)))
         .preamble(PREAMBLE)
         .tool(FileReport {
             invocations: Arc::clone(&invocations),

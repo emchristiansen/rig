@@ -8,31 +8,29 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use rig::completion::{CompletionModel, Message};
-use rig::message::{AssistantContent, ToolChoice, UserContent};
-use rig::prelude::*;
+use rig::completion::{GenerationOptions, Message, Reasoning};
+use rig::message::{AssistantContent, ToolChoice};
 use rig::providers::deepseek;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::support::{
-    ALPHA_SIGNAL_OUTPUT, AlphaSignal, BETA_SIGNAL_OUTPUT, BetaSignal, TWO_TOOL_STREAM_PREAMBLE,
-    TWO_TOOL_STREAM_PROMPT, assert_contains_all_case_insensitive, assert_nonempty_response,
-    assert_raw_stream_tool_call_arguments_are_objects, assert_two_tool_roundtrip_contract,
-    assistant_text_response, collect_raw_stream_observation, collect_stream_observation,
+    AlphaSignal, BetaSignal, TWO_TOOL_STREAM_PREAMBLE, TWO_TOOL_STREAM_PROMPT,
+    assert_contains_all_case_insensitive, assert_nonempty_response, assistant_text_response,
+    collect_raw_stream_observation,
 };
 
+use super::request_witness::{NamedCase, with_deepseek_request_witness_cassette};
 use super::support::with_deepseek_cassette_result;
+use crate::chat_request_witness::stream_result;
+use rig::completion::CompletionRequest;
 
 pub(super) const SESSION_MODEL: &str = deepseek::DEEPSEEK_V4_FLASH;
-const CHAT_ALIAS_MODEL: &str = "deepseek-chat";
-const REASONER_ALIAS_MODEL: &str = "deepseek-reasoner";
 
-pub(super) fn non_thinking_params() -> serde_json::Value {
-    json!({
-        "thinking": { "type": "disabled" }
-    })
+/// Thinking off: `{"thinking":{"type":"disabled"}}` on DeepSeek.
+pub(super) fn non_thinking() -> GenerationOptions {
+    GenerationOptions::default().reasoning(Reasoning::Off)
 }
 
 fn thinking_params() -> serde_json::Value {
@@ -287,125 +285,6 @@ pub(super) fn complex_tools(
     )
 }
 
-pub(super) fn assert_complex_invocations(log: &InvocationLog) {
-    let invocations = log
-        .lock()
-        .expect("tool invocation log lock should not be poisoned")
-        .clone();
-    let names = invocations.iter().map(|call| call.name).collect::<Vec<_>>();
-    assert_eq!(
-        names,
-        vec![
-            PingEmpty::NAME,
-            InspectManifest::NAME,
-            JoinLabels::NAME,
-            EscapeEcho::NAME,
-        ],
-        "expected one complex tool call of each shape in order"
-    );
-
-    assert_eq!(invocations[0].args, json!({}));
-    assert_eq!(invocations[1].args["project"], "rig-deepseek");
-    assert_eq!(
-        invocations[1].args["flags"],
-        json!({"critical": true, "retries": 2})
-    );
-    assert_eq!(
-        invocations[1].args["steps"].as_array().map(Vec::len),
-        Some(2)
-    );
-    assert_eq!(
-        invocations[1].args["note"],
-        "line one; line two says \"hello\" and path C:\\rig\\deepseek"
-    );
-    assert_eq!(
-        invocations[2].args,
-        json!({
-            "labels": ["north", "beta gamma", "quote:\"delta\"", "slash\\path"],
-            "separator": "|"
-        })
-    );
-    assert_eq!(
-        invocations[3].args["text"],
-        "Line 1\nLine \"2\" with backslash \\ and unicode snowman ☃"
-    );
-}
-
-pub(super) struct ToolEvent {
-    pub(super) message_index: usize,
-    pub(super) name: String,
-}
-
-pub(super) fn history_tool_calls(history: &[Message]) -> Vec<ToolEvent> {
-    let mut calls = Vec::new();
-    for (message_index, message) in history.iter().enumerate() {
-        if let Message::Assistant { content, .. } = message {
-            for item in content.iter() {
-                if let AssistantContent::ToolCall(tool_call) = item {
-                    calls.push(ToolEvent {
-                        message_index,
-                        name: tool_call.function.name.clone(),
-                    });
-                }
-            }
-        }
-    }
-    calls
-}
-
-pub(super) fn history_tool_results(history: &[Message]) -> Vec<ToolEvent> {
-    let mut results = Vec::new();
-    for (message_index, message) in history.iter().enumerate() {
-        if let Message::User { content } = message {
-            for item in content.iter() {
-                if let UserContent::ToolResult(tool_result) = item {
-                    results.push(ToolEvent {
-                        message_index,
-                        name: tool_result.name.clone(),
-                    });
-                }
-            }
-        }
-    }
-    results
-}
-
-pub(super) fn assert_history_records_sequential_tool_roundtrips(
-    history: &[Message],
-    expected_tools: &[&str],
-) {
-    let calls = history_tool_calls(history);
-    let results = history_tool_results(history);
-
-    assert_eq!(
-        calls
-            .iter()
-            .map(|call| call.name.as_str())
-            .collect::<Vec<_>>(),
-        expected_tools,
-        "caller-owned chat history should preserve tool call order"
-    );
-    assert_eq!(
-        results.len(),
-        expected_tools.len(),
-        "caller-owned chat history should contain one tool result per call"
-    );
-
-    for (index, call) in calls.iter().enumerate() {
-        let result = &results[index];
-        assert!(
-            call.message_index < result.message_index,
-            "tool result should follow its assistant tool call"
-        );
-        if let Some(next_call) = calls.get(index + 1) {
-            assert!(
-                result.message_index < next_call.message_index,
-                "next tool call should occur after the previous tool result"
-            );
-        }
-    }
-}
-
 /// The provider-only facts of a completed turn, read off the captured `raw`.
 ///
 /// The normalized response carries one finish reason for the turn and none of
@@ -445,69 +324,31 @@ fn assert_response_metadata(response: &rig::completion::CompletionResponse) {
     );
 }
 
-#[tokio::test]
-async fn sequential_complex_tool_calls_nonstreaming() -> Result<()> {
-    with_deepseek_cassette_result(
-        "agent_tool_sessions/sequential_complex_tool_calls_nonstreaming",
-        |client| async move {
-            let log = Arc::new(Mutex::new(Vec::new()));
-            let (ping, manifest, labels, echo) = complex_tools(&log);
-            let agent = client
-                .agent(SESSION_MODEL)
-                .preamble(COMPLEX_SESSION_PREAMBLE)
-                .tool(ping)
-                .tool(manifest)
-                .tool(labels)
-                .tool(echo)
-                .additional_params(json_utils_merge(
-                    non_thinking_params(),
-                    json!({"parallel_tool_calls": false}),
-                ))
-                .default_max_turns(10)
-                .build();
-            let mut history = Vec::<Message>::new();
-
-            let response = agent.chat(COMPLEX_SESSION_PROMPT, &mut history).await?;
-
-            assert_contains_all_case_insensitive(
-                &response.output,
-                &["EMPTY-OK", "MANIFEST-OK", "LABELS-OK", "ESCAPE-OK"],
-            );
-            assert_complex_invocations(&log);
-            assert_history_records_sequential_tool_roundtrips(
-                &history,
-                &[
-                    PingEmpty::NAME,
-                    InspectManifest::NAME,
-                    JoinLabels::NAME,
-                    EscapeEcho::NAME,
-                ],
-            );
-
-            Ok(())
-        },
-    )
-    .await
-}
-
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 6): the
+/// recording is unchanged; the only request difference is that the replayed
+/// `ping_empty` call of assistant message 2 carries `"index": 0`, and strict
+/// replay refuses interaction 1, the first continuation. Before it,
+/// `ping_empty` runs once with `{}`. Named losses: the four ordered streamed
+/// calls and their four results, the final answer with `EMPTY-OK`,
+/// `MANIFEST-OK`, `LABELS-OK` and `ESCAPE-OK`, and the exact arguments of the
+/// last three calls.
 #[tokio::test]
 async fn sequential_complex_tool_calls_streaming() -> Result<()> {
-    with_deepseek_cassette_result(
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let invocations = log.clone();
+    with_deepseek_request_witness_cassette(
         "agent_tool_sessions/sequential_complex_tool_calls_streaming",
+        NamedCase::SequentialComplexToolCallsStreamed,
         |client| async move {
-            let log = Arc::new(Mutex::new(Vec::new()));
             let (ping, manifest, labels, echo) = complex_tools(&log);
-            let agent = client
-                .agent(SESSION_MODEL)
+            let agent = rig::AgentBuilder::new(client.completion(SESSION_MODEL))
                 .preamble(COMPLEX_SESSION_PREAMBLE)
                 .tool(ping)
                 .tool(manifest)
                 .tool(labels)
                 .tool(echo)
-                .additional_params(json_utils_merge(
-                    non_thinking_params(),
-                    json!({"parallel_tool_calls": false}),
-                ))
+                .options(non_thinking())
+                .additional_params(json!({"parallel_tool_calls": false}))
                 .build();
 
             let mut stream = agent
@@ -515,213 +356,56 @@ async fn sequential_complex_tool_calls_streaming() -> Result<()> {
                 .history(Vec::<Message>::new())
                 .max_turns(10)
                 .stream();
-            let observation = collect_stream_observation(&mut stream).await;
-
-            anyhow::ensure!(
-                observation.errors.is_empty(),
-                "stream should not emit errors: {:?}",
-                observation.errors
-            );
-            anyhow::ensure!(
-                observation.tool_calls
-                    == vec![
-                        PingEmpty::NAME.to_string(),
-                        InspectManifest::NAME.to_string(),
-                        JoinLabels::NAME.to_string(),
-                        EscapeEcho::NAME.to_string(),
-                    ],
-                "stream should expose ordered tool calls, saw {:?}",
-                observation.tool_calls
-            );
-            anyhow::ensure!(
-                observation.tool_results == 4,
-                "expected 4 streamed tool results, saw {}",
-                observation.tool_results
-            );
-            let response = observation
-                .final_response_text
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("stream should produce final response text"))?;
-            assert_contains_all_case_insensitive(
-                response,
-                &["EMPTY-OK", "MANIFEST-OK", "LABELS-OK", "ESCAPE-OK"],
-            );
-            assert_complex_invocations(&log);
-
-            Ok(())
+            let result = stream_result(&mut stream).await?;
+            drop(stream);
+            drop(agent);
+            Ok(vec![result])
         },
     )
-    .await
+    .await?;
+    let invocations = invocations
+        .lock()
+        .map_err(|_| anyhow::anyhow!("tool invocation log lock poisoned"))?
+        .clone();
+    anyhow::ensure!(
+        invocations
+            == vec![ToolInvocation {
+                name: PingEmpty::NAME,
+                args: json!({}),
+            }],
+        "only ping_empty runs before the refused continuation: {invocations:?}"
+    );
+    Ok(())
 }
 
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 6): the
+/// recording is unchanged; the only request difference is that both
+/// parallel calls replayed on assistant message 2 carry `"index": 0`, and
+/// strict replay refuses interaction 1, the continuation. Named losses: the
+/// answer naming both signals, both calls on one assistant message in the
+/// history, and their two tool results.
 #[tokio::test]
 async fn parallel_tool_calls_single_turn_nonstreaming() -> Result<()> {
-    with_deepseek_cassette_result(
+    with_deepseek_request_witness_cassette(
         "agent_tool_sessions/parallel_tool_calls_single_turn_nonstreaming",
+        NamedCase::ParallelToolCallsUnary,
         |client| async move {
-            let agent = client
-                .agent(SESSION_MODEL)
+            let agent = rig::AgentBuilder::new(client.completion(SESSION_MODEL))
                 .preamble(TWO_TOOL_STREAM_PREAMBLE)
                 .tool(AlphaSignal)
                 .tool(BetaSignal)
-                .additional_params(json_utils_merge(
-                    non_thinking_params(),
-                    json!({"parallel_tool_calls": true}),
-                ))
+                .options(non_thinking())
+                .additional_params(json!({"parallel_tool_calls": true}))
                 .default_max_turns(5)
                 .build();
             let mut history = Vec::<Message>::new();
 
-            let response = agent.chat(TWO_TOOL_STREAM_PROMPT, &mut history).await?;
-
-            assert_contains_all_case_insensitive(
-                &response.output,
-                &[ALPHA_SIGNAL_OUTPUT, BETA_SIGNAL_OUTPUT],
-            );
-            let calls = history_tool_calls(&history);
-            let call_names = calls
-                .iter()
-                .map(|call| call.name.as_str())
-                .collect::<Vec<_>>();
-            anyhow::ensure!(
-                calls.len() == 2
-                    && call_names.contains(&AlphaSignal::NAME)
-                    && call_names.contains(&BetaSignal::NAME),
-                "expected both zero-argument tools, saw {call_names:?}"
-            );
-            anyhow::ensure!(
-                calls[0].message_index == calls[1].message_index,
-                "parallel tool calls should be recorded on one assistant message"
-            );
-            anyhow::ensure!(
-                history_tool_results(&history).len() == 2,
-                "expected two tool results"
-            );
-
-            Ok(())
-        },
-    )
-    .await
-}
-
-#[tokio::test]
-async fn parallel_tool_calls_single_turn_streaming() -> Result<()> {
-    with_deepseek_cassette_result(
-        "agent_tool_sessions/parallel_tool_calls_single_turn_streaming",
-        |client| async move {
-            let agent = client
-                .agent(SESSION_MODEL)
-                .preamble(TWO_TOOL_STREAM_PREAMBLE)
-                .tool(AlphaSignal)
-                .tool(BetaSignal)
-                .additional_params(json_utils_merge(
-                    non_thinking_params(),
-                    json!({"parallel_tool_calls": true}),
-                ))
-                .build();
-
-            let mut stream = agent.prompt(TWO_TOOL_STREAM_PROMPT).max_turns(5).stream();
-            let observation = collect_stream_observation(&mut stream).await;
-
-            assert_two_tool_roundtrip_contract(
-                &observation,
-                &[AlphaSignal::NAME, BetaSignal::NAME],
-                &[ALPHA_SIGNAL_OUTPUT, BETA_SIGNAL_OUTPUT],
-            );
-
-            Ok(())
-        },
-    )
-    .await
-}
-
-#[tokio::test]
-async fn raw_stream_complex_tool_call_deltas_have_object_arguments() -> Result<()> {
-    with_deepseek_cassette_result(
-        "agent_tool_sessions/raw_stream_complex_tool_call_deltas_have_object_arguments",
-        |client| async move {
-            let log = Arc::new(Mutex::new(Vec::new()));
-            let model = client.completion(SESSION_MODEL);
-            let tool = InspectManifest { log };
-            let request = model
-                .completion_request(
-                    "Call inspect_manifest exactly once for project rig-deepseek with critical=true, retries=2, \
-                     steps [{name: plan, weight: 1}, {name: verify, weight: 2}], and note `streamed nested JSON`. \
-                     Do not write normal text before the tool call.",
-                )
-                .preamble("Use the requested tool call and no prose before it.".to_string())
-                .tool(rig::tool::tool_definition(&tool))
-                .tool_choice(ToolChoice::Required)
-                .additional_params(non_thinking_params())
-                .build();
-
-            let observation = collect_raw_stream_observation(model.stream(request).await?).await;
-
-            assert_raw_stream_tool_call_arguments_are_objects(
-                &observation,
-                &[InspectManifest::NAME],
-            );
-            let tool_call = observation
-                .tool_calls
-                .iter()
-                .find(|tool_call| tool_call.function.name == InspectManifest::NAME)
-                .ok_or_else(|| anyhow::anyhow!("raw stream should emit inspect_manifest"))?;
-            anyhow::ensure!(tool_call.function.arguments["project"] == "rig-deepseek");
-            anyhow::ensure!(tool_call.function.arguments["flags"]["critical"] == true);
-            anyhow::ensure!(
-                tool_call.function.arguments["steps"].as_array().map(Vec::len) == Some(2)
-            );
-
-            Ok(())
-        },
-    )
-    .await
-}
-
-#[tokio::test]
-async fn long_history_replay_with_tool_result_continuation() -> Result<()> {
-    with_deepseek_cassette_result(
-        "agent_tool_sessions/long_history_replay_with_tool_result_continuation",
-        |client| async move {
-            let model = client.completion(SESSION_MODEL);
-            let request = model
-                .completion_request(
-                    "Answer in one short sentence: what is my favorite color, which label came from the tool, \
-                     and which release lane did I choose? Do not call any tools.",
-                )
-                .preamble("You are concise and should rely on the provided chat history.".to_string())
-                .message(Message::user("My favorite color is teal. Please remember it."))
-                .message(Message::assistant("Noted: your favorite color is teal."))
-                .message(Message::user("For this release, use the canary lane."))
-                .message(Message::assistant("Understood: the release lane is canary."))
-                .message(Message::user("Look up the harbor label with the tool."))
-                .message(Message::Assistant {
-                    id: None,
-                    content: vec![AssistantContent::tool_call(
-                        "call_REDACTED_1",
-                        AlphaSignal::NAME,
-                        json!({}),
-                    )],
-                })
-                .message(Message::tool_result(
-                    "call_REDACTED_1",
-                    AlphaSignal::NAME,
-                    ALPHA_SIGNAL_OUTPUT,
-                ))
-                .message(Message::assistant("The harbor label is crimson-harbor."))
-                .tool(rig::tool::tool_definition(&AlphaSignal))
-                .tool_choice(ToolChoice::None)
-                .additional_params(non_thinking_params())
-                .build();
-
-            let response = model.completion(request).await?;
-            let text = assistant_text_response(&response.choice)
-                .ok_or_else(|| anyhow::anyhow!("response should include assistant text"))?;
-
-            assert_contains_all_case_insensitive(&text, &["teal", ALPHA_SIGNAL_OUTPUT, "canary"]);
-            assert_response_metadata(&response);
-
-            Ok(())
+            let result = agent
+                .chat(TWO_TOOL_STREAM_PROMPT, &mut history)
+                .await
+                .map(|_| ());
+            drop(agent);
+            Ok(vec![result])
         },
     )
     .await
@@ -735,41 +419,33 @@ async fn tool_choice_required_specific_and_none() -> Result<()> {
             let model = client.completion(SESSION_MODEL);
 
             let required = model
-                .completion(
-                    model
-                        .completion_request(
+                .call(CompletionRequest::new(
                             "Call lookup_harbor_label exactly once with an empty object and do not answer in prose.",
                         )
                         .tool(rig::tool::tool_definition(&AlphaSignal))
                         .tool_choice(ToolChoice::Required)
-                        .additional_params(non_thinking_params())
-                        .build(),
-                )
+                        .options(non_thinking()))
                 .await?;
             anyhow::ensure!(
                 required.choice.iter().any(|content| matches!(
                     content,
                     AssistantContent::ToolCall(tool_call)
                         if tool_call.function.name == AlphaSignal::NAME
-                            && tool_call.function.arguments == json!({})
+                            && tool_call.function.arguments_value() == json!({})
                 )),
                 "required tool choice should force lookup_harbor_label"
             );
 
             let specific = model
-                .completion(
-                    model
-                        .completion_request(
+                .call(CompletionRequest::new(
                             "Call the orchard-label tool exactly once with an empty object and do not call any other tool.",
                         )
                         .tool(rig::tool::tool_definition(&AlphaSignal))
                         .tool(rig::tool::tool_definition(&BetaSignal))
                         .tool_choice(ToolChoice::Specific {
-                            function_names: vec![BetaSignal::NAME.to_string()],
+                            function_names: vec![rig_core::message::ToolName::new(BetaSignal::NAME).expect("tool name")],
                         })
-                        .additional_params(non_thinking_params())
-                        .build(),
-                )
+                        .options(non_thinking()))
                 .await?;
             let specific_calls = specific
                 .choice
@@ -785,16 +461,12 @@ async fn tool_choice_required_specific_and_none() -> Result<()> {
             );
 
             let none = model
-                .completion(
-                    model
-                        .completion_request(
+                .call(CompletionRequest::new(
                             "Do not call tools. Reply with exactly this phrase: no-tool-answer",
                         )
                         .tool(rig::tool::tool_definition(&AlphaSignal))
                         .tool_choice(ToolChoice::None)
-                        .additional_params(non_thinking_params())
-                        .build(),
-                )
+                        .options(non_thinking()))
                 .await?;
             let none_text = assistant_text_response(&none.choice)
                 .ok_or_else(|| anyhow::anyhow!("ToolChoice::None response should contain text"))?;
@@ -818,15 +490,13 @@ async fn reasoning_enabled_preserves_reasoning_content_deltas_and_usage() -> Res
         "agent_tool_sessions/reasoning_enabled_preserves_reasoning_content_deltas_and_usage",
         |client| async move {
             let model = client.completion(SESSION_MODEL);
-            let request = model
-                .completion_request(
+            let request = CompletionRequest::new(
                     "Use concise reasoning to solve: if three probes each verify two cassettes, how many cassette verifications occur? Answer with the number.",
                 )
-                .preamble("You are a concise reliability engineer.".to_string())
-                .additional_params(thinking_params())
-                .build();
+                .preamble("You are a concise reliability engineer.")
+                .additional_params(thinking_params());
 
-            let response = model.completion(request).await?;
+            let response = model.call(request).await?;
 
             anyhow::ensure!(
                 response
@@ -850,11 +520,9 @@ async fn reasoning_enabled_preserves_reasoning_content_deltas_and_usage() -> Res
             );
             assert_response_metadata(&response);
 
-            let stream_request = model
-                .completion_request("Briefly solve 2 + 2, then answer with the number.")
-                .additional_params(thinking_params())
-                .build();
-            let observation = collect_raw_stream_observation(model.stream(stream_request).await?).await;
+            let stream_request = CompletionRequest::new("Briefly solve 2 + 2, then answer with the number.")
+                .additional_params(thinking_params());
+            let observation = collect_raw_stream_observation(model.stream(stream_request)?).await;
             anyhow::ensure!(
                 observation.events.contains(&"reasoning_delta"),
                 "streaming DeepSeek reasoning should emit reasoning deltas, saw {:?}",
@@ -883,74 +551,21 @@ async fn reasoning_enabled_preserves_reasoning_content_deltas_and_usage() -> Res
 }
 
 #[tokio::test]
-async fn chat_alias_vs_reasoner_alias_behavior() -> Result<()> {
-    with_deepseek_cassette_result(
-        "agent_tool_sessions/chat_alias_vs_reasoner_alias_behavior",
-        |client| async move {
-            let chat_model = client.completion(CHAT_ALIAS_MODEL);
-            let chat = chat_model
-                .completion(
-                    chat_model
-                        .completion_request("Reply with exactly: chat-mode-ok")
-                        .build(),
-                )
-                .await?;
-            let chat_text = assistant_text_response(&chat.choice)
-                .ok_or_else(|| anyhow::anyhow!("deepseek-chat should return text"))?;
-            assert_contains_all_case_insensitive(&chat_text, &["chat-mode-ok"]);
-            anyhow::ensure!(
-                chat.choice
-                    .iter()
-                    .all(|content| !matches!(content, AssistantContent::Reasoning(_))),
-                "deepseek-chat alias should not emit reasoning content"
-            );
-
-            let reasoner_model = client.completion(REASONER_ALIAS_MODEL);
-            let reasoner = reasoner_model
-                .completion(
-                    reasoner_model
-                        .completion_request("Reply with exactly: reasoner-mode-ok")
-                        .build(),
-                )
-                .await?;
-            let reasoner_text = assistant_text_response(&reasoner.choice)
-                .ok_or_else(|| anyhow::anyhow!("deepseek-reasoner should return text"))?;
-            assert_contains_all_case_insensitive(&reasoner_text, &["reasoner-mode-ok"]);
-            anyhow::ensure!(
-                reasoner
-                    .choice
-                    .iter()
-                    .any(|content| matches!(content, AssistantContent::Reasoning(_))),
-                "deepseek-reasoner alias should emit reasoning content"
-            );
-            anyhow::ensure!(
-                reasoner.usage.reasoning_tokens.is_some_and(|n| n > 0),
-                "deepseek-reasoner usage should surface reasoning tokens"
-            );
-
-            Ok(())
-        },
-    )
-    .await
-}
-
-#[tokio::test]
 async fn json_object_response_format_roundtrip() -> Result<()> {
     with_deepseek_cassette_result(
         "agent_tool_sessions/json_object_response_format_roundtrip",
         |client| async move {
             let model = client.completion(SESSION_MODEL);
-            let request = model
-                .completion_request(
+            let request = CompletionRequest::new(
                     "Return a JSON object with release lane canary, risk low, and checks compile=true and replay=true.",
                 )
-                .preamble("Return only valid JSON. No markdown.".to_string())
-                .additional_params(json_utils_merge(non_thinking_params(), json!({
+                .preamble("Return only valid JSON. No markdown.")
+                .options(non_thinking())
+                .additional_params(json!({
                     "response_format": { "type": "json_object" }
-                })))
-                .build();
+                }));
 
-            let response = model.completion(request).await?;
+            let response = model.call(request).await?;
             let text = assistant_text_response(&response.choice)
                 .ok_or_else(|| anyhow::anyhow!("JSON response should contain text"))?;
             let plan: serde_json::Value = serde_json::from_str(&text)?;
@@ -963,23 +578,4 @@ async fn json_object_response_format_roundtrip() -> Result<()> {
         },
     )
     .await
-}
-
-pub(super) fn json_utils_merge(
-    left: serde_json::Value,
-    right: serde_json::Value,
-) -> serde_json::Value {
-    let mut left = left;
-    let Some(left_obj) = left.as_object_mut() else {
-        return right;
-    };
-    let Some(right_obj) = right.as_object() else {
-        return left;
-    };
-
-    for (key, value) in right_obj {
-        left_obj.insert(key.clone(), value.clone());
-    }
-
-    left
 }

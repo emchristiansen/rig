@@ -3,28 +3,25 @@
 use super::*;
 use std::{fs, time::Instant};
 
-pub(super) fn tracked_inputs(root: &Path) -> Result<Vec<String>> {
-    Ok(output(root, "git", &["ls-files", "-z"])?
+/// The paths a `git … -z` command prints, NUL-separated.
+pub(super) fn git_paths(root: &Path, args: &[&str]) -> Result<Vec<String>> {
+    Ok(output(root, "git", args)?
         .split('\0')
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .collect())
 }
+pub(super) fn tracked_inputs(root: &Path) -> Result<Vec<String>> {
+    git_paths(root, &["ls-files", "-z"])
+}
 pub(super) fn untracked_inputs(root: &Path) -> Result<Vec<String>> {
-    Ok(output(
-        root,
-        "git",
-        &["ls-files", "--others", "--exclude-standard", "-z"],
-    )?
-    .split('\0')
-    .filter(|s| !s.is_empty())
-    .map(str::to_owned)
-    .collect())
+    git_paths(root, &["ls-files", "--others", "--exclude-standard", "-z"])
 }
 
-/// The command for one step. Verification is always replay, and CLI or
-/// environment retry overrides must not defeat the no-retry contract of the
-/// guards profile. Model downloads go under the target directory.
+/// The command for one step. Verification is always replay, matches request
+/// bodies by shape, checks the request snapshots and never rewrites them, and CLI or environment retry
+/// overrides must not defeat the no-retry contract of the guards profile.
+/// Model downloads go under the target directory.
 pub(super) fn command(root: &Path, step: &Step, target: &Path) -> Command {
     let mut cmd = Command::new(&step.program);
     let cache = target.join("verify/fastembed-cache");
@@ -32,6 +29,8 @@ pub(super) fn command(root: &Path, step: &Step, target: &Path) -> Command {
         .current_dir(root)
         .envs(&step.env)
         .env("RIG_PROVIDER_TEST_MODE", "replay")
+        .env("RIG_CASSETTE_SNAPSHOTS", "check")
+        .env("RIG_CASSETTE_MATCHING", "shape")
         .env("FASTEMBED_CACHE_DIR", &cache)
         .env("HF_HOME", &cache)
         .env_remove("RIG_REGENERATE_GOLDEN")
@@ -52,6 +51,7 @@ fn internal(root: &Path, target: &Path, step: &Step) -> Result<()> {
         "@layout" => crate::test_layout::check(root).map_err(invalid),
         "@packaging" => crate::packaging::check(root).map_err(invalid),
         "@wires" => crate::wires::check(root).map_err(invalid),
+        "@options-guards" => super::guards::check(root).map_err(invalid),
         "@fixture-paths" => {
             // `cargo test` runs from the crate root and nextest from the
             // workspace root, so a CWD-relative fixture path passes under one

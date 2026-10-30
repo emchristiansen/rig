@@ -5,11 +5,10 @@
 //!
 //! ```no_run
 //! use rig_agent::prelude::*;
-//! use rig_core::providers::openai::{self, OpenAI};
-//! use rig_reqwest::prelude::*;
+//! use rig_core::{Model, providers::openai::{self, OpenAI}};
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let provider = OpenAI::from_env()?.bound()?;
-//! let agent = provider.agent(openai::GPT_5_2).preamble("Be concise.").build();
+//! let model = OpenAI::from_env()?.completion(openai::GPT_5_2);
+//! let agent = AgentBuilder::new(model).preamble("Be concise.").build();
 //! let response = agent.prompt("Explain ownership.").await?;
 //! # Ok(())
 //! # }
@@ -18,7 +17,6 @@ mod builder;
 mod completion;
 pub(crate) mod drive;
 mod engine;
-pub(crate) use engine::streaming_error_into_prompt;
 pub mod hook;
 pub mod run;
 pub mod runner;
@@ -53,7 +51,7 @@ pub use run::TurnTools;
 pub use run::{AgentRun, AgentRunStep, ModelTurn, ModelTurnOutcome, OutputMode, PendingToolCall};
 pub use runner::AgentRunner;
 pub use streaming::{
-    MultiTurnStreamItem, RUN_EVENTS_CAPACITY, RunEvents, StreamingError, StreamingResult,
+    MultiTurnStreamItem, RUN_EVENTS_CAPACITY, RunEvents, StreamToStdoutError, StreamingResult,
     stream_to_stdout,
 };
-pub use typed::{TypedPromptResponse, TypedRun};
+pub use typed::{TypedOutput, TypedPromptResponse, TypedRun};

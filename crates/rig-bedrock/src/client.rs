@@ -1,144 +1,120 @@
-use crate::image::ImageGenerationModel;
-use crate::{completion::CompletionModel, embedding::EmbeddingModel};
+//! The Bedrock runtime transport: the AWS SDK client every Bedrock wire is
+//! sent through.
+//!
+//! ```no_run
+//! use rig_bedrock::client::BedrockRuntime;
+//! use rig_bedrock::completion::{AMAZON_NOVA_LITE, Converse};
+//! use rig_core::Model;
+//!
+//! let model = BedrockRuntime::from_env().completion(AMAZON_NOVA_LITE);
+//! # let _ = model;
+//! ```
+
 use aws_config::{BehaviorVersion, Region};
-use rig_core::driver::CompletionProvider;
-use rig_core::embeddings::EmbeddingsBuilder;
-use rig_core::error::ProviderError;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
-pub const DEFAULT_AWS_REGION: &str = "us-east-1";
+use crate::completion::Converse;
+use rig_core::Model;
 
-#[derive(Clone)]
-pub struct ClientBuilder<'a> {
-    region: &'a str,
+/// Settings for a [`BedrockRuntime`]. Unset values fall back to the AWS SDK's
+/// default provider chain (environment, shared config files, instance
+/// metadata) when the runtime first loads its configuration.
+#[derive(Clone, Debug, Default)]
+pub struct Builder {
+    region: Option<String>,
+    profile_name: Option<String>,
 }
 
-impl<'a> ClientBuilder<'a> {
+impl Builder {
     /// Sets the AWS region. The selected model must be
     /// [available there](https://docs.aws.amazon.com/bedrock/latest/userguide/models-regions.html).
-    pub fn region(mut self, region: &'a str) -> Self {
-        self.region = region;
+    pub fn region(mut self, region: impl Into<String>) -> Self {
+        self.region = Some(region.into());
         self
     }
 
-    /// Loads AWS SDK configuration and constructs a client for the selected region.
-    /// Requests require permission to access the selected Bedrock model.
-    pub async fn build(self) -> Client {
-        let sdk_config = aws_config::defaults(BehaviorVersion::latest())
-            .region(Region::new(String::from(self.region)))
-            .load()
-            .await;
-        let client = aws_sdk_bedrockruntime::Client::new(&sdk_config);
-        Client {
-            profile_name: None,
-            aws_client: Arc::new(OnceCell::from(client)),
+    /// Loads credentials and settings from the named profile in the shared
+    /// AWS config files. An explicit [`region`](Self::region) overrides the
+    /// profile's region.
+    pub fn profile_name(mut self, profile_name: impl Into<String>) -> Self {
+        self.profile_name = Some(profile_name.into());
+        self
+    }
+
+    /// A runtime that loads its AWS configuration on first use.
+    /// Construction does not validate credentials.
+    pub fn build(self) -> BedrockRuntime {
+        BedrockRuntime {
+            settings: self,
+            aws_client: Arc::new(OnceCell::new()),
         }
     }
 }
 
-impl Default for ClientBuilder<'_> {
-    fn default() -> Self {
-        Self {
-            region: DEFAULT_AWS_REGION,
-        }
-    }
-}
-
+/// The Bedrock runtime client every Bedrock wire is sent through. Clones
+/// share one client, which loads its AWS configuration on first use unless
+/// it was built from a configured SDK client.
 #[derive(Clone, Debug)]
-pub struct Client {
-    profile_name: Option<String>,
-    pub(crate) aws_client: Arc<OnceCell<aws_sdk_bedrockruntime::Client>>,
+pub struct BedrockRuntime {
+    settings: Builder,
+    aws_client: Arc<OnceCell<aws_sdk_bedrockruntime::Client>>,
 }
 
-impl From<aws_sdk_bedrockruntime::Client> for Client {
+impl From<aws_sdk_bedrockruntime::Client> for BedrockRuntime {
     fn from(aws_client: aws_sdk_bedrockruntime::Client) -> Self {
-        Client {
-            profile_name: None,
+        Self {
+            settings: Builder::default(),
             aws_client: Arc::new(OnceCell::from(aws_client)),
         }
     }
 }
 
-impl Client {
-    fn new() -> Self {
-        Self {
-            profile_name: None,
-            aws_client: Arc::new(OnceCell::new()),
-        }
+impl BedrockRuntime {
+    /// A builder for a runtime with an explicit region or profile.
+    ///
+    /// ```no_run
+    /// use rig_bedrock::client::BedrockRuntime;
+    ///
+    /// let runtime = BedrockRuntime::builder()
+    ///     .profile_name("bedrock")
+    ///     .region("eu-west-1")
+    ///     .build();
+    /// # let _ = runtime;
+    /// ```
+    pub fn builder() -> Builder {
+        Builder::default()
     }
 
-    /// Create an AWS Bedrock client using AWS profile name
-    pub fn with_profile_name(profile_name: &str) -> Self {
-        Self {
-            profile_name: Some(profile_name.into()),
-            aws_client: Arc::new(OnceCell::new()),
-        }
+    /// A runtime that loads AWS SDK configuration from the environment on
+    /// first use. Construction does not validate credentials.
+    pub fn from_env() -> Self {
+        Builder::default().build()
     }
 
+    /// The Converse model for `model`. Request options such as a guardrail
+    /// go in the request's provider options
+    /// ([`BedrockOptions`](crate::extension::BedrockOptions)).
+    pub fn completion(&self, model: impl Into<String>) -> Model<Converse, Self> {
+        Model::new(Converse::new(model), self.clone())
+    }
+
+    /// The AWS SDK client, loading its configuration on first use.
     pub async fn inner(&self) -> &aws_sdk_bedrockruntime::Client {
         self.aws_client
             .get_or_init(|| async {
-                let config = if let Some(profile_name) = &self.profile_name {
-                    aws_config::defaults(BehaviorVersion::latest())
-                        .profile_name(profile_name)
-                        .load()
-                        .await
-                } else {
-                    aws_config::load_from_env().await
-                };
-                aws_sdk_bedrockruntime::Client::new(&config)
+                let mut loader = aws_config::defaults(BehaviorVersion::latest());
+                if let Some(profile_name) = &self.settings.profile_name {
+                    loader = loader.profile_name(profile_name);
+                }
+                if let Some(region) = self.settings.region.clone() {
+                    loader = loader.region(Region::new(region));
+                }
+                aws_sdk_bedrockruntime::Client::new(&loader.load().await)
             })
             .await
     }
 }
 
-impl Client {
-    /// Creates a client that loads AWS SDK configuration on first use.
-    /// Construction does not validate credentials and always succeeds.
-    pub fn from_env() -> Result<Self, rig_core::client::ProviderClientError> {
-        Ok(Client::new())
-    }
-
-    /// This provider's embedding model for `model`, at `ndims` dimensions
-    /// when the caller named one rather than taking the model's default.
-    pub fn embedding(&self, model: impl Into<String>, ndims: Option<usize>) -> EmbeddingModel {
-        EmbeddingModel::new(self.clone(), model, ndims)
-    }
-
-    /// An embedding builder over this provider's `model`.
-    pub fn embeddings<D: rig_core::Embed>(
-        &self,
-        model: impl Into<String>,
-    ) -> EmbeddingsBuilder<EmbeddingModel, D> {
-        EmbeddingsBuilder::new(self.embedding(model, None))
-    }
-
-    /// An embedding builder over this provider's `model` at `ndims`
-    /// dimensions.
-    pub fn embeddings_with_ndims<D: rig_core::Embed>(
-        &self,
-        model: impl Into<String>,
-        ndims: usize,
-    ) -> EmbeddingsBuilder<EmbeddingModel, D> {
-        EmbeddingsBuilder::new(self.embedding(model, Some(ndims)))
-    }
-
-    /// This provider's image-generation model for `model`.
-    pub fn image_generation(&self, model: impl Into<String>) -> ImageGenerationModel {
-        ImageGenerationModel::new(self.clone(), model)
-    }
-
-    /// Returns success without making a request or validating credentials.
-    pub async fn verify(&self) -> Result<(), ProviderError> {
-        Ok(())
-    }
-}
-
-impl CompletionProvider for Client {
-    type Model = CompletionModel;
-
-    fn completion(&self, model: impl Into<String>) -> Self::Model {
-        CompletionModel::new(self.clone(), model)
-    }
-}
+#[cfg(test)]
+mod tests;

@@ -2,20 +2,17 @@ use super::*;
 use crate::completion::{AssistantContent, FinishReason, Message};
 use crate::message;
 use crate::providers::chatgpt;
-use crate::providers::openai::OpenAI;
+use crate::providers::openai::OpenAIConfig;
+use crate::providers::openai::responses_api::SystemInstructionsPlacement;
 use crate::providers::openai::responses_api::openapi_schema::{self, Schema};
 use crate::providers::openai::responses_api::websocket::test_connection::Script;
-use crate::providers::openai::responses_api::{
-    CompletionResponse, IncompleteDetailsReason, InputItem, OutputTokensDetails, ResponseObject,
-    ResponseStatus, ResponsesUsage, SystemInstructionsPlacement,
-};
 use serde_json::json;
 
 const ACCESS_TOKEN: &str = "test-token";
 const ACCOUNT_ID: &str = "acct-123";
 
 fn codex_wire() -> Responses {
-    OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
+    OpenAIConfig::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
         .with_caller_identity(crate::test_utils::test_caller_identity())
         .with_account_id(ACCOUNT_ID)
         .responses(chatgpt::GPT_5_3_CODEX)
@@ -32,24 +29,11 @@ fn session_over(script: &Script) -> CodexWebSocketSession {
 }
 
 fn user_request(text: &str) -> completion::CompletionRequest {
-    completion::CompletionRequest {
-        model: None,
-        chat_history: vec![Message::user(text)],
-        documents: Vec::new(),
-        tools: Vec::new(),
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    }
+    completion::CompletionRequest::new(text)
 }
 
 fn delta(text: &str) -> InputDelta {
-    let items = Vec::<InputItem>::try_from(Message::user(text))
-        .expect("a user message converts into input items");
-    InputDelta::new(items).expect("the delta carries an item")
+    InputDelta::one(InputDeltaItem::Canonical(Message::user(text)))
 }
 
 fn image_message(text: &str) -> Message {
@@ -60,7 +44,7 @@ fn image_message(text: &str) -> Message {
                 data: message::DocumentSourceKind::Url("https://example.test/image.png".to_owned()),
                 media_type: None,
                 detail: Some(message::ImageDetail::High),
-                additional_params: None,
+                ..Default::default()
             }),
         ],
     }
@@ -74,9 +58,7 @@ fn image_request(text: &str) -> completion::CompletionRequest {
 }
 
 fn image_delta(text: &str) -> InputDelta {
-    let items = Vec::<InputItem>::try_from(image_message(text))
-        .expect("a user image message converts into input items");
-    InputDelta::new(items).expect("the image delta carries an item")
+    InputDelta::one(InputDeltaItem::Canonical(image_message(text)))
 }
 
 fn is_string_map(value: &serde_json::Value) -> bool {
@@ -85,64 +67,48 @@ fn is_string_map(value: &serde_json::Value) -> bool {
         .is_some_and(|map| map.values().all(serde_json::Value::is_string))
 }
 
-fn response(response_id: &str, status: ResponseStatus) -> CompletionResponse {
-    CompletionResponse {
-        id: response_id.to_string(),
-        object: ResponseObject::Response,
-        provider_request_id: None,
-        created_at: 0,
-        status,
-        error: None,
-        incomplete_details: None,
-        instructions: None,
-        max_output_tokens: None,
-        model: chatgpt::GPT_5_3_CODEX.to_string(),
-        usage: Some(ResponsesUsage {
-            input_tokens: 1,
-            input_tokens_details: None,
-            output_tokens: 2,
-            output_tokens_details: Some(OutputTokensDetails {
-                reasoning_tokens: 0,
-            }),
-            total_tokens: 3,
-        }),
-        output: Vec::new(),
-        tools: Vec::new(),
-        additional_parameters: Default::default(),
-        provider_reasoning: None,
-        reasoning_metadata: None,
-        reasoning_context: None,
-    }
+fn response(response_id: &str, status: &str) -> serde_json::Value {
+    json!({
+        "id": response_id,
+        "object": "response",
+        "created_at": 0,
+        "status": status,
+        "error": null,
+        "incomplete_details": null,
+        "instructions": null,
+        "max_output_tokens": null,
+        "model": chatgpt::GPT_5_3_CODEX,
+        "usage": {
+            "input_tokens": 1,
+            "output_tokens": 2,
+            "output_tokens_details": { "reasoning_tokens": 0 },
+            "total_tokens": 3,
+        },
+        "output": [],
+        "tools": [],
+    })
 }
 
-fn terminal_event(kind: &str, response: CompletionResponse) -> String {
+fn terminal_event(kind: &str, response: serde_json::Value) -> String {
     json!({
         "type": kind,
         "sequence_number": 9,
-        "response": serde_json::to_value(response).expect("response should serialize"),
+        "response": response,
     })
     .to_string()
 }
 
 fn completed(response_id: &str) -> String {
-    terminal_event(
-        "response.completed",
-        response(response_id, ResponseStatus::Completed),
-    )
+    terminal_event("response.completed", response(response_id, "completed"))
 }
 
 fn failed(response_id: &str) -> String {
-    terminal_event(
-        "response.failed",
-        response(response_id, ResponseStatus::Failed),
-    )
+    terminal_event("response.failed", response(response_id, "failed"))
 }
 
 fn incomplete(response_id: &str) -> String {
-    let mut response = response(response_id, ResponseStatus::Incomplete);
-    response.incomplete_details = Some(IncompleteDetailsReason {
-        reason: "max_output_tokens".to_string(),
-    });
+    let mut response = response(response_id, "incomplete");
+    response["incomplete_details"] = json!({ "reason": "max_output_tokens" });
     terminal_event("response.incomplete", response)
 }
 
@@ -264,7 +230,7 @@ fn the_handshake_carries_exactly_the_codex_identity_headers() {
 fn the_handshake_refuses_without_the_caller_s_exact_identity() {
     use crate::providers::openai::wire::MissingCallerIdentity;
 
-    let refusal = |provider: OpenAI| {
+    let refusal = |provider: OpenAIConfig| {
         let error = CodexIdentity::generate()
             .handshake_request(&provider.responses(chatgpt::GPT_5_3_CODEX))
             .expect_err("no exact identity, no handshake");
@@ -277,11 +243,11 @@ fn the_handshake_refuses_without_the_caller_s_exact_identity() {
         }
     };
     assert_eq!(
-        refusal(OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)),
+        refusal(OpenAIConfig::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)),
         MissingCallerIdentity::Unset { dialect: "chatgpt" }
     );
     assert_eq!(
-        refusal(OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN).with_originator("muninn")),
+        refusal(OpenAIConfig::with_key(&chatgpt::DIALECT, ACCESS_TOKEN).with_originator("muninn")),
         MissingCallerIdentity::OriginatorOnly {
             dialect: "chatgpt",
             originator: "muninn".to_owned()
@@ -298,7 +264,7 @@ async fn a_codex_session_over_an_open_connection_refuses_to_send_without_the_cal
 
     let script = Script::new().turn([completed("resp_1")]);
     let mut session = CodexWebSocketSession::from_connection(
-        OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN).responses(chatgpt::GPT_5_3_CODEX),
+        OpenAIConfig::with_key(&chatgpt::DIALECT, ACCESS_TOKEN).responses(chatgpt::GPT_5_3_CODEX),
         CodexIdentity::generate(),
         script.connection(),
         None,
@@ -320,7 +286,7 @@ async fn a_codex_session_over_an_open_connection_refuses_to_send_without_the_cal
 
 #[test]
 fn the_handshake_omits_the_account_header_without_an_account() {
-    let wire = OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
+    let wire = OpenAIConfig::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
         .with_caller_identity(crate::test_utils::test_caller_identity())
         .responses(chatgpt::GPT_5_3_CODEX);
     let request = CodexIdentity::generate()
@@ -341,7 +307,7 @@ fn identities_are_opaque_distinct_and_key_the_cache_by_thread() {
 
 #[test]
 fn a_non_codex_wire_is_refused_by_name() {
-    let wire = OpenAI::new("key").responses("gpt-5.4");
+    let wire = OpenAIConfig::new("key").responses("gpt-5.4");
     let Err(error) = CodexWebSocketSessionBuilder::new(wire.clone()) else {
         panic!("an OpenAI wire does not speak the Codex contract");
     };
@@ -371,7 +337,7 @@ async fn root_sends_never_chain_and_carry_one_identity() {
         .completion(user_request("first"))
         .await
         .expect("first turn should complete");
-    assert_eq!(first.provider, chatgpt::PROVIDER_NAME);
+    assert_eq!(first.provider(), chatgpt::PROVIDER_NAME);
     session
         .completion(user_request("second"))
         .await
@@ -438,8 +404,8 @@ async fn warmup_is_a_root_send_with_generate_false() {
 
 /// The `response.create` frame the adapter actually writes carries the Codex
 /// request shaping: `store: false` stated, the encrypted-reasoning `include`
-/// following the rule every dialect shares (absent without `reasoning`,
-/// requested alongside it), no sampling or output-cap key when the caller set
+/// following the stateless rule even without a reasoning option, no sampling
+/// or output-cap key when the caller set
 /// none, and the cache identity stamped from the session's one identity.
 #[tokio::test]
 async fn the_response_create_frame_carries_the_codex_shaping() {
@@ -482,10 +448,10 @@ async fn the_response_create_frame_carries_the_codex_shaping() {
             })
         );
     }
-    assert!(
-        frames[0].get("include").is_none(),
-        "no include is forced onto a turn without reasoning: {}",
-        frames[0]
+    assert_eq!(
+        frames[0]["include"],
+        json!(["reasoning.encrypted_content"]),
+        "the stateless turn requests ciphertext without a reasoning option"
     );
     assert_eq!(
         frames[1]["include"],
@@ -566,6 +532,20 @@ async fn responses_lite_marks_every_frame_and_prefixes_only_full_sends() {
     assert_eq!(frames[1]["previous_response_id"], "resp_1");
     assert!(root_input[2]["content"][1].get("detail").is_none());
     assert!(frames[1]["input"][0]["content"][1].get("detail").is_none());
+    // The current canonical builder emits one message per user content part.
+    // Require a real image in each frame before checking the Lite omission.
+    for frame in &frames {
+        let image = frame["input"]
+            .as_array()
+            .expect("input is an array")
+            .iter()
+            .filter_map(|item| item["content"].as_array())
+            .flatten()
+            .find(|part| part["type"] == "input_image")
+            .expect("the frame contains its canonical image");
+        assert_eq!(image["image_url"], "https://example.test/image.png");
+        assert!(image.get("detail").is_none());
+    }
 
     let mut bad_marker = frames[1].clone();
     bad_marker["client_metadata"][super::super::super::responses_lite::WS_METADATA_KEY] =
@@ -574,6 +554,74 @@ async fn responses_lite_marks_every_frame_and_prefixes_only_full_sends() {
         !is_string_map(&bad_marker["client_metadata"]),
         "the public schema leaves client_metadata open, so Rig pins its string-map extension"
     );
+}
+
+/// Canonical and literal images have the same source values, but Lite only
+/// normalizes canonical content. This scripted request-boundary test pins the
+/// caller's provenance choice, which a provider reply cannot demonstrate.
+#[tokio::test]
+async fn a_lite_delta_normalizes_the_typed_image_and_preserves_the_identical_raw_image() {
+    let raw = json!({
+        "type": "message",
+        "role": "user",
+        "content": [
+            { "type": "input_text", "text": "IMAGE_MARKER" },
+            {
+                "type": "input_image",
+                "image_url": "https://example.test/image.png",
+                "detail": "high",
+            },
+        ],
+    });
+    let wire = codex_wire()
+        .with_responses_lite()
+        .expect("the ChatGPT dialect supports Lite");
+    let script = Script::new()
+        .turn([completed("resp_1")])
+        .turn([completed("resp_2")]);
+    let mut session = CodexWebSocketSession::from_connection(
+        wire,
+        CodexIdentity::generate(),
+        script.connection(),
+        None,
+    )
+    .expect("the ChatGPT dialect speaks the Codex contract");
+
+    session
+        .completion(user_request("ROOT_CONTEXT_MARKER"))
+        .await
+        .expect("the Lite root completes");
+    session
+        .send_incremental(
+            InputDelta::new(vec![
+                InputDeltaItem::Canonical(image_message("IMAGE_MARKER")),
+                InputDeltaItem::Raw(raw.clone()),
+            ])
+            .expect("the delta carries both source items"),
+        )
+        .await
+        .expect("the mixed-provenance Lite delta sends");
+    finish_turn(&mut session).await;
+
+    let frames = script.sent_json();
+    assert_eq!(frames.len(), 2);
+    let frame = &frames[1];
+    assert_eq!(frame["previous_response_id"], "resp_1");
+    let input = frame["input"].as_array().expect("delta input is an array");
+    assert_eq!(input.last(), Some(&raw), "the Raw item survives exactly");
+    let typed_image = input[..input.len() - 1]
+        .iter()
+        .filter_map(|item| item["content"].as_array())
+        .flatten()
+        .find(|part| part["type"] == "input_image")
+        .expect("the canonical delta contains its typed image");
+    assert_eq!(typed_image["image_url"], raw["content"][1]["image_url"]);
+    assert!(typed_image.get("detail").is_none());
+    assert_eq!(
+        input.last().expect("the Raw item")["content"][1]["detail"],
+        "high"
+    );
+    openapi_schema::assert_valid(Schema::LiteWebSocketResponseCreate, frame);
 }
 
 /// The generic WebSocket session has no selected Codex identity and therefore
@@ -706,10 +754,10 @@ async fn an_incremental_send_chains_the_tip_and_reuses_the_captured_envelope() {
 
         // Every other field is the root envelope's, byte for byte.
         let mut rest = frame.clone();
-        rest.remove("input");
-        rest.remove("previous_response_id");
+        rest.shift_remove("input");
+        rest.shift_remove("previous_response_id");
         let mut root_rest = root.clone();
-        root_rest.remove("input");
+        root_rest.shift_remove("input");
         assert_eq!(
             rest, root_rest,
             "the delta must reuse the captured envelope"
@@ -923,7 +971,7 @@ async fn an_incomplete_turn_is_a_truthful_terminal_that_blocks_deltas_until_a_fu
         "the streamed partial output survives, got {:?}",
         truncated.choice
     );
-    assert_eq!(truncated.response_id.as_deref(), Some("resp_1"));
+    assert_eq!(truncated.response_id(), Some("resp_1"));
     assert_eq!(
         session.previous_response_id(),
         Some("resp_1"),
@@ -1159,7 +1207,7 @@ impl crate::wire::CredentialSource for CountingSource {
 #[tokio::test]
 async fn each_connect_reads_the_credential_source_once() {
     let source = CountingSource::default();
-    let wire = OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
+    let wire = OpenAIConfig::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
         .with_caller_identity(crate::test_utils::test_caller_identity())
         .with_account_id(ACCOUNT_ID)
         .with_credential_source(source.clone())
@@ -1259,10 +1307,10 @@ async fn with_identity_overrides_the_wire_identity_for_the_session_only() {
     assert_eq!(handshakes[0]["thread-id"], "thread-override");
     assert_eq!(handshakes[0]["x-client-request-id"], "thread-override");
 
-    let mut encoded =
+    let encoded =
         crate::wire::Wire::encode(&wire, user_request("hello"), crate::wire::Mode::Streaming)
             .expect("the request encodes");
-    let http = encoded.requests.remove(0);
+    let http = encoded.request;
     assert_eq!(http.headers()["session-id"], "session-wire");
     assert_eq!(http.headers()["thread-id"], "thread-wire");
 
@@ -1287,7 +1335,7 @@ async fn with_identity_overrides_the_wire_identity_for_the_session_only() {
 
 /// A caller identity, the `version` header and caller request headers.
 fn official_wire() -> Responses {
-    OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
+    OpenAIConfig::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
         .with_account_id(ACCOUNT_ID)
         .with_caller_identity(
             crate::providers::openai::wire::CallerIdentity::new(
@@ -1662,7 +1710,7 @@ async fn the_codex_prewarm_sequence_is_a_warmup_then_an_incremental_first_turn()
             "generate",
             "client_metadata",
         ] {
-            frame.remove(key);
+            frame.shift_remove(key);
         }
         frame
     };
@@ -1818,7 +1866,7 @@ async fn the_lite_prewarm_carries_only_the_prefix_and_the_first_turn_only_its_it
 /// instructions, so a frame's `instructions` are exactly what the placement
 /// lifted.
 fn leading_instructions_wire() -> Responses {
-    let mut provider = OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
+    let mut provider = OpenAIConfig::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
         .with_caller_identity(crate::test_utils::test_caller_identity())
         .with_account_id(ACCOUNT_ID);
     provider.instructions = None;
@@ -2018,4 +2066,162 @@ async fn a_generic_session_warmup_may_carry_no_input() {
     assert_eq!(frame["input"], json!([]), "the warmup carries no input");
     assert!(frame["instructions"].is_string(), "got {frame}");
     assert!(frame.get("stream").is_none(), "got {frame}");
+}
+
+#[cfg(all(feature = "tungstenite", not(target_family = "wasm")))]
+#[test]
+fn bundled_connect_has_current_session_signature() {
+    fn assert_future(
+        _: impl std::future::Future<Output = Result<CodexWebSocketSession, ProviderError>> + Send,
+    ) {
+    }
+
+    let builder = CodexWebSocketSessionBuilder::new(codex_wire())
+        .expect("the current ChatGPT wire supports Codex sessions");
+    assert_future(builder.connect());
+}
+
+#[cfg(all(feature = "tungstenite", not(target_family = "wasm")))]
+#[tokio::test]
+async fn bundled_connect_matches_explicit_tungstenite_backend() {
+    use futures::{SinkExt, StreamExt};
+    use rig_tungstenite::tokio_tungstenite::{
+        accept_hdr_async,
+        tungstenite::{Message as SocketMessage, handshake::server::Request},
+    };
+    use std::time::Duration;
+
+    type TestError = Box<dyn std::error::Error + Send + Sync>;
+
+    let listener = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::net::TcpListener::bind("127.0.0.1:0"),
+    )
+    .await
+    .expect("the local listener bind finishes before its timeout")
+    .expect("the local listener binds");
+    let base_url = format!(
+        "http://{}/v1",
+        listener
+            .local_addr()
+            .expect("the local listener has an address")
+    );
+    let identity = CodexIdentity::from_ids("session-bundled", "thread-bundled")
+        .expect("the fixture session and thread IDs are valid");
+    let wire = OpenAIConfig::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
+        .with_base_url(base_url)
+        .with_caller_identity(crate::test_utils::test_caller_identity())
+        .with_account_id(ACCOUNT_ID)
+        .responses(chatgpt::GPT_5_3_CODEX);
+    let expected_handshake = identity
+        .handshake_request(&wire)
+        .expect("the fixture identity creates its handshake");
+    let builder = || {
+        CodexWebSocketSessionBuilder::new(wire.clone())
+            .expect("the current ChatGPT wire supports Codex sessions")
+            .with_identity(identity.clone())
+            .connect_timeout(Duration::from_secs(2))
+            .event_timeout(Duration::from_secs(2))
+    };
+    let completed_frame = completed("resp_bundled");
+    let delta_frame = text_delta("bundled backend");
+
+    let server = async {
+        let mut received = Vec::new();
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().await?;
+            let mut received_headers = None;
+            let mut socket = accept_hdr_async(stream, |request: &Request, response| {
+                assert_eq!(request.uri().path(), "/v1/responses");
+                received_headers = Some(request.headers().clone());
+                Ok(response)
+            })
+            .await?;
+            let headers = received_headers.ok_or_else(|| {
+                std::io::Error::other("the local upgrade callback did not capture headers")
+            })?;
+            let request = socket.next().await.ok_or_else(|| {
+                std::io::Error::other("the local client ended before response.create")
+            })??;
+            let frame: serde_json::Value = serde_json::from_str(request.to_text()?)?;
+            assert_eq!(frame["type"], "response.create");
+            for event in [&delta_frame, &completed_frame] {
+                socket.send(SocketMessage::text(event.clone())).await?;
+            }
+            let mut closed = false;
+            while let Some(message) = socket.next().await {
+                if message?.is_close() {
+                    closed = true;
+                    break;
+                }
+            }
+            assert!(closed, "each real backend must send its close frame");
+            received.push((headers, frame));
+        }
+        Ok::<_, TestError>(received)
+    };
+
+    let clients = async {
+        let mut bundled = builder().connect().await?;
+        assert_eq!(bundled.identity(), &identity);
+        let bundled_response = bundled.completion(user_request("hello")).await?;
+        bundled.close().await?;
+
+        let mut explicit = builder()
+            .connect_with(&rig_tungstenite::TungsteniteClient::new())
+            .await?;
+        assert_eq!(explicit.identity(), &identity);
+        let explicit_response = explicit.completion(user_request("hello")).await?;
+        explicit.close().await?;
+        Ok::<_, TestError>((bundled_response, explicit_response))
+    };
+
+    // Join both bounded paths even if either fails. No detached server survives.
+    let (server_result, client_result) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(10), server),
+        tokio::time::timeout(Duration::from_secs(10), clients),
+    );
+    let received = server_result
+        .expect("the local server finishes before its timeout")
+        .expect("the local server completes both upgrades and turns");
+    let (bundled_response, explicit_response) = client_result
+        .expect("both clients finish before their timeout")
+        .expect("both clients complete their turns and close");
+    assert_eq!(received.len(), 2);
+    for (headers, _) in &received {
+        for (name, value) in expected_handshake.headers() {
+            assert_eq!(
+                headers.get(name),
+                Some(value),
+                "exact configured header {name}"
+            );
+        }
+    }
+    assert_eq!(
+        received[0].1, received[1].1,
+        "the actual response.create frames agree"
+    );
+    assert_eq!(received[0].1["stream"], true);
+    assert_eq!(received[0].1["prompt_cache_key"], "thread-bundled");
+    assert_eq!(
+        received[0].1["client_metadata"]["session_id"],
+        "session-bundled"
+    );
+    assert_eq!(
+        received[0].1["client_metadata"]["thread_id"],
+        "thread-bundled"
+    );
+    for response in [&bundled_response, &explicit_response] {
+        assert!(
+            matches!(response.choice.as_slice(), [AssistantContent::Text(text)]
+            if text.text == "bundled backend")
+        );
+        assert_eq!(
+            response.raw,
+            serde_json::from_str::<serde_json::Value>(&completed_frame)
+                .expect("the completed fixture is valid JSON")["response"]
+        );
+    }
+    assert_eq!(bundled_response.usage, explicit_response.usage);
+    assert_eq!(bundled_response.model(), explicit_response.model());
 }

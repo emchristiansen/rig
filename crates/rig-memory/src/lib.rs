@@ -199,7 +199,7 @@ fn split_window(messages: Vec<Message>, keep_from: usize) -> (Vec<Message>, Vec<
     let mut orphan_prefix_len = 0;
     for (index, message) in window.iter().enumerate() {
         match message {
-            Message::Assistant { .. } => break,
+            Message::Assistant(_) => break,
             Message::User { content }
                 if content
                     .iter()
@@ -329,13 +329,21 @@ impl HeuristicTokenCounter {
         use rig_core::message::AssistantContent;
         match content {
             AssistantContent::Text(text) => self.bytes_to_tokens(text.text.len()),
-            AssistantContent::Reasoning(reasoning) => {
+            AssistantContent::Reasoning(reasoning) => self.bytes_to_tokens(reasoning.text.len()),
+            AssistantContent::CarriedReasoning(reasoning) => {
                 self.bytes_to_tokens(reasoning.display_text().len())
             }
+            AssistantContent::CarriedText(text) => self.bytes_to_tokens(text.text().len()),
             AssistantContent::ToolCall(call) => {
-                let name_bytes = call.function.name.len()
+                let name_bytes = call.function.name.as_str().len()
                     + call.function.namespace.as_ref().map_or(0, String::len);
-                let args_bytes = call.function.arguments.to_string().len();
+                let retained = call.function.invalid_arguments.as_deref().and_then(|raw| {
+                    rig_core::serde_json::from_str::<rig_core::serde_json::Value>(raw).ok()
+                });
+                let args_bytes = match retained {
+                    Some(value) if !value.is_object() => value.to_string().len(),
+                    Some(_) | None => call.function.arguments_value().to_string().len(),
+                };
                 self.bytes_to_tokens(name_bytes + args_bytes)
             }
             // A custom tool's input is verbatim text, already its own
@@ -343,13 +351,18 @@ impl HeuristicTokenCounter {
             // An opaque provider item is replayed as its JSON: charged by
             // that serialized length.
             AssistantContent::ProviderItem(item) => {
-                self.bytes_to_tokens(item.item.to_string().len())
+                self.bytes_to_tokens(item.payload.item.to_string().len())
             }
             AssistantContent::CustomToolCall(call) => {
-                let name_bytes = call.name.len() + call.namespace.as_ref().map_or(0, String::len);
+                let name_bytes =
+                    call.name.as_str().len() + call.namespace.as_ref().map_or(0, String::len);
                 self.bytes_to_tokens(name_bytes + call.input.len())
             }
             AssistantContent::Image(_) => self.per_attachment_tokens,
+            AssistantContent::Opaque(opaque) => self.bytes_to_tokens(opaque.item.to_string().len()),
+            other => self.bytes_to_tokens(
+                rig_core::serde_json::to_string(other).map_or(0, |json| json.len()),
+            ),
         }
     }
 }
@@ -365,9 +378,7 @@ impl TokenCounter for HeuristicTokenCounter {
     fn count(&self, message: &Message) -> usize {
         let content_tokens: usize = match message {
             Message::User { content } => content.iter().map(|c| self.count_user(c)).sum(),
-            Message::Assistant { content, .. } => {
-                content.iter().map(|c| self.count_assistant(c)).sum()
-            }
+            Message::Assistant(turn) => turn.content.iter().map(|c| self.count_assistant(c)).sum(),
             Message::System { content } => self.bytes_to_tokens(content.len()),
         };
         content_tokens.saturating_add(self.per_message_overhead)
@@ -1195,10 +1206,11 @@ fn render_message_line(msg: &Message) -> String {
                 _ => Cow::Borrowed("[attachment]"),
             })),
         ),
-        Message::Assistant { content, .. } => (
+        Message::Assistant(turn) => (
             "assistant",
-            join_parts(content.iter().map(|item| match item {
+            join_parts(turn.content.iter().map(|item| match item {
                 AssistantContent::Text(text) => Cow::Borrowed(text.text.as_str()),
+                AssistantContent::CarriedText(text) => Cow::Borrowed(text.text()),
                 AssistantContent::ToolCall(call) => {
                     Cow::Owned(format!("[tool call: {}]", call.function.name))
                 }

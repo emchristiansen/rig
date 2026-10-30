@@ -24,9 +24,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create ScyllaDB session
     let session = create_session("127.0.0.1:9042").await?;
     
-    // Bind OpenAI's embeddings wire to the bundled transport
-    let openai = openai::wire::OpenAI::from_env()?.bound()?;
-    let model = openai.embedding(openai::TEXT_EMBEDDING_ADA_002, None);
+    // OpenAI's embedding model
+    let model = openai::OpenAI::from_env()?.embedding(openai::TEXT_EMBEDDING_ADA_002, None);
     
     // Create vector store
     let vector_store = ScyllaDbVectorStore::new(
@@ -44,8 +43,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build();
     let results = vector_store.top_n::<Document>(req).await?;
     
-    for (score, id, doc) in results {
-        println!("Score: {}, ID: {}, Document: {:?}", score, id, doc);
+    for result in results {
+        println!(
+            "Score: {}, ID: {}, Document: {:?}",
+            result.score, result.id, result.document
+        );
     }
     
     Ok(())

@@ -10,7 +10,7 @@ use bytes::Bytes;
 use futures::{StreamExt, poll};
 use http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
 use rig_core::{
-    completion::{CompletionRequest, CompletionRequestBuilder},
+    completion::CompletionRequest,
     driver,
     http_client::{self, BoxedStream, HttpClientExt, LazyBody, MultipartForm, StreamingResponse},
     providers::{
@@ -20,7 +20,7 @@ use rig_core::{
             error::{ErrorDetail, ProviderError},
         },
         openai::{
-            OpenAI,
+            OpenAIConfig,
             responses_api::{
                 observation::{
                     ExistingDiagnosticBasis, Observation, ObservationDispatch, ObservationHandle,
@@ -182,25 +182,25 @@ impl HttpClientExt for ScriptedHttp {
 /// The ChatGPT Responses wire, with the caller's preamble as the whole
 /// instructions: an empty gateway instruction merges to nothing.
 fn wire() -> Responses {
-    OpenAI::with_key(&chatgpt::DIALECT, "synthetic-observed-token")
-        .with_account_id("synthetic-observed-account")
-        .with_base_url("https://observed.invalid/backend")
-        .with_instructions("")
-        .with_caller_identity(
-            CallerIdentity::new(
-                "observed-originator",
-                "observed-agent",
-                Some("fixture-v1".into()),
-            )
-            .expect("synthetic caller identity"),
-        )
-        .responses("requested-model")
+    Responses::new(
+        OpenAIConfig::with_key(&chatgpt::DIALECT, "synthetic-observed-token")
+            .with_account_id("synthetic-observed-account")
+            .with_base_url("https://observed.invalid/backend")
+            .with_instructions("")
+            .with_caller_identity(
+                CallerIdentity::new(
+                    "observed-originator",
+                    "observed-agent",
+                    Some("fixture-v1".into()),
+                )
+                .expect("synthetic caller identity"),
+            ),
+        "requested-model",
+    )
 }
 
 fn request() -> CompletionRequest {
-    CompletionRequestBuilder::unbound("hello")
-        .preamble("caller preamble".into())
-        .build()
+    CompletionRequest::new("hello").preamble("caller preamble")
 }
 
 async fn open(http: ScriptedHttp) -> (ObservationHandle, ObservedResponsesStream) {
@@ -675,7 +675,7 @@ async fn missing_usage_output_and_optional_cached_counts_decode_without_defaults
         let mut body = response(json!([]));
         body.as_object_mut()
             .expect("response object")
-            .remove("output");
+            .shift_remove("output");
         if let Some(usage) = usage {
             body.as_object_mut()
                 .expect("response object")
@@ -776,13 +776,125 @@ async fn malformed_tool_without_provider_ids_keeps_minted_native_identity() {
         &failure.diagnostic_basis,
         ExistingDiagnosticBasis::Stream(report)
             if matches!(report.detail.as_ref(), Some(ErrorDetail::MalformedToolInput(detail))
-                if detail.id == rig_core::message::ToolCallId::minted(0)
+                if matches!(&detail.id, rig_core::message::CallId::Local(_))
                     && detail.provider.is_none() && detail.name == "broken" && detail.raw == "{")
     ));
+    let report = match &failure.diagnostic_basis {
+        ExistingDiagnosticBasis::Stream(report) => Some(report),
+        _ => None,
+    }
+    .expect("stream failure retains the same local diagnostic");
+    let id = match report.detail.as_ref() {
+        Some(ErrorDetail::MalformedToolInput(detail)) => Some(detail.id.clone()),
+        _ => None,
+    }
+    .expect("malformed detail retains a local identity");
+    assert!(id.provider().is_none());
     handle.inspect(|view| {
         assert_eq!(view.stage, ObservationStage::NativeFailed);
         assert_eq!(view.committed_prefix, [original]);
+        assert!(matches!(
+            view.native_cause,
+            Some(ExistingDiagnosticBasis::Stream(retained_report))
+                if Arc::ptr_eq(retained_report, report)
+        ));
     });
+    assert!(stream.next().await.is_none());
+    let retained = stream.finish().expect_err("retained same local failure");
+    assert_eq!(retained.kind, ObservedFailureKind::Stream);
+    assert!(handle.same_operation(&retained.observation));
+    assert!(matches!(
+        &retained.diagnostic_basis,
+        ExistingDiagnosticBasis::Stream(retained_report)
+            if Arc::ptr_eq(retained_report, report)
+                && matches!(retained_report.detail.as_ref(), Some(ErrorDetail::MalformedToolInput(detail))
+                    if detail.id == id
+                        && detail.provider.is_none() && detail.name == "broken" && detail.raw == "{")
+    ));
+}
+
+/// An item ID is original evidence, not a provider call correlator.
+#[tokio::test]
+async fn malformed_tool_with_only_an_item_id_keeps_local_identity_and_original_item_evidence() {
+    let original = json!({
+        "type": "response.output_item.done", "output_index": 0,
+        "sequence_number": 3,
+        "item": {
+            "type": "function_call", "id": "fc_item_only_fixture", "call_id": "",
+            "name": "broken", "arguments": "{", "status": "completed",
+        },
+    })
+    .to_string();
+    let (handle, mut stream) = open(ScriptedHttp::frames(vec![original.clone()])).await;
+    let failure = loop {
+        if let Err(failure) = stream
+            .next()
+            .await
+            .expect("malformed item-only tool failure")
+        {
+            break failure;
+        }
+    };
+    assert_eq!(failure.kind, ObservedFailureKind::Stream);
+    assert!(handle.same_operation(&failure.observation));
+    let report = match &failure.diagnostic_basis {
+        ExistingDiagnosticBasis::Stream(report) => Some(report),
+        _ => None,
+    }
+    .expect("item-only failure retains the native report");
+    let id = match report.detail.as_ref() {
+        Some(ErrorDetail::MalformedToolInput(detail)) => {
+            assert!(matches!(&detail.id, rig_core::message::CallId::Local(_)));
+            assert!(detail.id.provider().is_none());
+            assert!(detail.provider.is_none());
+            assert_eq!(detail.name, "broken");
+            assert_eq!(detail.raw, "{");
+            assert_eq!(
+                detail.error,
+                serde_json::from_str::<Value>("{")
+                    .expect_err("malformed JSON")
+                    .to_string()
+            );
+            Some(detail.id.clone())
+        }
+        _ => None,
+    }
+    .expect("item-only failure retains malformed-input detail");
+    handle.inspect(|view| {
+        assert_eq!(view.stage, ObservationStage::NativeFailed);
+        assert_eq!(view.committed_prefix, [original]);
+        let frame: Value = serde_json::from_str(
+            view.committed_prefix.first().expect("original frame"),
+        )
+        .expect("original frame JSON");
+        assert_eq!(
+            frame.pointer("/item/id"),
+            Some(&json!("fc_item_only_fixture"))
+        );
+        assert_eq!(frame.pointer("/item/call_id"), Some(&json!("")));
+        assert!(matches!(
+            view.native_cause,
+            Some(ExistingDiagnosticBasis::Stream(retained_report))
+                if Arc::ptr_eq(retained_report, report)
+                    && matches!(retained_report.detail.as_ref(), Some(ErrorDetail::MalformedToolInput(detail))
+                        if detail.id == id && detail.provider.is_none()
+                            && detail.name == "broken" && detail.raw == "{")
+        ));
+    });
+    assert!(stream.next().await.is_none());
+    let retained = stream
+        .finish()
+        .expect_err("retained same item-only failure");
+    assert_eq!(retained.kind, ObservedFailureKind::Stream);
+    assert!(handle.same_operation(&retained.observation));
+    assert!(matches!(
+        &retained.diagnostic_basis,
+        ExistingDiagnosticBasis::Stream(retained_report)
+            if Arc::ptr_eq(retained_report, report)
+                && matches!(retained_report.detail.as_ref(), Some(ErrorDetail::MalformedToolInput(detail))
+                    if detail.id == id && detail.provider.is_none()
+                        && detail.name == "broken" && detail.raw == "{")
+    ));
 }
 
 /// Finalization without a genuine terminal differs from a completed malformed tool item.
@@ -834,7 +946,22 @@ async fn missing_terminal_is_provider_failure_but_completed_malformed_tool_is_st
             Some(ErrorDetail::MalformedToolInput(detail)) => {
                 assert_eq!(detail.name, "broken");
                 assert_eq!(detail.raw, "{");
-                assert_eq!(detail.id.explicit(), Some("call_fixture"));
+                assert_eq!(
+                    detail
+                        .id
+                        .provider()
+                        .map(rig_core::message::ProviderCallId::as_str),
+                    Some("call_fixture")
+                );
+                assert_eq!(
+                    detail
+                        .provider
+                        .as_ref()
+                        .expect("provider identity")
+                        .call_id
+                        .as_str(),
+                    "call_fixture"
+                );
                 assert_eq!(
                     detail
                         .provider
@@ -913,7 +1040,7 @@ async fn pending_malformed_tool_precedes_transport_failure() {
                 Some(ErrorDetail::MalformedToolInput(detail))
                     if detail.name == "broken"
                         && detail.raw == "{"
-                        && detail.id.explicit() == Some("call_fixture")
+                        && detail.id.provider().map(rig_core::message::ProviderCallId::as_str) == Some("call_fixture")
                         && detail.provider.as_ref().and_then(|provider| provider.item_id.as_deref())
                             == Some("fc_fixture")
             ));
@@ -1043,7 +1170,7 @@ async fn pending_malformed_tool_is_not_lost_before_a_whole_response() {
         ExistingDiagnosticBasis::Stream(report)
             if matches!(report.detail.as_ref(), Some(ErrorDetail::MalformedToolInput(detail))
                 if detail.name == "broken" && detail.raw == "{"
-                    && detail.id.explicit() == Some("call_fixture")
+                    && detail.id.provider().map(rig_core::message::ProviderCallId::as_str) == Some("call_fixture")
                     && detail.provider.as_ref().and_then(|provider| provider.item_id.as_deref())
                         == Some("fc_fixture"))
     ));
@@ -1122,7 +1249,7 @@ async fn whole_response_text_precedes_a_pending_malformed_tool_failure() {
         ExistingDiagnosticBasis::Stream(report)
             if matches!(report.detail.as_ref(), Some(ErrorDetail::MalformedToolInput(detail))
                 if detail.name == "broken" && detail.raw == "{"
-                    && detail.id.explicit() == Some("call_fixture")
+                    && detail.id.provider().map(rig_core::message::ProviderCallId::as_str) == Some("call_fixture")
                     && detail.provider.as_ref().and_then(|provider| provider.item_id.as_deref())
                         == Some("fc_fixture"))
     ));
@@ -1378,7 +1505,7 @@ async fn caller_rejection_diagnostic_bases_match_selected_terminal_metadata_debu
             expected_usage_debug,
             expected_message_id,
             expected_finish_reason,
-            expected_raw,
+            &actual.raw,
         );
         assert_eq!(
             format!("{actual:?}"),
@@ -1479,7 +1606,7 @@ async fn first_terminal_ignores_later_terminals() {
                 "provider_response_headers: {{}}, finish_reason: Some(Length), ",
                 "provider: \"chatgpt\", model: Some(\"reported-model\"), raw: {:?} }}"
             ),
-            expected_raw
+            &result.body.response.raw
         );
         assert_eq!(format!("{:?}", result.body.response), expected_debug);
         drop(result);
@@ -1519,8 +1646,11 @@ async fn observed_and_ordinary_streams_send_the_same_request() {
 
     let ordinary_http = ScriptedHttp::frames(frames.clone());
     let (unrelated, writer) = Observation::prepare();
-    let mut ordinary =
-        Box::pin(driver::stream(&wire(), &ordinary_http, request(), None).expect("ordinary open"));
+    let mut ordinary = Box::pin(
+        driver::Model::new(wire(), ordinary_http.clone())
+            .stream(request())
+            .expect("ordinary open"),
+    );
     let mut items = 0;
     while let Some(item) = ordinary.next().await {
         item.expect("ordinary item");
@@ -1578,8 +1708,11 @@ async fn refused_statuses_report_what_the_ordinary_stream_reports() {
             ..Script::default()
         };
         let ordinary_http = ScriptedHttp::new(script());
-        let mut ordinary =
-            Box::pin(driver::stream(&wire(), &ordinary_http, request(), None).expect("lazy open"));
+        let mut ordinary = Box::pin(
+            driver::Model::new(wire(), ordinary_http.clone())
+                .stream(request())
+                .expect("lazy open"),
+        );
         let expected = ordinary
             .next()
             .await

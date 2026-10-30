@@ -9,44 +9,12 @@
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
-use rig::completion::{CompletionModel, CompletionRequestBuilder};
+use rig::completion::CompletionRequest;
 use rig::error::ProviderError;
-use rig::streaming::StreamEvent;
+use rig::test_utils::TraceCapture;
 use serde_json::Value;
-use tracing::field::{Field, Visit};
-use tracing::span::{Attributes, Id, Record};
-use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 
 const FIELD: &str = rig::telemetry::PROVIDER_REQUEST_ID_FIELD;
-
-#[derive(Clone, Default)]
-struct Recorded(Arc<Mutex<Vec<String>>>);
-
-struct Visitor<'a>(&'a Recorded);
-
-impl Visit for Visitor<'_> {
-    fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == FIELD
-            && let Ok(mut values) = self.0.0.lock()
-        {
-            values.push(value.to_owned());
-        }
-    }
-
-    fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
-}
-
-struct Capture(Recorded);
-
-impl<S: tracing::Subscriber> Layer<S> for Capture {
-    fn on_new_span(&self, attrs: &Attributes<'_>, _id: &Id, _ctx: Context<'_, S>) {
-        attrs.record(&mut Visitor(&self.0));
-    }
-
-    fn on_record(&self, _span: &Id, values: &Record<'_>, _ctx: Context<'_, S>) {
-        values.record(&mut Visitor(&self.0));
-    }
-}
 
 /// What Rig reported for the three calls, in call order.
 pub struct Observed {
@@ -74,56 +42,58 @@ pub fn take(slot: &Slot) -> Observed {
 /// `slot`. The provider must refuse `rejected` once `reject` shapes the
 /// request: an unknown model, or an argument out of range where the
 /// unknown-model error names the account.
-pub async fn run<M, R>(
+pub async fn run<W, T, Wm, Tr>(
     slot: Slot,
-    model: M,
-    rejected: R,
+    model: rig::driver::Model<W, T>,
+    rejected: rig::driver::Model<Wm, Tr>,
     params: Option<Value>,
-    reject: impl FnOnce(CompletionRequestBuilder<R>) -> CompletionRequestBuilder<R>,
+    reject: impl FnOnce(CompletionRequest) -> CompletionRequest,
 ) where
-    M: CompletionModel + Clone,
-    R: CompletionModel + Clone,
+    W: rig::wire::Wire<Op = rig::operation::Completion>,
+    T: rig::driver::Transport<W>,
+    Wm: rig::wire::Wire<Op = rig::operation::Completion>,
+    Tr: rig::driver::Transport<Wm>,
 {
-    let recorded = Recorded::default();
-    let subscriber = tracing_subscriber::registry().with(Capture(recorded.clone()));
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let capture = TraceCapture::default();
+    let _guard = tracing::subscriber::set_default(capture.subscriber());
 
     let unary = model
-        .completion_request("Reply with exactly: identity probe")
-        .max_tokens(64)
-        .additional_params(params.clone())
-        .send()
+        .call(
+            CompletionRequest::new("Reply with exactly: identity probe")
+                .max_tokens(64)
+                .additional_params(params.clone()),
+        )
         .await
         .expect("unary call");
     let mut stream = model
-        .completion_request("Reply with exactly: stream identity probe")
-        .max_tokens(64)
-        .additional_params(params.clone())
-        .stream()
-        .await
+        .stream(
+            CompletionRequest::new("Reply with exactly: stream identity probe")
+                .max_tokens(64)
+                .additional_params(params.clone()),
+        )
         .expect("stream opens");
-    let mut terminal = None;
     while let Some(item) = stream.next().await {
-        if let StreamEvent::Final(record) = item.expect("stream item") {
-            terminal = Some(record);
-        }
+        item.expect("stream item");
     }
-    let terminal = terminal.expect("the stream ends with a final record");
-    let error: ProviderError = reject(
-        rejected
-            .completion_request("Reply with exactly: rejected")
-            .max_tokens(64)
-            .additional_params(params.clone()),
-    )
-    .send()
-    .await
-    .expect_err("the provider rejects the model");
+    let terminal = stream
+        .finish()
+        .await
+        .expect("the stream ends with a final record");
+    let error: ProviderError = rejected
+        .call(reject(
+            CompletionRequest::new("Reply with exactly: rejected")
+                .max_tokens(64)
+                .additional_params(params.clone()),
+        ))
+        .await
+        .expect_err("the provider rejects the model");
 
-    let spans = recorded
-        .0
-        .lock()
-        .map(|values| values.clone())
-        .unwrap_or_default();
+    let spans = capture
+        .values_of(FIELD)
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect();
     let observed = Observed {
         unary: unary.provider_request_id,
         unary_raw: unary.raw,

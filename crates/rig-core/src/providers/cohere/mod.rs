@@ -1,4 +1,14 @@
-//! Cohere configuration, endpoint wires, and model identifiers.
+//! Cohere configuration, model identifiers, and its chat and embedding
+//! wires.
+//!
+//! Chat goes through [`CohereChat`]: by default Cohere's native chat API
+//! ([`NativeChat`]), which grounds the answer in the request's documents
+//! and keeps citations in its provider item. [`ChatRoute::Compatibility`]
+//! explicitly uses the OpenAI Compatibility API on the shared Chat
+//! Completions wire, as the
+//! [`COHERE`](crate::providers::openai::wire::COHERE) dialect.
+//! [`ChatRoute::Auto`] selects the native route for requests with documents.
+//! Text and image embeddings use Cohere's own `/v1/embed`.
 //!
 //! ```no_run
 //! use rig_core::providers::cohere;
@@ -6,20 +16,29 @@
 //! # fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let provider = cohere::Cohere::from_env()?;
 //!
-//! let command_a = provider.chat(cohere::COMMAND_A_03_2025);
-//! let embeddings = provider.embeddings(cohere::EMBED_V4, None);
+//! let mut command_a = provider.completion(cohere::COMMAND_A_03_2025);
+//! command_a.wire = command_a.wire.with_route(cohere::ChatRoute::Compatibility);
+//! let embeddings = provider.embedding(cohere::EMBED_V4, None);
 //! # Ok(())
 //! # }
 //! ```
-//!
-//! Bind a wire to a transport to obtain a [`crate::driver::Bound`] model.
 
-pub mod completion;
+pub mod chat;
 pub mod embeddings;
+pub mod extension;
 pub mod streaming;
 pub mod wire;
 
-pub use wire::{Chat, Cohere, Embeddings, ImageEmbeddings};
+pub use crate::client::cohere::Cohere;
+pub use chat::NativeChat;
+pub use embeddings::{
+    EMBED_ENGLISH_LIGHT_V3, EMBED_ENGLISH_V3, EMBED_MULTILINGUAL_LIGHT_V3, EMBED_MULTILINGUAL_V3,
+    EMBED_V4, Embeddings, ImageEmbeddings,
+};
+pub use wire::{ChatRoute, CohereChat, CohereConfig};
+
+/// Stable descriptor name recorded on normalized responses and telemetry.
+pub const PROVIDER_NAME: &str = "cohere";
 
 /// `command-a-plus-05-2026` completion model
 pub const COMMAND_A_PLUS_05_2026: &str = "command-a-plus-05-2026";
@@ -38,25 +57,18 @@ pub const COMMAND_R_PLUS_08_2024: &str = "command-r-plus-08-2024";
 /// `command-r-08-2024` completion model
 pub const COMMAND_R_08_2024: &str = "command-r-08-2024";
 
-/// `embed-v4.0` embedding model
-pub const EMBED_V4: &str = "embed-v4.0";
-/// `embed-english-v3.0` embedding model
-pub const EMBED_ENGLISH_V3: &str = "embed-english-v3.0";
-/// `embed-english-light-v3.0` embedding model
-pub const EMBED_ENGLISH_LIGHT_V3: &str = "embed-english-light-v3.0";
-/// `embed-multilingual-v3.0` embedding model
-pub const EMBED_MULTILINGUAL_V3: &str = "embed-multilingual-v3.0";
-/// `embed-multilingual-light-v3.0` embedding model
-pub const EMBED_MULTILINGUAL_LIGHT_V3: &str = "embed-multilingual-light-v3.0";
+/// Whether `model`, an id the catalog does not list, reads user images by
+/// its name: Cohere's vision models (Command A Vision, Aya Vision) do, and
+/// its text models do not.
+pub(crate) fn reads_images(model: &str) -> bool {
+    model.contains("vision")
+}
 
-pub(crate) fn model_dimensions_from_identifier(identifier: &str) -> Option<usize> {
-    match identifier {
-        EMBED_V4 => Some(1_536),
-        EMBED_ENGLISH_V3 | EMBED_MULTILINGUAL_V3 => Some(1_024),
-        EMBED_ENGLISH_LIGHT_V3 | EMBED_MULTILINGUAL_LIGHT_V3 => Some(384),
-        _ => None,
-    }
+/// Whether `model` thinks, as its catalog entry says, or `None` for an id
+/// the catalog does not list. Both chat routes read it.
+pub(crate) fn thinks(model: &str) -> Option<bool> {
+    crate::catalog::lookup(PROVIDER_NAME, model).map(|spec| spec.reasoning.supported)
 }
 
 #[cfg(test)]
-mod tests;
+mod history_tests;

@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 10072942899351225430,
+    "run_spec": 11761598427705777809,
     "handlers": [
       {
         "key": "golden/model:default",
@@ -3198,8 +3198,26 @@
           "outcome": "completion",
           "choice": [
             {
-              "type": "text",
-              "text": "Ready."
+              "type": "carried_text",
+              "content": {
+                "type": "text",
+                "text": "Ready."
+              },
+              "payload": {
+                "item": {
+                  "annotations": [],
+                  "logprobs": [],
+                  "text": "Ready.",
+                  "type": "output_text"
+                },
+                "provider": "openai",
+                "position": {
+                  "kind": "message_content",
+                  "item_index": 0,
+                  "part_index": 0
+                }
+              },
+              "item_id": "msg_01372c9d33b010e1006ab395fc45f487d0a1ead8d9cb4b215d"
             }
           ],
           "usage": {
@@ -3207,14 +3225,26 @@
             "output_tokens": 3,
             "total_tokens": 31,
             "cached_input_tokens": 0,
-            "reasoning_tokens": 0
+            "cache_creation_input_tokens": 0,
+            "reasoning_tokens": 0,
+            "cost": {
+              "input": 0.00007,
+              "output": 0.00003,
+              "cache_read": 0.0,
+              "cache_write": 0.0,
+              "total": 0.00009999999999999999
+            }
           },
           "message_id": "msg_01372c9d33b010e1006ab395fc45f487d0a1ead8d9cb4b215d",
-          "response_id": "resp_01372c9d33b010e1006ab395fbc36087d09632754522963eb4",
+          "origin": {
+            "api": "openai.responses",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "response_model": "gpt-4o-2024-08-06",
+            "response_id": "resp_01372c9d33b010e1006ab395fbc36087d09632754522963eb4"
+          },
           "provider_request_id": "req_850242aec5824de1af7b410deafb5f85",
           "finish_reason": "stop",
-          "provider": "openai",
-          "model": "gpt-4o-2024-08-06",
           "raw": {
             "access_programs": null,
             "background": false,

@@ -1,176 +1,82 @@
-//! Responses frame classification, event decoding, and terminal metadata.
+//! Strict Responses decoding on the branded completion writer.
 //!
-//! ```
-//! use rig_core::providers::openai::responses_api::streaming::{ResponsesDecoder, ResponsesStreamOptions};
-//! let decoder = ResponsesDecoder::new("openai", ResponsesStreamOptions::strict());
-//! ```
+//! Known frames must satisfy their wire schema. Unknown events retain their
+//! original JSON. Output and content positions remain separate coordinates,
+//! and only a genuine provider terminal establishes an end of response.
 
-use crate::error::ProviderError;
-use crate::operation::AdapterOutput;
-use crate::operation::Completion;
-use crate::providers::internal::wire::{self, WireEvent};
-use crate::providers::openai::responses_api::{
-    ClassifiedArguments, FunctionCallArguments, IncompleteDetailsReason, ReasoningSummary,
-    ReasoningTextContent, ResponseStatus, ResponsesUsage, ToolStatus,
-};
-use crate::streaming::{
-    BlockId, CustomToolCallEnd, StreamFinal, ToolCallEnd, UnparseableToolInput,
-};
-use crate::wire::Decoder;
-use crate::wire::WireFrame;
+use crate::completion::{Cost, FinishReason, ProviderMessageId, Usage};
+use crate::error::{ProviderCallEvidence, ProviderError};
+use crate::json_utils::Lenient;
+use crate::message::{CallId, CarriedPosition, Source, SourceLocation, ToolName};
+use crate::operation::{Block, CallFragment, Completion, Finish};
+use crate::providers::internal::wire;
+use crate::streaming::{DiscardReason, ReasoningAuthority, SourceOrder};
+use crate::wire::{Decoder, Flow, IncompleteEof, Out, WireCitation, WireEvent, WireFrame};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+use std::collections::{BTreeMap, HashMap, HashSet, btree_map::Entry};
 
-use super::{CompletionResponse, Output};
+mod reader;
+#[cfg(feature = "websocket")]
+pub(crate) use reader::websocket_done;
 
-/// Response lifecycle event or output-item event.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(untagged)]
-pub enum StreamingCompletionChunk {
-    Response(ResponseChunk),
-    Delta(ItemChunk),
+/// The protected accumulator's per-call fragment bound.
+const MAX_TOOL_INPUT_BYTES: usize = 32 * 1024 * 1024;
+/// Call state slots for distinct call items at a reused output index; no
+/// output index reaches them.
+const REUSED_CALL_SLOTS: u64 = 1 << 63;
+/// Reasoning state slots for distinct reasoning items at a reused output
+/// index; no output index reaches them.
+const REUSED_REASONING_SLOTS: u64 = 1 << 62;
+/// Order slots for distinct provider items at a reused output index; no
+/// output index reaches them.
+const REUSED_PROVIDER_SLOTS: u64 = 1 << 61;
+/// Message state slots for distinct message items at a reused output index;
+/// no output index reaches them.
+const REUSED_MESSAGE_SLOTS: u64 = 1 << 60;
+/// Where items at a reused output index sort within it: beyond every content
+/// position of the item that first used the index.
+const REUSED_ORDER_BASE: u64 = 1 << 32;
+
+/// How an output item reached the decoder.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Arrival {
+    /// `response.output_item.added`.
+    Added,
+    /// `response.output_item.done`.
+    Done,
+    /// The terminal response's `output`.
+    Restated,
 }
 
-/// Provider terminal metadata serialized into [`StreamFinal::raw`].
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct StreamingCompletionResponse {
-    /// Token usage from the terminal response event; `None` when the event
-    /// carried no `usage` object.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<ResponsesUsage>,
-    /// The complete object-shaped reasoning metadata from the terminal response event.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_metadata: Option<serde_json::Map<String, serde_json::Value>>,
-    /// The effective reasoning context from the terminal response event.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_context: Option<String>,
-    /// The `status` reported by the terminal `response.completed` event.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<ResponseStatus>,
-    /// Why the response stopped short, when the provider said so.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub incomplete_details: Option<IncompleteDetailsReason>,
-    /// The assistant message ID (`msg_...`) carried by the terminal response's
-    /// output items.
-    ///
-    /// Distinct from [`Self::response_id`] (`resp_...`), which names the whole
-    /// response.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message_id: Option<String>,
-    /// The response ID (`resp_...`) reported by the terminal
-    /// `response.completed` event.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub response_id: Option<String>,
-    /// The model identifier reported by the terminal response event.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    /// Transport request ID, if supplied by the caller.
-    /// The driver stamps connection headers onto the normalized final record instead.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_request_id: Option<String>,
+const ITEM_EVENTS: &str = "output_item.added output_item.done content_part.added content_part.done \
+    output_text.delta output_text.done refusal.delta refusal.done function_call_arguments.delta \
+    function_call_arguments.done reasoning_summary_part.added reasoning_summary_part.done \
+    reasoning_summary_text.delta reasoning_summary_text.done reasoning_text.delta reasoning_text.done";
+
+fn is_known_responses_event_type(kind: &str) -> bool {
+    is_lifecycle_event(kind)
+        || kind
+            .strip_prefix("response.")
+            .is_some_and(|event| ITEM_EVENTS.split_whitespace().any(|known| known == event))
 }
 
-impl StreamingCompletionResponse {
-    /// Create a terminal record carrying only usage; the remaining metadata is
-    /// filled in from the terminal `response.completed` event as it arrives.
-    pub fn new(usage: Option<ResponsesUsage>) -> Self {
-        Self {
-            usage,
-            provider_request_id: None,
-            reasoning_metadata: None,
-            reasoning_context: None,
-            status: None,
-            incomplete_details: None,
-            message_id: None,
-            response_id: None,
-            model: None,
-        }
-    }
+pub(crate) fn is_lifecycle_event(kind: &str) -> bool {
+    matches!(
+        kind,
+        "response.created"
+            | "response.in_progress"
+            | "response.completed"
+            | "response.failed"
+            | "response.incomplete"
+    )
 }
 
-/// Normalize the Responses API's terminal stream record.
-///
-/// The provider descriptor name is an input for the same reason it is on the
-/// unary conversion: ChatGPT and Copilot stream this exact wire shape, so a
-/// baked-in `"openai"` would mislabel them.
-///
-/// The finish reason is left exactly as the provider reported it;
-/// [`crate::streaming::StreamingCompletionResponse`] applies the tool-call
-/// reconciliation afterwards, using the calls the stream actually emitted.
-///
-/// The native record is serialized onto [`StreamFinal::raw`]; a
-/// serialization failure is the caller's to surface as an in-band error.
-fn terminal_record(
-    provider: &str,
-    upstream_reasoning_issuer: bool,
-    response: StreamingCompletionResponse,
-) -> Result<StreamFinal, ProviderError> {
-    let raw = serde_json::to_value(&response)?;
-    let issuer = upstream_reasoning_issuer
-        .then_some(response.model.as_deref())
-        .flatten()
-        .map(|model| crate::providers::openai::wire::upstream_reasoning_issuer(provider, model));
-    let finish_reason = response
-        .status
-        .as_ref()
-        .and_then(|status| super::map_finish_reason(status, response.incomplete_details.as_ref()));
-
-    let terminal = StreamFinal::new(provider, crate::completion::Usage::from(&response), raw)
-        .with_optional_finish_reason(finish_reason)
-        .with_optional_message_id(response.message_id)
-        .with_optional_response_id(response.response_id)
-        .with_optional_provider_request_id(response.provider_request_id)
-        .with_optional_model(response.model);
-    Ok(match issuer {
-        Some(issuer) => terminal.with_reasoning_issuer(issuer),
-        None => terminal,
-    })
+fn is_document_event(kind: &str) -> bool {
+    is_known_responses_event_type(kind) || matches!(kind, "error" | "response.queued")
 }
 
-/// Combine summaries, content, and encrypted data into one reasoning restatement.
-/// Preserve `provider_id` and wire field order. Return `None` for empty content;
-/// the caller must close the existing block with the returned restatement.
-pub(crate) fn reasoning_from_done_item(
-    provider_id: Option<&str>,
-    summary: Vec<ReasoningSummary>,
-    content: Vec<ReasoningTextContent>,
-    encrypted_content: Option<String>,
-    signature: Option<String>,
-) -> Option<crate::message::Reasoning> {
-    // Same builder as the unary decode, so the restatement and the
-    // non-streaming conversion of one item cannot drift.
-    let blocks = super::reasoning_content_blocks(summary, content, encrypted_content, signature);
-
-    if blocks.is_empty() {
-        return None;
-    }
-
-    Some(crate::message::Reasoning {
-        provider: None,
-        id: provider_id.map(str::to_owned),
-        content: blocks,
-    })
-}
-
-impl From<&StreamingCompletionResponse> for crate::completion::Usage {
-    fn from(response: &StreamingCompletionResponse) -> Self {
-        response.usage.as_ref().map(Self::from).unwrap_or_default()
-    }
-}
-
-/// A response chunk from OpenAI's response API.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ResponseChunk {
-    /// The response chunk type
-    #[serde(rename = "type")]
-    pub kind: ResponseChunkKind,
-    /// The response itself
-    pub response: CompletionResponse,
-    /// The item sequence
-    pub sequence_number: u64,
-}
-
-/// Response chunk type.
-/// Renames are used to ensure that this type gets (de)serialized properly.
+/// Known lifecycle discriminants shared with the explicit observation reader.
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 pub enum ResponseChunkKind {
     #[serde(rename = "response.created")]
@@ -185,2563 +91,2301 @@ pub enum ResponseChunkKind {
     ResponseIncomplete,
 }
 
-/// Whether `kind` is a Responses SSE event type this client models.
-///
-/// The union of [`ResponseChunkKind`]'s and [`ItemChunkKind`]'s wire names: a
-/// frame carrying one of these that still fails to deserialize is a data-level
-/// defect in a known event, not an unknown event type, and must surface as an
-/// error rather than be skipped.
-fn is_known_responses_event_type(kind: &str) -> bool {
-    matches!(
-        kind,
-        "response.created"
-            | "response.in_progress"
-            | "response.completed"
-            | "response.failed"
-            | "response.incomplete"
-            | "response.output_item.added"
-            | "response.output_item.done"
-            | "response.content_part.added"
-            | "response.content_part.done"
-            | "response.output_text.delta"
-            | "response.output_text.done"
-            | "response.refusal.delta"
-            | "response.refusal.done"
-            | "response.function_call_arguments.delta"
-            | "response.function_call_arguments.done"
-            | "response.reasoning_summary_part.added"
-            | "response.reasoning_summary_part.done"
-            | "response.reasoning_summary_text.delta"
-            | "response.reasoning_summary_text.done"
-            | "response.reasoning_text.delta"
-            | "response.reasoning_text.done"
-    )
-}
-
-/// Classify a tagged Responses event with strict decoding for known event types.
-/// Callers must handle `error` and WebSocket `response.done` separately.
-#[doc(hidden)]
-pub fn classify_responses_frame(data: &str) -> WireEvent<StreamingCompletionChunk> {
-    wire::classify_tagged_frame(data, "type", is_known_responses_event_type)
-}
-
-/// How a decoder takes a terminal `response.incomplete` event (for example a
-/// `max_output_tokens` truncation).
-///
-/// The contract is transport-specific: an HTTP SSE stream refuses it by
-/// default and accepts it only when the caller opts in
-/// ([`super::wire::Responses::with_streamed_incomplete`]); a unary reply and a
-/// websocket session accept it. Either way incomplete is never reported as
-/// completed: an accepted one ends the turn with its truthful finish reason
-/// (max-output → `Length`, content-filter → `ContentFilter`, else `Other`).
+/// Whether a streamed incomplete terminal is refused or retained truthfully.
+/// Unary bodies accept incomplete replies independently of this policy.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IncompleteTerminal {
-    /// End the reply with an error carrying the provider's terminal event.
-    /// The HTTP SSE default.
     #[default]
     Refuse,
-    /// Keep the partial output and usage and end the turn with the finish
-    /// reason the provider's `incomplete_details` states.
     Accept,
 }
 
-/// The decoder's two independent policy axes: when a completed tool call is
-/// published, and how a terminal `response.incomplete` is taken.
+/// Independent completed-call publication and streamed-incomplete policies.
 #[derive(Clone, Copy, Debug)]
-#[doc(hidden)]
 pub struct ResponsesStreamOptions {
-    /// Publish a call the wire delivered whole at its `output_item.done`
-    /// rather than buffering it to the terminal.
     immediate_tool_calls: bool,
-    /// How a terminal `response.incomplete` is taken.
     incomplete: IncompleteTerminal,
 }
 
 impl ResponsesStreamOptions {
-    /// Buffered tool calls; a terminal `response.incomplete` is refused.
-    #[doc(hidden)]
     pub const fn strict() -> Self {
         Self {
             immediate_tool_calls: false,
             incomplete: IncompleteTerminal::Refuse,
         }
     }
-
     pub(crate) const fn strict_with_immediate_tool_calls() -> Self {
         Self {
             immediate_tool_calls: true,
             incomplete: IncompleteTerminal::Refuse,
         }
     }
-
-    /// The same options with `incomplete` selecting how a terminal
-    /// `response.incomplete` is taken.
-    #[doc(hidden)]
     pub const fn with_incomplete(mut self, incomplete: IncompleteTerminal) -> Self {
         self.incomplete = incomplete;
         self
     }
-
-    const fn emits_completed_tool_calls_immediately(self) -> bool {
-        self.immediate_tool_calls
-    }
-
-    const fn refuses_incomplete(self) -> bool {
-        matches!(self.incomplete, IncompleteTerminal::Refuse)
-    }
 }
 
-/// A tool call the wire delivered whole, buffered to the terminal.
-enum BufferedCall {
-    /// A function call, finalized by the shared accumulator.
-    Function {
-        source_order: crate::streaming::SourceOrder,
-        end: ToolCallEnd,
+/// Strict discriminator-first classification, without envelope repair.
+pub fn classify_responses_payload(data: &str) -> WireEvent<ResponsesEvent> {
+    reader::classify(data)
+}
+
+#[cfg(any(feature = "websocket", test))]
+pub(crate) fn classify_websocket_payload(data: &str) -> WireEvent<ResponsesEvent> {
+    ReaderPolicy::WebSocket.classify(data)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ReaderPolicy {
+    HttpSse {
+        repair_envelopes: bool,
     },
-    /// A custom call: complete as delivered, with verbatim input.
-    Custom {
-        source_order: crate::streaming::SourceOrder,
-        end: CustomToolCallEnd,
-    },
+    #[cfg(any(feature = "websocket", test))]
+    WebSocket,
 }
 
-#[doc(hidden)]
-pub struct RawChoiceAccumulator {
-    /// Stable descriptor name stamped on the terminal record: ChatGPT and
-    /// Copilot stream this exact wire shape, so it is an input rather than
-    /// a baked-in `"openai"`.
-    provider: String,
-    /// The terminal record under assembly: what the terminal event says
-    /// about the turn, filled in as the stream reports it.
-    terminal: StreamingCompletionResponse,
-    /// Buffered tool-call ends for calls delivered whole by
-    /// `output_item.done`, flushed at the terminal (or before a terminal
-    /// error) as `BlockEnd`s keyed by the slot's assembly id. Assembly and
-    /// internal-id correlation live in the shared accumulator, keyed by the
-    /// function-call item id the added/delta/done events share.
-    tool_calls: Vec<(BlockId, BufferedCall)>,
-    /// Whether a genuine terminal event (`response.completed` or
-    /// `response.incomplete`) arrived. Without one the stream was truncated,
-    /// and `finish` withholds the terminal record.
-    saw_terminal: bool,
-    /// Reasoning assembly keys fixed by the first event in each output slot.
-    /// Later wire IDs do not change an established key.
-    reasoning_slots: std::collections::HashMap<u64, crate::streaming::BlockId>,
-    /// Anonymous reasoning keys use their own namespace, distinct from
-    /// anonymous tools and output-index-keyed provider items.
-    reasoning_ids: crate::streaming::SyntheticIds,
-    /// Tool-call assembly keys fixed per output slot.
-    tool_slots: crate::providers::internal::tool_call_bridge::ToolCallBridge<u64>,
-    /// Output slots whose opaque provider item was already published by an
-    /// `output_item.done` event or whole-response replay. The terminal body
-    /// fills only missing opaque slots.
-    finished_provider_items: std::collections::HashSet<u64>,
-    /// The `call_…` correlator each open slot announced on
-    /// `output_item.added`, kept beside the bridge so a slot closed by the
-    /// terminal drain (its `output_item.done` frame was lost) still
-    /// finalizes with the dual-wire identity Responses replay pairs on.
-    pending_call_ids: std::collections::HashMap<u64, String>,
-    /// The namespace each open slot announced on `output_item.added`, kept
-    /// for the same reason as [`Self::pending_call_ids`]: a slot the terminal
-    /// drain closes must not lose its qualifier.
-    pending_namespaces: std::collections::HashMap<u64, String>,
-    /// The argument fragments each open function-call slot streamed, assembled
-    /// exactly as the shared accumulator assembles its buffer for that slot.
-    /// The done item's verdict reads it to know whether that buffer would
-    /// answer for a restatement that does not parse.
-    argument_fragments: std::collections::HashMap<u64, AssembledArguments>,
-    message_parts: std::collections::BTreeMap<(u64, u64), MessagePart>,
-    active_message_part: Option<BlockId>,
-    reasoning_parts: std::collections::BTreeMap<u64, ReasoningParts>,
-    finished_reasoning: std::collections::HashSet<u64>,
-    part_ids: crate::streaming::SyntheticIds,
-    /// Whether reasoning belongs to the upstream model's family rather than
-    /// to `provider`, a gateway ([`crate::providers::openai::wire::upstream_reasoning_issuer`]).
-    upstream_reasoning_issuer: bool,
-    /// The parent item kind each output slot's typed evidence established.
-    /// An unknown content part carries no parent kind of its own.
-    parent_kinds: std::collections::HashMap<u64, PartParent>,
-    /// Unknown content parts seen before their slot's parent kind, kept raw per
-    /// `(output_index, content_index)` in arrival order with the item id their
-    /// event named. Identical restatements collapse; distinct observations are
-    /// all kept.
-    undecided_parts: std::collections::BTreeMap<(u64, u64), Vec<UndecidedPart>>,
-    /// A protocol refusal raised mid-event, taken by the decoder, which ends the
-    /// reply after the usual pre-error flush.
-    refusal: Option<ProviderError>,
-    /// Message slots whose text a delta delivered. Their item and terminal
-    /// snapshots carry no phase to the stream: that keeps the recorded
-    /// replay requests of streamed turns byte-identical. Unary and
-    /// terminal-only messages keep their phase.
-    delta_message_slots: std::collections::HashSet<u64>,
-    /// The output slot each message id owns: the position where the id was
-    /// first seen, or, for a completed snapshot of an unseen id, the slot its
-    /// id-less deltas filled. A frame whose envelope lost its `output_index`
-    /// still reaches the message it belongs to.
-    message_slot_by_id: std::collections::HashMap<String, u64>,
-    /// Slots whose text arrived by deltas carrying no item id, not yet owned
-    /// by any message id.
-    unattributed_message_slots: std::collections::BTreeSet<u64>,
-}
-
-/// The item kind that owns a slot's content parts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PartParent {
-    Message,
-    Reasoning,
-}
-
-/// An unknown content part waiting for its parent kind. A part whose event
-/// named an item binds only to that item; an id-less part binds by position.
-#[derive(Debug, PartialEq)]
-struct UndecidedPart {
-    item_id: Option<String>,
-    value: serde_json::Value,
-}
-
-impl UndecidedPart {
-    fn binds_to(&self, item_id: Option<&str>) -> bool {
-        self.item_id
-            .as_deref()
-            .is_none_or(|own| item_id == Some(own))
-    }
-}
-
-/// A completed snapshot's content, which may take over a slot that id-less
-/// deltas filled when it restates that slot exactly.
-#[derive(Clone, Copy)]
-enum Restatement<'a> {
-    /// Not a completed snapshot (`added` or a delta): never takes over.
-    None,
-    /// A whole message item: `output_item.done` or the terminal body.
-    Item(&'a [super::AssistantContent]),
-    /// One completed content part: `content_part.done`.
-    Part(u64, &'a super::AssistantContent),
-}
-
-struct MessagePart {
-    key: BlockId,
-    text: String,
-    metadata: Option<crate::message::AdditionalParams>,
-    phase: Option<String>,
-    refusal_marked: bool,
-}
-
-impl MessagePart {
-    fn is_opaque(&self) -> bool {
-        super::opaque_message_part(self.metadata.as_ref()).is_some()
-    }
-
-    /// Whether `content` states exactly this part: the same kind, equal
-    /// text, or an equal raw value for an opaque part.
-    fn restated_by(&self, content: &super::AssistantContent) -> bool {
-        match content {
-            super::AssistantContent::Unknown(value) => {
-                super::opaque_message_part(self.metadata.as_ref()) == Some(value)
-            }
-            super::AssistantContent::Refusal { refusal } => {
-                self.refusal_marked && self.text == *refusal
-            }
-            super::AssistantContent::OutputText(text) => {
-                !self.refusal_marked && !self.is_opaque() && self.text == text.text
-            }
-        }
-    }
-}
-
-/// The kind name a content part has for [`conflicting_part_kind`].
-fn part_kind_name(opaque: bool) -> &'static str {
-    if opaque { "opaque" } else { "text" }
-}
-
-/// One content slot stated first as one kind and then as the other. No
-/// replacement or merge policy exists between an opaque part and known text.
-fn conflicting_part_kind(
-    output_index: u64,
-    array: &str,
-    index: u64,
-    stored_opaque: bool,
-    incoming_opaque: bool,
-) -> ProviderError {
-    ProviderError::Response(format!(
-        "conflicting Responses content part kind at output {output_index}, {array} \
-         {index}: stored {} part restated as {}",
-        part_kind_name(stored_opaque),
-        part_kind_name(incoming_opaque),
-    ))
-}
-
-/// A reasoning part stated inside an item already evidenced as a message.
-fn conflicting_parent_kind(output_index: u64, content_index: u64) -> ProviderError {
-    ProviderError::Response(format!(
-        "conflicting Responses parent kind at output {output_index}, content \
-         {content_index}: a reasoning_text part in a message"
-    ))
-}
-
-/// Which reasoning array a part belongs to.
-#[derive(Clone, Copy)]
-enum ReasoningArray {
-    Summary,
-    Content,
-}
-
-impl ReasoningArray {
-    fn name(self) -> &'static str {
+impl ReaderPolicy {
+    fn classify(self, data: &str) -> WireEvent<ResponsesEvent> {
         match self {
-            Self::Summary => "summary",
-            Self::Content => "content",
+            Self::HttpSse { repair_envelopes } => classify_reader_payload(data, repair_envelopes),
+            #[cfg(any(feature = "websocket", test))]
+            Self::WebSocket => reader::classify_websocket(data),
         }
     }
 }
 
-/// Full output-text snapshots use citation suffixes when possible. A changed
-/// object or a replaced array needs an owned-key reset before the replacement.
-fn message_snapshot_metadata(
-    previous: Option<&crate::message::AdditionalParams>,
-    current: Option<&crate::message::AdditionalParams>,
-    phase: Option<&str>,
-    out: &mut AdapterOutput,
-) {
-    use super::OPENAI_RESPONSES_EXTRAS_KEY as KEY;
-    use serde_json::{Map, Value};
-    let old = previous.and_then(|params| params.wire_extras(KEY));
-    let new = current.and_then(|params| params.wire_extras(KEY));
-    if old != new {
-        let empty = Map::new();
-        let old = old.unwrap_or(&empty);
-        let new = new.unwrap_or(&empty);
-        let mut replacement = old.keys().any(|key| !new.contains_key(key));
-        let mut delta = Map::new();
-        for (key, value) in new {
-            match old.get(key) {
-                Some(prior) if prior == value => {}
-                Some(Value::Array(prior)) => match value {
-                    Value::Array(next) => match next.strip_prefix(prior.as_slice()) {
-                        Some(suffix) => {
-                            delta.insert(key.clone(), Value::Array(suffix.to_vec()));
-                        }
-                        None => replacement = true,
-                    },
-                    _ => replacement = true,
-                },
-                Some(Value::Object(_)) => replacement = true,
-                _ => {
-                    delta.insert(key.clone(), value.clone());
-                }
-            }
-        }
-        if replacement {
-            if let Some(reset) =
-                crate::message::AdditionalParams::from_entries(Some((KEY, Value::Null)))
-            {
-                out.text_meta(reset);
-            }
-            delta = new.clone();
-            if let Some(phase) = phase {
-                delta.insert(
-                    super::OPENAI_RESPONSES_PHASE_KEY.into(),
-                    Value::String(phase.into()),
-                );
-            }
-        }
-        if (replacement || !delta.is_empty())
-            && let Some(params) =
-                crate::message::AdditionalParams::from_entries(Some((KEY, Value::Object(delta))))
-        {
-            out.text_meta(params);
-        }
-    }
-    // Opaque and refusal markers occupy their own key, outside the extras map.
-    let old_marker = previous.and_then(|params| params.get(super::OPENAI_RESPONSES_PART_KEY));
-    let marker = current.and_then(|params| params.get(super::OPENAI_RESPONSES_PART_KEY));
-    if old_marker != marker
-        && let Some(marker) = marker
-        && let Some(params) = crate::message::AdditionalParams::from_entries(Some((
-            super::OPENAI_RESPONSES_PART_KEY,
-            marker.clone(),
-        )))
-    {
-        out.text_meta(params);
-    }
+/// Strict tagged classification. Whole bodies use `classify_responses_payload`.
+#[doc(hidden)]
+pub fn classify_responses_frame(data: &str) -> WireEvent<ResponsesEvent> {
+    reader::tagged(data)
 }
 
-#[derive(Default)]
-struct ReasoningParts {
-    id: Option<String>,
-    summary: std::collections::BTreeMap<u64, ReasoningSummary>,
-    content: std::collections::BTreeMap<u64, ReasoningTextContent>,
-    encrypted: Option<String>,
-    signature: Option<String>,
-    // Item/whole-body completion supplies an authoritative end even when its
-    // publication waits for the last snapshot of the turn.
-    wire_sent: bool,
-    ready: bool,
-    /// A reasoning delta opened this slot's block on the live stream. An
-    /// opened block is closed exactly once by the flush, whatever its
-    /// restatements carried: an empty one keeps it eligible, never cancels it.
-    opened: bool,
-}
-
-impl ReasoningParts {
-    fn has_opaque(&self) -> bool {
-        self.summary
-            .values()
-            .any(|part| matches!(part, ReasoningSummary::Unknown(_)))
-            || self
-                .content
-                .values()
-                .any(|part| matches!(part, ReasoningTextContent::Unknown(_)))
-    }
-
-    fn absorb(
-        &mut self,
-        summary: Vec<ReasoningSummary>,
-        content: Vec<ReasoningTextContent>,
-        encrypted: Option<String>,
-        signature: Option<String>,
-    ) {
-        // An empty string is no ciphertext, so it never claims authority.
-        let encrypted = encrypted.filter(|value| !value.is_empty());
-        let signature = signature.filter(|value| !value.is_empty());
-        // Empty restatements never erase already delivered content.
-        self.summary.extend(
-            summary
-                .into_iter()
-                .enumerate()
-                .map(|(i, part)| (i as u64, part)),
-        );
-        self.content.extend(
-            content
-                .into_iter()
-                .enumerate()
-                .map(|(i, part)| (i as u64, part)),
-        );
-        if encrypted.is_some() && (!self.wire_sent || self.encrypted.is_none()) {
-            self.encrypted = encrypted;
-        }
-        if signature.is_some() && (!self.wire_sent || self.signature.is_none()) {
-            self.signature = signature;
-        }
-    }
-
-    fn into_reasoning(self) -> crate::message::Reasoning {
-        reasoning_from_done_item(
-            self.id.as_deref(),
-            self.summary.into_values().collect(),
-            self.content.into_values().collect(),
-            self.encrypted,
-            self.signature,
-        )
-        .unwrap_or_else(|| crate::message::Reasoning {
-            id: self.id,
-            provider: None,
-            content: Vec::new(),
-        })
-    }
-}
-
-/// The assistant message ID (`msg_...`) a terminal response object carries,
-/// which is deliberately not the response's own `resp_...` id.
-fn message_id_from_response(response: &CompletionResponse) -> Option<String> {
-    response.output.iter().find_map(|item| match item {
-        Output::Message(message) => Some(message.id.clone()),
-        _ => None,
-    })
-}
-
-impl RawChoiceAccumulator {
-    /// `initial_usage` seeds the terminal's usage for replayed bodies whose
-    /// SSE frames may not carry one (the unary Responses body's own `usage`).
-    #[doc(hidden)]
-    pub fn new(provider: impl Into<String>, initial_usage: Option<ResponsesUsage>) -> Self {
-        Self {
-            provider: provider.into(),
-            terminal: StreamingCompletionResponse::new(initial_usage),
-            tool_calls: Vec::new(),
-            saw_terminal: false,
-            reasoning_slots: std::collections::HashMap::new(),
-            reasoning_ids: crate::streaming::SyntheticIds::new(
-                crate::streaming::MintKind::Reasoning,
-            ),
-            tool_slots:
-                crate::providers::internal::tool_call_bridge::ToolCallBridge::with_minted_namespace(
-                    crate::streaming::SyntheticIds::tool(),
-                ),
-            finished_provider_items: std::collections::HashSet::new(),
-            pending_call_ids: std::collections::HashMap::new(),
-            pending_namespaces: std::collections::HashMap::new(),
-            argument_fragments: std::collections::HashMap::new(),
-            message_parts: Default::default(),
-            active_message_part: None,
-            reasoning_parts: Default::default(),
-            finished_reasoning: Default::default(),
-            part_ids: crate::streaming::SyntheticIds::new(crate::streaming::MintKind::Refusal),
-            upstream_reasoning_issuer: false,
-            parent_kinds: Default::default(),
-            undecided_parts: Default::default(),
-            refusal: None,
-            delta_message_slots: Default::default(),
-            message_slot_by_id: Default::default(),
-            unattributed_message_slots: Default::default(),
-        }
-    }
-
-    /// Take the unknown parts buffered for `output_index` that bind to the
-    /// item `item_id` names, in content order. A part another item's event
-    /// named keeps waiting for that item.
-    fn take_undecided(
-        &mut self,
-        output_index: u64,
-        item_id: Option<&str>,
-    ) -> Vec<(u64, serde_json::Value)> {
-        let keys: Vec<_> = self
-            .undecided_parts
-            .range((output_index, 0)..=(output_index, u64::MAX))
-            .map(|(key, _)| *key)
-            .collect();
-        let mut taken = Vec::new();
-        for key in keys {
-            let Some(parts) = self.undecided_parts.remove(&key) else {
-                continue;
-            };
-            let (binding, waiting): (Vec<_>, Vec<_>) =
-                parts.into_iter().partition(|part| part.binds_to(item_id));
-            if !waiting.is_empty() {
-                self.undecided_parts.insert(key, waiting);
-            }
-            taken.extend(binding.into_iter().map(|part| (key.1, part.value)));
-        }
-        taken
-    }
-
-    /// Move the unknown parts an item's events named to the slot that item
-    /// now owns, so they bind there and nowhere else.
-    fn rekey_undecided(&mut self, item_id: &str, slot: u64) {
-        let keys: Vec<_> = self
-            .undecided_parts
-            .iter()
-            .filter(|((index, _), parts)| {
-                *index != slot
-                    && parts
-                        .iter()
-                        .any(|part| part.item_id.as_deref() == Some(item_id))
-            })
-            .map(|(key, _)| *key)
-            .collect();
-        for key in keys {
-            let Some(parts) = self.undecided_parts.remove(&key) else {
-                continue;
-            };
-            let (moving, staying): (Vec<_>, Vec<_>) = parts
-                .into_iter()
-                .partition(|part| part.item_id.as_deref() == Some(item_id));
-            if !staying.is_empty() {
-                self.undecided_parts.insert(key, staying);
-            }
-            let target = self.undecided_parts.entry((slot, key.1)).or_default();
-            for part in moving {
-                if !target.contains(&part) {
-                    target.push(part);
-                }
-            }
-        }
-    }
-
-    /// Whether `restatement` states every message part stored at `slot`
-    /// exactly. A `Part` speaks only for its own index, so it restates a slot
-    /// whose part at that index it equals, whatever the slot's other parts. An
-    /// `Item` must restate every stored part; parts it states beyond them are
-    /// late parts of the same message, the accepted late-part case. The gate
-    /// prefers a duplicate to a false merge: id-less deltas that a snapshot
-    /// cannot match exactly (a shifted position, or two messages concatenated
-    /// at one repaired position) are published again at their own positions.
-    /// In the shifted case, a snapshot whose metadata differs from the id-less
-    /// text it restates has that metadata published on a separate empty text
-    /// part rather than on its own text, and the restated text is duplicated.
-    /// No two messages' text ever merges.
-    fn restates(&self, slot: u64, restatement: Restatement<'_>) -> bool {
-        let mut stored = self
-            .message_parts
-            .range((slot, 0)..=(slot, u64::MAX))
-            .peekable();
-        if stored.peek().is_none() {
-            return false;
-        }
-        match restatement {
-            Restatement::None => false,
-            Restatement::Item(content) => stored.all(|(&(_, content_index), part)| {
-                usize::try_from(content_index)
-                    .ok()
-                    .and_then(|index| content.get(index))
-                    .is_some_and(|content| part.restated_by(content))
-            }),
-            Restatement::Part(content_index, content) => self
-                .message_parts
-                .get(&(slot, content_index))
-                .is_some_and(|part| part.restated_by(content)),
-        }
-    }
-
-    /// The slot a message event addresses. An id keeps the slot it first
-    /// owned. An unseen id owns its own position, except that a completed
-    /// snapshot (`done` or terminal) of an unseen id whose own slot holds no
-    /// message content takes over a slot that id-less deltas filled when it
-    /// restates that slot exactly: that is the same message restated. Any
-    /// other content is a different message, which keeps its own position. An
-    /// `output_item.added` or a delta never aliases.
-    fn message_slot(
-        &mut self,
-        output_index: u64,
-        item_id: Option<&str>,
-        restatement: Restatement<'_>,
-    ) -> u64 {
-        let Some(id) = item_id.filter(|id| !id.is_empty()) else {
-            return output_index;
-        };
-        if let Some(slot) = self.message_slot_by_id.get(id) {
-            return *slot;
-        }
-        let own = (output_index, 0)..=(output_index, u64::MAX);
-        // A waiting part another item's event named does not occupy this
-        // item's position.
-        let own_slot_empty = self.message_parts.range(own.clone()).next().is_none()
-            && !self
-                .undecided_parts
-                .range(own)
-                .any(|(_, parts)| parts.iter().any(|part| part.binds_to(Some(id))));
-        let slot = own_slot_empty
-            .then(|| {
-                self.unattributed_message_slots
-                    .iter()
-                    .copied()
-                    .find(|slot| self.restates(*slot, restatement))
-            })
-            .flatten()
-            .unwrap_or(output_index);
-        self.unattributed_message_slots.remove(&slot);
-        self.message_slot_by_id.insert(id.to_owned(), slot);
-        self.rekey_undecided(id, slot);
-        slot
-    }
-
-    /// The slot an id-bearing event refers to, without claiming one: an unknown
-    /// part may belong to reasoning, so only a known message id redirects it.
-    fn known_message_slot(&self, output_index: u64, item_id: Option<&str>) -> u64 {
-        item_id
-            .and_then(|id| self.message_slot_by_id.get(id))
-            .copied()
-            .unwrap_or(output_index)
-    }
-
-    /// Whether an unknown part waiting at `key` would bind to the item
-    /// `item_id` names: only such a part is stored content for that item.
-    fn waiting_binds(&self, key: (u64, u64), item_id: Option<&str>) -> bool {
-        self.undecided_parts
-            .get(&key)
-            .is_some_and(|parts| parts.iter().any(|part| part.binds_to(item_id)))
-    }
-
-    /// Whether a part `item_id`'s events left waiting at another position,
-    /// at `content_index`, moves to the reasoning slot about to be
-    /// established at `output_index` (see [`Self::reasoning_parts`]).
-    fn waiting_moves_to_reasoning(
-        &self,
-        output_index: u64,
-        item_id: Option<&str>,
-        content_index: u64,
-    ) -> bool {
-        let Some(id) = item_id.filter(|id| !id.is_empty()) else {
-            return false;
-        };
-        !self.reasoning_parts.contains_key(&output_index)
-            && self.undecided_parts.iter().any(|((index, at), parts)| {
-                *index != output_index
-                    && *at == content_index
-                    && parts.iter().any(|part| part.item_id.as_deref() == Some(id))
-            })
-    }
-
-    /// The stored kind a message part would contradict: a published part, or
-    /// an unknown part still waiting that would bind to this item (always
-    /// opaque). A part another item's event named never binds here, so it
-    /// never blocks this item.
-    fn message_kind_conflict(
-        &self,
-        slot: u64,
-        content_index: u64,
-        incoming_opaque: bool,
-        item_id: Option<&str>,
-    ) -> Option<ProviderError> {
-        let stored_opaque = self
-            .message_parts
-            .get(&(slot, content_index))
-            .map(MessagePart::is_opaque)
-            .or_else(|| {
-                self.waiting_binds((slot, content_index), item_id)
-                    .then_some(true)
-            })?;
-        (stored_opaque != incoming_opaque).then(|| {
-            conflicting_part_kind(
-                slot,
-                "content",
-                content_index,
-                stored_opaque,
-                incoming_opaque,
-            )
-        })
-    }
-
-    /// The stored kind a reasoning part would contradict, counting unknown
-    /// parts still waiting that would bind to this item as stored content.
-    fn reasoning_kind_conflict(
-        &self,
-        output_index: u64,
-        item_id: Option<&str>,
-        array: ReasoningArray,
-        index: u64,
-        incoming_opaque: bool,
-    ) -> Option<ProviderError> {
-        let parts = self.reasoning_parts.get(&output_index);
-        let stored_opaque = match array {
-            ReasoningArray::Summary => parts
-                .and_then(|parts| parts.summary.get(&index))
-                .map(|part| matches!(part, ReasoningSummary::Unknown(_))),
-            ReasoningArray::Content => parts
-                .and_then(|parts| parts.content.get(&index))
-                .map(|part| matches!(part, ReasoningTextContent::Unknown(_)))
-                .or_else(|| {
-                    (self.waiting_binds((output_index, index), item_id)
-                        || self.waiting_moves_to_reasoning(output_index, item_id, index))
-                    .then_some(true)
-                }),
-        }?;
-        (stored_opaque != incoming_opaque).then(|| {
-            conflicting_part_kind(
-                output_index,
-                array.name(),
-                index,
-                stored_opaque,
-                incoming_opaque,
-            )
-        })
-    }
-
-    /// Refuse a reasoning snapshot that restates any stored part as the
-    /// other kind, before any of it is absorbed.
-    fn reasoning_snapshot_conflict(
-        &self,
-        output_index: u64,
-        item_id: Option<&str>,
-        summary: &[ReasoningSummary],
-        content: &[ReasoningTextContent],
-    ) -> Option<ProviderError> {
-        summary
-            .iter()
-            .enumerate()
-            .find_map(|(index, part)| {
-                self.reasoning_kind_conflict(
-                    output_index,
-                    item_id,
-                    ReasoningArray::Summary,
-                    index as u64,
-                    matches!(part, ReasoningSummary::Unknown(_)),
-                )
-            })
-            .or_else(|| {
-                content.iter().enumerate().find_map(|(index, part)| {
-                    self.reasoning_kind_conflict(
-                        output_index,
-                        item_id,
-                        ReasoningArray::Content,
-                        index as u64,
-                        matches!(part, ReasoningTextContent::Unknown(_)),
-                    )
-                })
-            })
-    }
-
-    /// Record message evidence for the slot and publish any unknown parts that
-    /// were waiting for it through ordinary message assembly.
-    fn bind_message(&mut self, output_index: u64, item_id: Option<&str>, out: &mut AdapterOutput) {
-        self.parent_kinds
-            .entry(output_index)
-            .or_insert(PartParent::Message);
-        for (content_index, value) in self.take_undecided(output_index, item_id) {
-            self.publish_message_part(
-                output_index,
-                content_index,
-                item_id,
-                super::AssistantContent::Unknown(value),
-                None,
-                out,
-            );
-        }
-    }
-
-    /// Unknown parts whose slot never showed its parent kind leave raw on the
-    /// passthrough channel: without that evidence they have no assistant
-    /// content to join.
-    fn flush_undecided_parts(&mut self, out: &mut AdapterOutput) {
-        for part in std::mem::take(&mut self.undecided_parts)
-            .into_values()
-            .flatten()
-        {
-            out.unknown(part.value.into());
-        }
-    }
-
-    fn message_part(
-        &mut self,
-        output_index: u64,
-        content_index: u64,
-        item_id: Option<&str>,
-        refusal: bool,
-    ) -> &mut MessagePart {
-        self.message_parts
-            .entry((output_index, content_index))
-            .or_insert_with(|| MessagePart {
-                key: if content_index == 0 && !refusal {
-                    item_id
-                        .filter(|id| !id.is_empty())
-                        .map_or_else(|| self.part_ids.mint(), |id| BlockId::wire(id.to_owned()))
-                } else {
-                    self.part_ids.mint()
-                },
-                text: String::new(),
-                metadata: None,
-                phase: None,
-                refusal_marked: false,
-            })
-    }
-
-    fn message_delta(
-        &mut self,
-        output_index: u64,
-        content_index: u64,
-        item_id: Option<&str>,
-        delta: String,
-        refusal: bool,
-        out: &mut AdapterOutput,
-    ) {
-        if item_id.is_none_or(str::is_empty)
-            && !self
-                .message_slot_by_id
-                .values()
-                .any(|slot| *slot == output_index)
-        {
-            self.unattributed_message_slots.insert(output_index);
-        }
-        let output_index = self.message_slot(output_index, item_id, Restatement::None);
-        // Refuse before any state changes, as a snapshot would: known text
-        // cannot join a published or waiting opaque part.
-        if let Some(error) = self.message_kind_conflict(output_index, content_index, false, item_id)
-        {
-            self.refusal = Some(error);
-            return;
-        }
-        self.bind_message(output_index, item_id, out);
-        self.delta_message_slots.insert(output_index);
-        let part = self.message_part(output_index, content_index, item_id, refusal);
-        let marker = (refusal && !part.refusal_marked)
-            .then(super::refusal_marker)
-            .flatten();
-        part.refusal_marked |= refusal;
-        // The marker a delta delivered is the part's metadata, so a later
-        // snapshot of the same refusal does not restate it.
-        if part.metadata.is_none() {
-            part.metadata = marker.clone();
-        }
-        part.text.push_str(&delta);
-        let key = part.key.clone();
-        if self.active_message_part.as_ref() != Some(&key) || marker.is_some() {
-            out.in_source_order(
-                crate::streaming::SourceOrder::new(output_index, content_index),
-                |out| out.text_start(key.clone(), marker),
-            );
-            self.active_message_part = Some(key);
-        }
-        out.text(delta);
-    }
-
-    fn publish_message_part(
-        &mut self,
-        output_index: u64,
-        content_index: u64,
-        item_id: Option<&str>,
-        content: super::AssistantContent,
-        phase: Option<&str>,
-        out: &mut AdapterOutput,
-    ) {
-        let refusal = matches!(content, super::AssistantContent::Refusal { .. });
-        let incoming_opaque = matches!(content, super::AssistantContent::Unknown(_));
-        // Refuse before any text or marker changes: nothing may replace an
-        // opaque part with text, or text with an opaque part.
-        if let Some(stored_opaque) = self
-            .message_parts
-            .get(&(output_index, content_index))
-            .map(MessagePart::is_opaque)
-            .filter(|stored_opaque| *stored_opaque != incoming_opaque)
-        {
-            self.refusal = Some(conflicting_part_kind(
-                output_index,
-                "content",
-                content_index,
-                stored_opaque,
-                incoming_opaque,
-            ));
-            return;
-        }
-        let text = super::text_block(content);
-        let existed = self
-            .message_parts
-            .contains_key(&(output_index, content_index));
-        let part = self.message_part(output_index, content_index, item_id, refusal);
-        let has_new_text = text
-            .text
-            .strip_prefix(&part.text)
-            .is_some_and(|suffix| !suffix.is_empty());
-        let has_new_phase = phase.is_some_and(|phase| part.phase.as_deref() != Some(phase));
-        if existed && !has_new_text && !has_new_phase && part.metadata == text.additional_params {
-            return;
-        }
-        let key = part.key.clone();
-        // A refusal block carries its marker from its start, as its deltas'
-        // block would.
-        let start_marker = (refusal && !part.refusal_marked)
-            .then(super::refusal_marker)
-            .flatten();
-        if self.active_message_part.as_ref() != Some(&key) {
-            out.in_source_order(
-                crate::streaming::SourceOrder::new(output_index, content_index),
-                |out| out.text_start(key.clone(), start_marker.clone()),
-            );
-            self.active_message_part = Some(key);
-        } else if let Some(marker) = start_marker.clone() {
-            out.text_meta(marker);
-        }
-        let part = self.message_part(output_index, content_index, item_id, refusal);
-        part.refusal_marked |= refusal;
-        if start_marker.is_some() && part.metadata.is_none() {
-            part.metadata = start_marker;
-        }
-        // A restatement may complete a prefix, but never repeats delivered text.
-        if let Some(suffix) = text.text.strip_prefix(&part.text) {
-            if !suffix.is_empty() {
-                out.text(suffix.to_owned());
-            }
-            part.text = text.text;
-        }
-        if part.metadata != text.additional_params {
-            message_snapshot_metadata(
-                part.metadata.as_ref(),
-                text.additional_params.as_ref(),
-                phase.or(part.phase.as_deref()),
-                out,
-            );
-            part.metadata = text.additional_params;
-        }
-        if let Some(phase) = phase
-            && part.phase.as_deref() != Some(phase)
-        {
-            let mut text = crate::message::Text::new("");
-            super::stamp_phase(&mut text, Some(phase));
-            if let Some(params) = text.additional_params {
-                out.text_meta(params);
-            }
-            part.phase = Some(phase.to_owned());
-        }
-    }
-
-    fn publish_message_text(
-        &mut self,
-        output_index: u64,
-        message: &super::OutputMessage,
-        snapshot: bool,
-        out: &mut AdapterOutput,
-    ) {
-        let restatement = if snapshot {
-            Restatement::Item(&message.content)
-        } else {
-            Restatement::None
-        };
-        let output_index = self.message_slot(output_index, Some(&message.id), restatement);
-        // A contradicted part refuses the whole snapshot before any of it lands.
-        if let Some(error) = message
-            .content
-            .iter()
-            .enumerate()
-            .find_map(|(index, content)| {
-                self.message_kind_conflict(
-                    output_index,
-                    index as u64,
-                    matches!(content, super::AssistantContent::Unknown(_)),
-                    Some(&message.id),
-                )
-            })
-        {
-            self.refusal = Some(error);
-            return;
-        }
-        self.bind_message(output_index, Some(&message.id), out);
-        // Only a message no delta delivered takes its snapshot phase.
-        let phase = message
-            .phase
-            .as_deref()
-            .filter(|_| !self.delta_message_slots.contains(&output_index));
-        for (index, content) in message.content.iter().cloned().enumerate() {
-            if self.refusal.is_some() {
-                return;
-            }
-            self.publish_message_part(
-                output_index,
-                index as u64,
-                Some(&message.id),
-                content,
-                phase,
-                out,
-            );
-        }
-    }
-
-    fn merge_terminal_body_text(&mut self, response: &CompletionResponse, out: &mut AdapterOutput) {
-        for (output_index, item) in response.output.iter().enumerate() {
-            match item {
-                // After a refusal no further message lands.
-                Output::Message(message) if self.refusal.is_none() => {
-                    self.publish_message_text(output_index as u64, message, true, out)
-                }
-                // Reasoning keeps absorbing so the error-path flush closes
-                // every opened block; the first refusal stands.
-                Output::Reasoning { .. } => {
-                    let first_refusal = self.refusal.take();
-                    out.in_source_order(
-                        crate::streaming::SourceOrder::new(output_index as u64, 0),
-                        |out| {
-                            self.push_output_item_done(item.clone(), output_index as u64, out, true)
-                        },
-                    );
-                    if first_refusal.is_some() {
-                        self.refusal = first_refusal;
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    fn merge_terminal_reasoning(&mut self, response: &CompletionResponse, out: &mut AdapterOutput) {
-        for (index, item) in response.output.iter().enumerate() {
-            if matches!(item, Output::Reasoning { .. }) {
-                out.in_source_order(crate::streaming::SourceOrder::new(index as u64, 0), |out| {
-                    self.push_output_item_done(item.clone(), index as u64, out, true)
-                });
-            }
-        }
-    }
-
-    fn reasoning_parts(
-        &mut self,
-        output_index: u64,
-        item_id: Option<&str>,
-        _out: &mut AdapterOutput,
-    ) -> &mut ReasoningParts {
-        // Reasoning evidence binds the slot: unknown parts that waited for it
-        // are reasoning content. Distinct observations of one content index
-        // bind last-writer-wins, as a known parent's history keeps its last.
-        // Across positions, ties follow re-key order, not wire order: a part
-        // moved from another position lands after those already here, so the
-        // moved part wins.
-        self.parent_kinds
-            .entry(output_index)
-            .or_insert(PartParent::Reasoning);
-        // A reasoning id establishing its slot claims the parts its events
-        // left waiting at another position, as a message id does.
-        if let Some(id) = item_id.filter(|id| !id.is_empty())
-            && !self.reasoning_parts.contains_key(&output_index)
-        {
-            self.rekey_undecided(id, output_index);
-        }
-        let undecided = self.take_undecided(output_index, item_id);
-        let parts = self.reasoning_parts.entry(output_index).or_default();
-        for (content_index, value) in undecided {
-            parts
-                .content
-                .insert(content_index, ReasoningTextContent::Unknown(value));
-        }
-        // Like its ciphertext and signature, the provider ID the item's
-        // completion stated stands; a later snapshot only fills a missing one.
-        if let Some(id) = item_id.filter(|id| !id.is_empty())
-            && (!parts.wire_sent || parts.id.is_none())
-        {
-            parts.id = Some(id.to_owned());
-        }
-        parts
-    }
-
-    fn flush_reasoning(&mut self, out: &mut AdapterOutput) {
-        let slots: Vec<_> = self
-            .reasoning_parts
-            .iter()
-            .filter(|(index, parts)| {
-                !self.finished_reasoning.contains(index)
-                    && (parts.ready || parts.opened || parts.has_opaque())
-            })
-            .map(|(index, _)| *index)
-            .collect();
-        for index in slots {
-            if let Some(parts) = self.reasoning_parts.remove(&index) {
-                let key = self.reasoning_slot_key(index, parts.id.as_deref(), out);
-                let wire_sent = parts.wire_sent;
-                // A close first published here still belongs to its slot.
-                out.in_source_order(crate::streaming::SourceOrder::new(index, 0), |out| {
-                    out.reasoning_end(key, Some(parts.into_reasoning()), None, wire_sent)
-                });
-                self.finished_reasoning.insert(index);
-            }
-        }
-    }
-
-    /// Publish opaque output items that appeared only in the terminal body.
-    /// Known items retain their existing reconciliation and tool-flush paths.
-    fn merge_terminal_provider_items(
-        &mut self,
-        response: &CompletionResponse,
-        out: &mut AdapterOutput,
-    ) {
-        for (output_index, item) in response.output.iter().cloned().enumerate() {
-            let output_index = output_index as u64;
-            if self.finished_provider_items.contains(&output_index)
-                || !matches!(&item, Output::Unknown(_) | Output::Compaction(_))
-            {
-                continue;
-            }
-            out.in_source_order(crate::streaming::SourceOrder::new(output_index, 0), |out| {
-                self.push_output_item_done(item, output_index, out, true)
-            });
-        }
-    }
-
-    /// Return the slot's established reasoning key, creating it from `item_id`
-    /// or the reasoning mint namespace only on first use.
-    fn reasoning_slot_key(
-        &mut self,
-        output_index: u64,
-        item_id: Option<&str>,
-        out: &mut AdapterOutput,
-    ) -> crate::streaming::BlockId {
-        if let Some(key) = self.reasoning_slots.get(&output_index) {
-            out.declare_indexed_reasoning(key);
-            return key.clone();
-        }
-        let key = item_id.filter(|id| !id.is_empty()).map_or_else(
-            || self.reasoning_ids.mint(),
-            crate::streaming::BlockId::wire,
-        );
-        out.declare_indexed_reasoning(&key);
-        self.reasoning_slots.insert(output_index, key.clone());
-        key
-    }
-
-    /// Map one item/delta event onto grammar events, pushed to `out`.
-    #[doc(hidden)]
-    pub fn decode_item_chunk(
-        &mut self,
-        chunk: ItemChunk,
-        options: ResponsesStreamOptions,
-        out: &mut AdapterOutput,
-    ) {
-        let ItemChunk {
-            item_id: outer_item_id,
-            output_index,
-            data: item,
-        } = chunk;
-        // A completed content part may restate a slot id-less deltas filled.
-        let part_done = matches!(item, ItemChunkKind::ContentPartDone(_));
-
-        // Every block this event opens carries the item's output slot; a part
-        // refines it with its content index.
-        out.in_source_order(
-            crate::streaming::SourceOrder::new(output_index, 0),
-            |out| match item {
-                ItemChunkKind::OutputItemAdded(StreamingItemDoneOutput {
-                    item: Output::FunctionCall(func),
-                    ..
-                }) => {
-                    // A function-call item interleaving a message item closes the
-                    // open text block; forget it so a later delta for that message
-                    // re-emits its text `BlockStart` and reactivates its block
-                    // downstream.
-                    self.active_message_part = None;
-                    out.end_active_text();
-                    // Without call_id, mint an assembly key so the item ID cannot become
-                    // a fabricated tool-result correlator.
-                    let wire_id = (!func.call_id.is_empty()).then_some(func.id.as_str());
-                    let key = self
-                        .tool_slots
-                        .open(output_index, wire_id, Some(&func.name))
-                        .key()
-                        .to_owned();
-                    if !func.call_id.is_empty() {
-                        self.pending_call_ids
-                            .insert(output_index, func.call_id.clone());
-                    }
-                    if let Some(namespace) = func.namespace {
-                        self.pending_namespaces.insert(output_index, namespace);
-                    }
-                    out.tool_name(&key, func.name);
-                }
-                ItemChunkKind::OutputItemDone(message) => {
-                    // Refusals have explicit part boundaries. Ordinary same-key
-                    // text keeps the existing lifecycle across item snapshots.
-                    if self.active_message_part.as_ref().is_some_and(|key| {
-                        self.message_parts
-                            .values()
-                            .any(|part| &part.key == key && part.refusal_marked)
-                    }) {
-                        out.end_active_text();
-                    }
-                    self.active_message_part = None;
-                    self.push_output_item_done(
-                        message.item,
-                        output_index,
-                        out,
-                        options.emits_completed_tool_calls_immediately(),
-                    );
-                }
-                ItemChunkKind::OutputItemAdded(StreamingItemDoneOutput {
-                    item: Output::Message(message),
-                    ..
-                }) => {
-                    self.publish_message_text(output_index, &message, false, out);
-                }
-                ItemChunkKind::OutputItemAdded(StreamingItemDoneOutput {
-                    item:
-                        Output::Reasoning {
-                            id,
-                            summary,
-                            content,
-                            encrypted_content,
-                            signature,
-                            ..
-                        },
-                    ..
-                }) => {
-                    if let Some(error) = self.reasoning_snapshot_conflict(
-                        output_index,
-                        Some(&id),
-                        &summary,
-                        &content,
-                    ) {
-                        self.refusal = Some(error);
-                        return;
-                    }
-                    let parts = self.reasoning_parts(output_index, Some(&id), out);
-                    parts.absorb(summary, content, encrypted_content, signature);
-                }
-                ItemChunkKind::OutputTextDelta(DeltaTextChunk {
-                    delta,
-                    content_index,
-                    ..
-                }) => self.message_delta(
-                    output_index,
-                    content_index,
-                    outer_item_id.as_deref(),
-                    delta,
-                    false,
-                    out,
-                ),
-                ItemChunkKind::RefusalDelta(DeltaTextChunk {
-                    delta,
-                    content_index,
-                    ..
-                }) => self.message_delta(
-                    output_index,
-                    content_index,
-                    outer_item_id.as_deref(),
-                    delta,
-                    true,
-                    out,
-                ),
-                ItemChunkKind::ContentPartAdded(chunk) | ItemChunkKind::ContentPartDone(chunk) => {
-                    match chunk.part {
-                        ContentPartChunkPart::SummaryText { text } => {
-                            if let Some(error) = self.reasoning_kind_conflict(
-                                output_index,
-                                outer_item_id.as_deref(),
-                                ReasoningArray::Summary,
-                                chunk.content_index,
-                                false,
-                            ) {
-                                self.refusal = Some(error);
-                                return;
-                            }
-                            self.reasoning_parts(output_index, outer_item_id.as_deref(), out)
-                                .summary
-                                .insert(
-                                    chunk.content_index,
-                                    ReasoningSummary::SummaryText { text },
-                                );
-                        }
-                        // Known reasoning content: its deltas append to it and its
-                        // done event completes it, as with `reasoning_text.done`.
-                        ContentPartChunkPart::ReasoningText { text } => {
-                            // A documented reasoning part never joins a message.
-                            let message_slot =
-                                self.known_message_slot(output_index, outer_item_id.as_deref());
-                            if [output_index, message_slot].iter().any(|slot| {
-                                self.parent_kinds.get(slot) == Some(&PartParent::Message)
-                            }) {
-                                self.refusal = Some(conflicting_parent_kind(
-                                    output_index,
-                                    chunk.content_index,
-                                ));
-                                return;
-                            }
-                            if let Some(error) = self.reasoning_kind_conflict(
-                                output_index,
-                                outer_item_id.as_deref(),
-                                ReasoningArray::Content,
-                                chunk.content_index,
-                                false,
-                            ) {
-                                self.refusal = Some(error);
-                                return;
-                            }
-                            self.reasoning_parts(output_index, outer_item_id.as_deref(), out)
-                                .content
-                                .insert(
-                                    chunk.content_index,
-                                    ReasoningTextContent::ReasoningText { text },
-                                );
-                        }
-                        // An unknown part names no parent kind. It joins the slot's
-                        // established item, or waits for evidence of one; the item
-                        // ID's spelling is not that evidence.
-                        ContentPartChunkPart::Unknown(value) => {
-                            let output_index =
-                                self.known_message_slot(output_index, outer_item_id.as_deref());
-                            match self.parent_kinds.get(&output_index) {
-                                Some(PartParent::Reasoning) => {
-                                    if let Some(error) = self.reasoning_kind_conflict(
-                                        output_index,
-                                        outer_item_id.as_deref(),
-                                        ReasoningArray::Content,
-                                        chunk.content_index,
-                                        true,
-                                    ) {
-                                        self.refusal = Some(error);
-                                        return;
-                                    }
-                                    self.reasoning_parts(
-                                        output_index,
-                                        outer_item_id.as_deref(),
-                                        out,
-                                    )
-                                    .content
-                                    .insert(
-                                        chunk.content_index,
-                                        ReasoningTextContent::Unknown(value),
-                                    );
-                                }
-                                Some(PartParent::Message) => self.publish_message_part(
-                                    output_index,
-                                    chunk.content_index,
-                                    outer_item_id.as_deref(),
-                                    super::AssistantContent::Unknown(value),
-                                    None,
-                                    out,
-                                ),
-                                None => {
-                                    let part = UndecidedPart {
-                                        item_id: outer_item_id.clone().filter(|id| !id.is_empty()),
-                                        value,
-                                    };
-                                    let seen = self
-                                        .undecided_parts
-                                        .entry((output_index, chunk.content_index))
-                                        .or_default();
-                                    if !seen.contains(&part) {
-                                        seen.push(part);
-                                    }
-                                }
-                            }
-                        }
-                        part => {
-                            let content = match part {
-                                ContentPartChunkPart::OutputText { text } => {
-                                    super::AssistantContent::OutputText(super::OutputText::new(
-                                        text,
-                                    ))
-                                }
-                                ContentPartChunkPart::Refusal { refusal } => {
-                                    super::AssistantContent::Refusal { refusal }
-                                }
-                                ContentPartChunkPart::Unknown(_)
-                                | ContentPartChunkPart::SummaryText { .. }
-                                | ContentPartChunkPart::ReasoningText { .. } => return,
-                            };
-                            let restatement = if part_done {
-                                Restatement::Part(chunk.content_index, &content)
-                            } else {
-                                Restatement::None
-                            };
-                            let output_index = self.message_slot(
-                                output_index,
-                                outer_item_id.as_deref(),
-                                restatement,
-                            );
-                            if let Some(error) = self.message_kind_conflict(
-                                output_index,
-                                chunk.content_index,
-                                false,
-                                outer_item_id.as_deref(),
-                            ) {
-                                self.refusal = Some(error);
-                                return;
-                            }
-                            self.bind_message(output_index, outer_item_id.as_deref(), out);
-                            if self.refusal.is_some() {
-                                return;
-                            }
-                            self.publish_message_part(
-                                output_index,
-                                chunk.content_index,
-                                outer_item_id.as_deref(),
-                                content,
-                                None,
-                                out,
-                            );
-                        }
-                    }
-                }
-                ItemChunkKind::ReasoningSummaryPartAdded(chunk)
-                | ItemChunkKind::ReasoningSummaryPartDone(chunk) => {
-                    if let Some(error) = self.reasoning_kind_conflict(
-                        output_index,
-                        outer_item_id.as_deref(),
-                        ReasoningArray::Summary,
-                        chunk.summary_index,
-                        matches!(chunk.part, ReasoningSummary::Unknown(_)),
-                    ) {
-                        self.refusal = Some(error);
-                        return;
-                    }
-                    self.reasoning_parts(output_index, outer_item_id.as_deref(), out)
-                        .summary
-                        .insert(chunk.summary_index, chunk.part);
-                }
-                ItemChunkKind::ReasoningSummaryTextDelta(SummaryTextDeltaChunk {
-                    delta,
-                    summary_index,
-                    ..
-                }) => {
-                    if let Some(error) = self.reasoning_kind_conflict(
-                        output_index,
-                        outer_item_id.as_deref(),
-                        ReasoningArray::Summary,
-                        summary_index,
-                        false,
-                    ) {
-                        self.refusal = Some(error);
-                        return;
-                    }
-                    self.active_message_part = None;
-                    let parts = self.reasoning_parts(output_index, outer_item_id.as_deref(), out);
-                    if let ReasoningSummary::SummaryText { text } = parts
-                        .summary
-                        .entry(summary_index)
-                        .or_insert_with(|| ReasoningSummary::SummaryText {
-                            text: String::new(),
-                        })
-                    {
-                        text.push_str(&delta);
-                    }
-                    parts.opened = true;
-                    let id = self.reasoning_slot_key(output_index, outer_item_id.as_deref(), out);
-                    out.reasoning_delta(
-                        &id,
-                        outer_item_id
-                            .clone()
-                            .and_then(crate::streaming::non_empty_id),
-                        delta,
-                    );
-                }
-                ItemChunkKind::ReasoningTextDelta(DeltaTextChunkWithItemId {
-                    delta,
-                    content_index,
-                    ..
-                }) => {
-                    if let Some(error) = self.reasoning_kind_conflict(
-                        output_index,
-                        outer_item_id.as_deref(),
-                        ReasoningArray::Content,
-                        content_index.unwrap_or(0),
-                        false,
-                    ) {
-                        self.refusal = Some(error);
-                        return;
-                    }
-                    self.active_message_part = None;
-                    let parts = self.reasoning_parts(output_index, outer_item_id.as_deref(), out);
-                    if let ReasoningTextContent::ReasoningText { text } = parts
-                        .content
-                        .entry(content_index.unwrap_or(0))
-                        .or_insert_with(|| ReasoningTextContent::ReasoningText {
-                            text: String::new(),
-                        })
-                    {
-                        text.push_str(&delta);
-                    }
-                    parts.opened = true;
-                    let id = self.reasoning_slot_key(output_index, outer_item_id.as_deref(), out);
-                    out.reasoning_delta(
-                        &id,
-                        outer_item_id
-                            .clone()
-                            .and_then(crate::streaming::non_empty_id),
-                        delta,
-                    );
-                }
-                ItemChunkKind::ReasoningSummaryTextDone(chunk) => {
-                    if let Some(error) = self.reasoning_kind_conflict(
-                        output_index,
-                        outer_item_id.as_deref(),
-                        ReasoningArray::Summary,
-                        chunk.summary_index,
-                        false,
-                    ) {
-                        self.refusal = Some(error);
-                        return;
-                    }
-                    self.reasoning_parts(output_index, outer_item_id.as_deref(), out)
-                        .summary
-                        .insert(
-                            chunk.summary_index,
-                            ReasoningSummary::SummaryText { text: chunk.text },
-                        );
-                }
-                ItemChunkKind::ReasoningTextDone(chunk) => {
-                    if let Some(error) = self.reasoning_kind_conflict(
-                        output_index,
-                        outer_item_id.as_deref(),
-                        ReasoningArray::Content,
-                        chunk.content_index,
-                        false,
-                    ) {
-                        self.refusal = Some(error);
-                        return;
-                    }
-                    self.reasoning_parts(output_index, outer_item_id.as_deref(), out)
-                        .content
-                        .insert(
-                            chunk.content_index,
-                            ReasoningTextContent::ReasoningText { text: chunk.text },
-                        );
-                }
-                ItemChunkKind::FunctionCallArgsDelta(delta) => {
-                    // Tool output interleaving text is a block boundary too.
-                    self.active_message_part = None;
-                    out.end_active_text();
-                    // Establish identity before done arrives; late IDs must not move buffered fragments.
-                    let slot = self
-                        .tool_slots
-                        .open(output_index, outer_item_id.as_deref(), None);
-                    slot.saw_arguments_delta = true;
-                    let key = slot.key().clone();
-                    self.argument_fragments
-                        .entry(output_index)
-                        .or_default()
-                        .push(&delta.delta);
-                    out.tool_arguments(&key, delta.delta);
-                }
-                _ => {}
-            },
-        );
-    }
-
-    #[doc(hidden)]
-    pub fn record_response_chunk(
-        &mut self,
-        kind: ResponseChunkKind,
-        response: CompletionResponse,
-        raw_event_data: &str,
-        out: &mut AdapterOutput,
-    ) -> Result<(), ProviderError> {
-        match kind {
-            // `response.incomplete` is a genuine terminal (e.g. hitting
-            // `max_output_tokens`): the partial output and usage are kept, and
-            // the recorded status/incomplete_details map to the finish reason
-            // downstream, matching the unary path's `map_finish_reason`.
-            ResponseChunkKind::ResponseCompleted | ResponseChunkKind::ResponseIncomplete => {
-                // The terminal restates the whole turn, so the message text
-                // no delta delivered is published here: a gateway that
-                // states its answer only in the terminal body still lands
-                // it in the choice, and one that streamed the text first
-                // does not state it twice.
-                self.merge_terminal_body_text(&response, out);
-                self.merge_terminal_provider_items(&response, out);
-                // A terminal that contradicts a streamed part's kind is no
-                // genuine end of this turn.
-                if let Some(error) = self.refusal.take() {
-                    return Err(error);
-                }
-                self.saw_terminal = true;
-                self.flush_undecided_parts(out);
-                self.flush_reasoning(out);
-                // A terminal can close calls missing their done event; incomplete arguments drop.
-                self.argument_fragments.clear();
-                for (index, slot) in self.tool_slots.drain_ordered_indexed() {
-                    let mut end = slot.end(UnparseableToolInput::Drop);
-                    end.call_id = self.pending_call_ids.remove(&index);
-                    end.namespace = self.pending_namespaces.remove(&index);
-                    self.tool_calls.push((
-                        slot.key().clone(),
-                        BufferedCall::Function {
-                            source_order: crate::streaming::SourceOrder::new(index, 0),
-                            end,
-                        },
-                    ));
-                }
-                // The terminal event is the only place the stream learns how the
-                // turn ended, which model answered, and which assistant message
-                // (`msg_...`, not the response's `resp_...`) carried the output.
-                if let Some(message_id) = message_id_from_response(&response) {
-                    self.terminal.message_id = Some(message_id);
-                }
-                if !response.id.is_empty() {
-                    self.terminal.response_id = Some(response.id.clone());
-                }
-                if !response.model.is_empty() {
-                    self.terminal.model = Some(response.model.clone());
-                }
-                self.terminal.status = Some(response.status);
-                if response.incomplete_details.is_some() {
-                    self.terminal.incomplete_details = response.incomplete_details;
-                }
-                if response.usage.is_some() {
-                    self.terminal.usage = response.usage;
-                }
-                if response.reasoning_metadata.is_some() {
-                    self.terminal.reasoning_metadata = response.reasoning_metadata;
-                }
-                if response.reasoning_context.is_some() {
-                    self.terminal.reasoning_context = response.reasoning_context;
-                }
-                Ok(())
-            }
-            ResponseChunkKind::ResponseFailed => {
-                self.merge_terminal_reasoning(&response, out);
-                Err(crate::error::ProviderError::from_provider_body(
-                    raw_event_data,
-                ))
-            }
-            _ => Ok(()),
-        }
-    }
-
-    fn push_output_item_done(
-        &mut self,
-        item: Output,
-        output_index: u64,
-        out: &mut AdapterOutput,
-        emit_completed_tool_calls_immediately: bool,
-    ) {
-        match item {
-            Output::FunctionCall(func) => {
-                // Authoritative done fields replace fragments under the slot's established key.
-                let slot = self.tool_slots.remove(output_index);
-                // The done item restates its own call_id and namespace; the
-                // announce-time copies are only for slots the terminal drain
-                // must close.
-                self.pending_call_ids.remove(&output_index);
-                self.pending_namespaces.remove(&output_index);
-                let item_id = match &slot {
-                    // Keep the key that owns any accumulated fragments.
-                    Some(slot) => slot.key().clone(),
-                    // Use the shared mint counter to avoid claiming missing provider identity.
-                    None if func.id.is_empty() || func.call_id.is_empty() => {
-                        self.tool_slots.minted_ids().mint()
-                    }
-                    None => BlockId::wire(func.id.clone()),
-                };
-                let fragments = self.argument_fragments.remove(&output_index);
-                // A parsed restatement is authoritative, so the accumulator
-                // never consults this policy for it; it keeps the spelling
-                // effect logs already recorded for such an end.
-                let mut end = ToolCallEnd::new(UnparseableToolInput::Drop);
-                end.name = Some(func.name);
-                // The done item is authoritative for the qualifier too: without
-                // it the streamed call would lose a namespace the unary decode
-                // of the same item keeps.
-                end.namespace = func.namespace;
-                // An empty call_id means no provider identity. Never substitute
-                // the fc_* item id: replay requires a real call_id.
-                end.call_id = crate::streaming::non_empty_id(func.call_id.clone());
-                // The finalized call reports the authoritative wire id even
-                // when assembly keyed on a minted slot identity (the
-                // accumulator honors the override), but only as the item half
-                // of a correlated pair.
-                end.tool_id = end
-                    .call_id
-                    .as_ref()
-                    .and_then(|_| crate::streaming::non_empty_id(func.id.clone()));
-                // The restatement is authoritative in both of its states. A
-                // parsed one supersedes the fragments. One that does not parse
-                // is judged under the policy its item status selects, and the
-                // buffer is made to hold unparseable bytes so it never answers
-                // for the restatement with arguments the provider did not
-                // assert.
-                match func.arguments.classify() {
-                    ClassifiedArguments::Parsed(arguments) => end.arguments = Some(arguments),
-                    ClassifiedArguments::Unparseable(restated) => {
-                        // Item status supplies protocol confidence, never a
-                        // cause: it says how far the provider stands behind
-                        // this call, and nothing about why its arguments fail
-                        // to parse. A call it does not assert is dropped; one
-                        // it asserts (`completed`, or `in_progress` at this
-                        // terminal normalization point) must not be silently
-                        // lost, so it is refused by name.
-                        end.on_unparseable = match func.status {
-                            ToolStatus::Incomplete => UnparseableToolInput::Drop,
-                            ToolStatus::Completed | ToolStatus::InProgress => {
-                                UnparseableToolInput::Error
-                            }
-                        };
-                        match fragments {
-                            // No fragment preceded it: the restatement is the
-                            // whole input, and reaches the buffer once.
-                            None => out.tool_arguments(&item_id, restated),
-                            // The fragments are already unparseable, as when they
-                            // stream the same bytes the restatement repeats:
-                            // re-emitting would put those bytes in the buffer
-                            // twice, and the verdict is already the policy's.
-                            Some(fragments) if !fragments.parses() => {}
-                            // The fragments parse but the provider restated
-                            // something that does not (a whitespace or `{}` delta
-                            // followed by malformed text). Appending the
-                            // restatement leaves the buffer unparseable: a
-                            // complete JSON value, or whitespace, followed by
-                            // non-whitespace that does not parse, never parses.
-                            Some(_) => out.tool_arguments(&item_id, restated),
-                        }
-                    }
-                }
-
-                if emit_completed_tool_calls_immediately {
-                    out.tool_end(item_id, end);
-                } else {
-                    self.tool_calls.push((
-                        item_id,
-                        BufferedCall::Function {
-                            source_order: crate::streaming::SourceOrder::new(output_index, 0),
-                            end,
-                        },
-                    ));
-                }
-            }
-            // A custom call never fragments here: this client models no
-            // `custom_tool_call_input` delta, so no slot is open and the done
-            // item is the whole call. Its input travels verbatim, never
-            // parsed, because it is not JSON arguments.
-            Output::CustomToolCall(call) => {
-                self.active_message_part = None;
-                out.end_active_text();
-                // Mirror the function-call identity rule: an item id keys the
-                // block only as half of a correlated pair; otherwise mint from
-                // the bridge's one counter.
-                let key = if call.id.is_empty() || call.call_id.is_empty() {
-                    self.tool_slots.minted_ids().mint()
-                } else {
-                    BlockId::wire(call.id.clone())
-                };
-                let mut end = CustomToolCallEnd::new(call.name, call.input)
-                    .with_call_id(call.call_id)
-                    .with_namespace(call.namespace);
-                if end.call_id.is_some() {
-                    end = end.with_tool_id(call.id);
-                }
-                if emit_completed_tool_calls_immediately {
-                    out.custom_tool_call(key, end);
-                } else {
-                    self.tool_calls.push((
-                        key,
-                        BufferedCall::Custom {
-                            source_order: crate::streaming::SourceOrder::new(output_index, 0),
-                            end,
-                        },
-                    ));
-                }
-            }
-            Output::Reasoning {
-                id,
-                summary,
-                content,
-                encrypted_content,
-                signature,
-                ..
-            } => {
-                if self.finished_reasoning.contains(&output_index) {
-                    return;
-                }
-                if let Some(error) =
-                    self.reasoning_snapshot_conflict(output_index, Some(&id), &summary, &content)
-                {
-                    self.refusal = Some(error);
-                    return;
-                }
-                let had_slot = self.reasoning_slots.contains_key(&output_index);
-                let nonempty = !summary.is_empty()
-                    || !content.is_empty()
-                    || encrypted_content.as_ref().is_some_and(|s| !s.is_empty())
-                    || signature.as_ref().is_some_and(|s| !s.is_empty());
-                let parts = self.reasoning_parts(output_index, Some(&id), out);
-                parts.absorb(summary, content, encrypted_content, signature);
-                parts.wire_sent = true;
-                if nonempty || parts.has_opaque() || (!had_slot && parts.id.is_some()) {
-                    parts.ready = true;
-                    let id = parts.id.clone();
-                    let key = self.reasoning_slot_key(output_index, id.as_deref(), out);
-                    // Keep the slot's original position while delaying its one
-                    // authoritative close until terminal or partial/error flush.
-                    out.reasoning_start(&key, id);
-                }
-            }
-            Output::Message(message) => {
-                self.publish_message_text(output_index, &message, true, out);
-                // A message item with no id starts no block: there is
-                // nothing to key it on.
-                if let Some(id) = crate::streaming::non_empty_id(message.id) {
-                    out.message_id(id);
-                }
-            }
-            // An unmodeled output item (e.g. a hosted-tool result such as
-            // `web_search_call`) arriving on `response.output_item.done`. Surface
-            // the raw item to stream consumers, mirroring how the non-streaming
-            // decode preserves it on `CompletionResponse.output`.
-            Output::Unknown(value) => {
-                self.finished_provider_items.insert(output_index);
-                let key = provider_item_key(&value, output_index);
-                out.provider_item(key, opaque_item(value));
-            }
-            // A compaction item joins the answer the same way: a
-            // must-replay item, replayed through its input twin.
-            Output::Compaction(fields) => {
-                let mut map = fields;
-                map.insert(
-                    "type".to_string(),
-                    serde_json::Value::String("compaction".to_string()),
-                );
-                let value = serde_json::Value::Object(map);
-                self.finished_provider_items.insert(output_index);
-                let key = provider_item_key(&value, output_index);
-                out.provider_item(key, opaque_item(value));
-            }
-        }
-    }
-
-    /// Emit whole-body output items in order, then record terminal metadata.
-    /// Structured reasoning suppresses the top-level reasoning display string.
-    pub(crate) fn replay_whole_response(
-        &mut self,
-        response: CompletionResponse,
-        out: &mut AdapterOutput,
-    ) {
-        // A compatible backend that reports its reasoning as one top-level
-        // string has no stream event for it, so the body is the only place it
-        // is stated. Structured `reasoning` items supersede it: publishing
-        // both would carry one chain of thought twice.
-        let structured_reasoning = response
-            .output
-            .iter()
-            .any(|item| matches!(item, Output::Reasoning { .. }));
-        if !structured_reasoning
-            && let Some(reasoning) = response
-                .provider_reasoning
-                .as_deref()
-                .filter(|reasoning| !reasoning.is_empty())
-        {
-            // This block has no wire id; use the same reasoning namespace as
-            // anonymous reasoning item deltas and restatements.
-            let key = self.reasoning_ids.mint();
-            out.reasoning_block(
-                key,
-                None,
-                crate::message::ReasoningContent::Text {
-                    text: reasoning.to_owned(),
-                    signature: None,
-                },
-            );
-        }
-
-        for (output_index, item) in response.output.iter().cloned().enumerate() {
-            let output_index = output_index as u64;
-            // Immediate publication preserves output order when the fold registers parts.
-            out.in_source_order(crate::streaming::SourceOrder::new(output_index, 0), |out| {
-                self.push_output_item_done(item, output_index, out, true)
-            });
-        }
-
-        // `response.completed` and `response.incomplete` are the wire's two
-        // genuine terminals; any other status (`failed`, `cancelled`) rides
-        // through `map_finish_reason` verbatim on the completed path, exactly
-        // as the unary conversion always did.
-        let kind = if matches!(response.status, ResponseStatus::Incomplete) {
-            ResponseChunkKind::ResponseIncomplete
-        } else {
-            ResponseChunkKind::ResponseCompleted
-        };
-        // The raw body is read only for a `response.failed` error payload,
-        // which neither of those kinds is.
-        if let Err(error) = self.record_response_chunk(kind, response, "", out) {
-            out.error(error);
-        }
-    }
-
-    /// Flush retained reasoning and fully-delivered tool calls without finishing the
-    /// stream. The errored-terminal path flushes these before the error and
-    /// must not produce a terminal record.
-    #[doc(hidden)]
-    pub fn flush_tool_calls(&mut self, out: &mut AdapterOutput) {
-        self.flush_undecided_parts(out);
-        self.flush_reasoning(out);
-        for (id, call) in std::mem::take(&mut self.tool_calls) {
-            match call {
-                BufferedCall::Function { source_order, end } => {
-                    out.in_source_order(source_order, |out| out.tool_end(id, end));
-                }
-                BufferedCall::Custom { source_order, end } => {
-                    out.in_source_order(source_order, |out| out.custom_tool_call(id, end));
-                }
-            }
-        }
-    }
-
-    /// Flush the buffered tool calls, then the terminal record when a
-    /// genuine terminal event arrived.
-    #[doc(hidden)]
-    pub fn finish(mut self, out: &mut AdapterOutput) {
-        self.flush_tool_calls(out);
-        // Only a genuine terminal event (`response.completed` or
-        // `response.incomplete`) counts as the provider ending the turn; a
-        // stream that ended without one was truncated,
-        // and a synthesized terminal record would present the partial turn as
-        // a successful, default-usage completion.
-        if !self.saw_terminal {
-            return;
-        }
-        match terminal_record(
-            &self.provider,
-            self.upstream_reasoning_issuer,
-            self.terminal,
-        ) {
-            Ok(record) => out.final_record(record),
-            Err(error) => out.error(error),
-        }
-    }
-}
-
-/// One function-call slot's streamed argument fragments, assembled by the
-/// accumulator's own rule
-/// ([`append_tool_input_fragment`](crate::streaming::append_tool_input_fragment)),
-/// so it holds what the accumulator's buffer for that slot holds.
-#[derive(Debug, Default)]
-struct AssembledArguments {
-    bytes: String,
-    /// The accumulation bound refused a fragment. The accumulator then
-    /// finalizes the call as unparseable whatever the retained bytes say.
-    overflowed: bool,
-}
-
-impl AssembledArguments {
-    fn push(&mut self, fragment: &str) {
-        if !crate::streaming::append_tool_input_fragment(&mut self.bytes, fragment) {
-            self.overflowed = true;
-        }
-    }
-
-    /// Whether the accumulator would finalize these fragments as arguments,
-    /// under the one classification every reader of a Responses argument
-    /// string shares.
-    fn parses(&self) -> bool {
-        !self.overflowed
-            && matches!(
-                FunctionCallArguments(self.bytes.clone()).classify(),
-                ClassifiedArguments::Parsed(_)
-            )
-    }
-}
-
-/// Fill absent sequence, output, content, and summary indices with zero.
-/// Preserve existing fields and content. Return `None` for invalid or non-object
-/// JSON or serialization failure. Missing output indices can merge distinct items
-/// into slot zero; callers must enable repair only for compatible dialects.
-fn repair_envelope_less_frame(data: &str) -> Option<String> {
-    let mut value = serde_json::from_str::<serde_json::Value>(data).ok()?;
-    let object = value.as_object_mut()?;
-    for field in [
-        "sequence_number",
-        "output_index",
-        "content_index",
-        "summary_index",
-    ] {
-        object
-            .entry(field)
-            .or_insert_with(|| serde_json::Value::from(0));
-    }
-    serde_json::to_string(&value).ok()
-}
-
-/// Classified Responses stream frame, whole reply, error, or sentinel.
+/// A classified Responses payload.
+#[derive(Debug)]
 pub enum ResponsesEvent {
-    /// Decoded stream frame with raw bytes retained for provider errors.
+    /// A stream event of a known `type`, as the provider sent it.
     Frame {
-        /// The frame's payload, verbatim.
+        /// The event's `type`.
+        kind: String,
+        /// The event.
+        frame: Value,
+        /// The frame's payload, verbatim, for the error a failed reply
+        /// reports.
         raw: String,
-        /// The frame, decoded.
-        chunk: StreamingCompletionChunk,
     },
     /// The unary reply: the response object itself, which carries no `type`
-    /// discriminator because it is not an event.
-    Whole(Box<CompletionResponse>),
-    /// A success whose body is the provider's error envelope instead of a
-    /// response, with the raw body the error preserves. Both the stream's
-    /// own `error` event and a 200 whose whole body is an envelope reach
-    /// this.
+    /// because it is not an event.
+    Whole(Value),
+    /// The provider's error, as the stream's `error` event or a success
+    /// body holding an error envelope instead of a response.
     Failure(String),
-    /// `[DONE]` sentinel. Does not independently establish successful completion.
+    /// The `[DONE]` sentinel. The provider's end is `response.completed`.
     Sentinel,
 }
 
-/// The `response` object of a raw response-lifecycle frame, exactly as the
-/// provider sent it.
-fn native_response_object(raw: &str) -> Option<serde_json::Value> {
-    let mut frame = serde_json::from_str::<serde_json::Value>(raw).ok()?;
-    frame
-        .as_object_mut()?
-        .remove("response")
-        .filter(serde_json::Value::is_object)
-}
+/// The keys a response object, or the error envelope a success body can
+/// hold instead, always has one of.
+const WHOLE_BODY_MARKERS: &[&str] = &["object", "output", "status", "id", "error"];
 
-/// Top-level presence markers for response bodies, including error envelopes.
-const WHOLE_BODY_MARKERS: &[&str] = &["object", "output", "status", "error"];
+/// A payload that names its `type`, read as the JSON it is.
+struct Tagged(Value);
 
-/// Whether valid JSON carries the `error` event tag.
-fn is_error_event(data: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(data)
-        .is_ok_and(|value| value.get("type").and_then(serde_json::Value::as_str) == Some("error"))
-}
-
-/// The error envelope a success body can carry instead of a response. The
-/// error itself is built from the raw body; this only proves the shape.
-#[derive(Deserialize)]
-struct ErrorEnvelope {
-    // Validate envelope presence while retaining raw bytes for the reported error.
-    #[allow(dead_code)]
-    error: serde_json::Value,
-}
-
-/// The OpenAI Responses wire's decoder: one state machine for the SSE
-/// stream, the unary body and the websocket session.
-///
-/// Holds the per-reply assembly state ([`RawChoiceAccumulator`]); frame
-/// triage policy lives in the driver, not here.
-pub struct ResponsesDecoder {
-    /// The reply's own envelope, captured from the terminal event.
-    ///
-    /// A unary call on a dialect that always streams answers with an event
-    /// stream, so there is no reply document for the driver to parse; the
-    /// terminal `response.completed` carries it, and this is what makes
-    /// `CompletionResponse::raw` the reply rather than a summary of it.
-    document: Option<serde_json::Value>,
-    accumulator: RawChoiceAccumulator,
-    options: ResponsesStreamOptions,
-    /// Whether to repair absent envelope indices before retrying classification.
-    /// Selected by dialect, independently of unary or streaming mode.
-    repair_envelopes: bool,
-    /// A `response.failed` event (or a success-status error envelope) ended
-    /// the turn: the flush-then-`Err` sequence has been pushed and the
-    /// driver stops consuming.
-    finished: bool,
-}
-
-impl ResponsesDecoder {
-    /// A decoder for one reply of `provider`'s Responses endpoint.
-    pub fn new(provider: &str, options: ResponsesStreamOptions) -> Self {
-        Self {
-            document: None,
-            accumulator: RawChoiceAccumulator::new(provider, None),
-            options,
-            repair_envelopes: false,
-            finished: false,
-        }
-    }
-
-    /// Salvage replayed frames that omit their envelope bookkeeping.
-    pub fn with_envelope_repair(mut self) -> Self {
-        self.repair_envelopes = true;
-        self
-    }
-
-    /// Record reasoning as issued by the upstream model's family, for a
-    /// gateway that relays each upstream's own reasoning state.
-    pub fn with_upstream_reasoning_issuer(mut self) -> Self {
-        self.accumulator.upstream_reasoning_issuer = true;
-        self
-    }
-
-    /// Seed the terminal's usage for a replayed body whose frames may not
-    /// carry one (the unary Responses body's own `usage`).
-    pub fn with_initial_usage(mut self, usage: Option<ResponsesUsage>) -> Self {
-        self.accumulator.terminal.usage = usage;
-        self
-    }
-
-    /// Recognize sentinels and tagged events before considering an untagged
-    /// whole response or error envelope.
-    fn classify_payload(&self, data: &str) -> WireEvent<ResponsesEvent> {
-        if data.trim() == "[DONE]" {
-            return WireEvent::Known(ResponsesEvent::Sentinel);
-        }
-        if is_error_event(data) {
-            return WireEvent::Known(ResponsesEvent::Failure(data.to_owned()));
-        }
-        // A discriminator selects the event contract. Its decode failure must
-        // not be rescued by unrelated whole-response fields on the same object.
-        if serde_json::from_str::<serde_json::Value>(data)
-            .is_ok_and(|value| value.get("type").is_some())
-        {
-            return classify_responses_frame(data).map(|chunk| ResponsesEvent::Frame {
-                raw: data.to_owned(),
-                chunk,
-            });
-        }
-        let body = |data: &str| {
-            wire::classify_marker_keyed_frame::<CompletionResponse>(data, WHOLE_BODY_MARKERS)
-                .map(|response| ResponsesEvent::Whole(Box::new(response)))
-        };
-        let envelope = |data: &str| {
-            // Error envelopes must retain the provider's diagnostic on every dialect.
-            wire::classify_marker_keyed_frame::<ErrorEnvelope>(data, &["error"])
-                .map(|_| ResponsesEvent::Failure(data.to_owned()))
-        };
-        wire::classify_or(
-            data,
-            |data| {
-                classify_responses_frame(data).map(|chunk| ResponsesEvent::Frame {
-                    raw: data.to_owned(),
-                    chunk,
-                })
-            },
-            |data| wire::classify_or(data, body, envelope),
-        )
-    }
-
-    fn interpret_frame(
-        &mut self,
-        raw: String,
-        chunk: StreamingCompletionChunk,
-        out: &mut AdapterOutput,
-    ) {
-        match chunk {
-            StreamingCompletionChunk::Delta(chunk) => {
-                self.accumulator.decode_item_chunk(chunk, self.options, out);
-                // A contradictory part ends the reply like any terminal
-                // error: delivered content flushes first.
-                if let Some(error) = self.accumulator.refusal.take() {
-                    self.accumulator.flush_tool_calls(out);
-                    out.error(error);
-                    self.finished = true;
-                }
-            }
-            StreamingCompletionChunk::Response(chunk) => {
-                let ResponseChunk { kind, response, .. } = chunk;
-                // Keep the latest snapshot so raw output includes final status
-                // and usage. The provider's own `response` object is kept
-                // rather than the typed re-serialization: the typed decode
-                // drops an echoed metadata key whose value does not fit its
-                // field, and the capture is where that native evidence stays.
-                self.document =
-                    native_response_object(&raw).or_else(|| serde_json::to_value(&response).ok());
-                if matches!(kind, ResponseChunkKind::ResponseIncomplete)
-                    && self.options.refuses_incomplete()
-                {
-                    // A streamed turn the provider cut short is not a
-                    // completed one: unless the caller opted into partial
-                    // success, it ends in an error carrying the provider's
-                    // terminal event. Fully-delivered tool calls flush first,
-                    // as before any terminal error.
-                    self.accumulator.merge_terminal_reasoning(&response, out);
-                    self.accumulator.flush_tool_calls(out);
-                    out.error(crate::error::ProviderError::from_provider_body(&raw));
-                    self.finished = true;
-                    return;
-                }
-                if matches!(kind, ResponseChunkKind::ResponseCompleted) {
-                    // Inert under the driver, which records the same fields
-                    // off the terminal record; the client layer's stream
-                    // loop has no other recording site.
-                    let span = tracing::Span::current();
-                    span.record("gen_ai.response.id", response.id.as_str());
-                    span.record("gen_ai.response.model", response.model.as_str());
-                }
-                if let Err(error) = self
-                    .accumulator
-                    .record_response_chunk(kind, response, &raw, out)
-                {
-                    // `response.failed`: fully-delivered tool calls flush
-                    // before the terminal error, which ends the reply with
-                    // no terminal record, preserving the failure signal.
-                    self.accumulator.flush_tool_calls(out);
-                    out.error(error);
-                    self.finished = true;
-                }
-            }
-        }
-    }
-
-    /// Flush what the accumulator still holds: the buffered tool calls, then
-    /// the terminal record when a genuine terminal arrived.
-    fn flush(&mut self, out: &mut AdapterOutput) {
-        let provider = self.accumulator.provider.clone();
-        let mut fresh = RawChoiceAccumulator::new(provider, None);
-        fresh.upstream_reasoning_issuer = self.accumulator.upstream_reasoning_issuer;
-        let accumulator = std::mem::replace(&mut self.accumulator, fresh);
-        accumulator.finish(out);
-    }
-}
-
-impl Decoder<Completion> for ResponsesDecoder {
-    type Event = ResponsesEvent;
-
-    fn classify(&self, frame: WireFrame) -> WireEvent<ResponsesEvent> {
-        let data = frame.as_str().into_owned();
-        if !self.repair_envelopes {
-            return self.classify_payload(&data);
-        }
-        // Replayed bodies omit envelope bookkeeping fields; salvage through
-        // the SAME interpreter, with the operation-error wording the
-        // buffered driver surfaces verbatim.
-        wire::classify_with_repair(
-            &data,
-            |data| self.classify_payload(data),
-            repair_envelope_less_frame,
-            |corrupt| {
-                <serde_json::Error as serde::de::Error>::custom(format!(
-                    "invalid JSON frame in buffered Responses SSE body: {corrupt}"
-                ))
-            },
-            || {
-                let kind = serde_json::from_str::<serde_json::Value>(&data)
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .get("type")
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToOwned::to_owned)
-                    })
-                    .unwrap_or_default();
-                <serde_json::Error as serde::de::Error>::custom(format!(
-                    "malformed `{kind}` event in buffered Responses SSE body"
-                ))
-            },
-        )
-    }
-
-    fn interpret(&mut self, event: ResponsesEvent, out: &mut AdapterOutput) {
-        if self.finished {
-            return;
-        }
-
-        match event {
-            ResponsesEvent::Frame { raw, chunk } => self.interpret_frame(raw, chunk, out),
-            // The unary reply is the same turn stated at once: replay it as
-            // the events the stream sends, then close it with the terminal
-            // the body itself is.
-            ResponsesEvent::Whole(response) => {
-                self.document = serde_json::to_value(&*response).ok();
-                self.accumulator.replay_whole_response(*response, out);
-                self.flush(out);
-            }
-            ResponsesEvent::Failure(raw) => {
-                self.accumulator.flush_tool_calls(out);
-                out.error(crate::error::ProviderError::from_provider_body(&raw));
-                self.finished = true;
-            }
-            // Nothing to interpret: the terminal record comes from
-            // `response.completed`, or from the driver's EOF flush.
-            ResponsesEvent::Sentinel => {}
-        }
-    }
-
-    fn finish(&mut self, out: &mut AdapterOutput) {
-        self.flush(out);
-    }
-
-    fn flush_before_terminal_error(&mut self, out: &mut AdapterOutput) {
-        // Tool calls the provider fully delivered are content: they flush
-        // before the terminal error reaches the consumer.
-        self.accumulator.flush_tool_calls(out);
-    }
-
-    fn document(&self) -> Option<serde_json::Value> {
-        self.document.clone()
-    }
-
-    fn project(&self, payload: &[u8], sink: &mut dyn crate::wire::ObservationSink) {
-        super::wire::project_payload(payload, sink);
-    }
-
-    fn is_finished(&self) -> bool {
-        self.finished
-    }
-}
-
-/// The block key of an opaque output item: its own wire id when it carries
-/// one, else the output-index fallback, which is deterministic and unique
-/// per item (one output index holds one item).
-fn provider_item_key(item: &serde_json::Value, output_index: u64) -> BlockId {
-    item.get("id")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|id| crate::streaming::non_empty_id(id.to_owned()))
-        .map_or_else(
-            || crate::streaming::MintKind::Output.for_wire_index(output_index),
-            BlockId::wire,
-        )
-}
-
-/// An opaque output item, kept whole. Its issuer is stamped when the
-/// response is folded, exactly as reasoning's is.
-fn opaque_item(item: serde_json::Value) -> crate::message::ProviderItem {
-    crate::message::ProviderItem {
-        item,
-        provider: None,
-    }
-}
-
-/// Output-item event with its slot index and optional provider item ID.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ItemChunk {
-    /// Item ID. Optional.
-    pub item_id: Option<String>,
-    /// The output index of the item from a given streamed response.
-    pub output_index: u64,
-    /// The item type chunk, as well as the inner data.
-    #[serde(flatten)]
-    pub data: ItemChunkKind,
-}
-
-/// The item chunk type from OpenAI's Responses API.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(tag = "type")]
-pub enum ItemChunkKind {
-    #[serde(rename = "response.output_item.added")]
-    OutputItemAdded(StreamingItemDoneOutput),
-    #[serde(rename = "response.output_item.done")]
-    OutputItemDone(StreamingItemDoneOutput),
-    #[serde(rename = "response.content_part.added")]
-    ContentPartAdded(ContentPartChunk),
-    #[serde(rename = "response.content_part.done")]
-    ContentPartDone(ContentPartChunk),
-    #[serde(rename = "response.output_text.delta")]
-    OutputTextDelta(DeltaTextChunk),
-    #[serde(rename = "response.output_text.done")]
-    OutputTextDone(OutputTextChunk),
-    #[serde(rename = "response.refusal.delta")]
-    RefusalDelta(DeltaTextChunk),
-    #[serde(rename = "response.refusal.done")]
-    RefusalDone(RefusalTextChunk),
-    #[serde(rename = "response.function_call_arguments.delta")]
-    FunctionCallArgsDelta(DeltaTextChunkWithItemId),
-    #[serde(rename = "response.function_call_arguments.done")]
-    FunctionCallArgsDone(ArgsTextChunk),
-    #[serde(rename = "response.reasoning_summary_part.added")]
-    ReasoningSummaryPartAdded(SummaryPartChunk),
-    #[serde(rename = "response.reasoning_summary_part.done")]
-    ReasoningSummaryPartDone(SummaryPartChunk),
-    #[serde(rename = "response.reasoning_summary_text.delta")]
-    ReasoningSummaryTextDelta(SummaryTextDeltaChunk),
-    #[serde(rename = "response.reasoning_summary_text.done")]
-    ReasoningSummaryTextDone(SummaryTextDoneChunk),
-    #[serde(rename = "response.reasoning_text.delta")]
-    ReasoningTextDelta(DeltaTextChunkWithItemId),
-    /// Raw-reasoning text restatement. Decoded but not emitted to avoid
-    /// duplicating accumulated reasoning deltas.
-    #[serde(rename = "response.reasoning_text.done")]
-    ReasoningTextDone(OutputTextChunk),
-    // No `#[serde(other)]` catch-all: unknown event types are triaged by the
-    // classify layer (`classify_responses_frame` checks the `type` tag against
-    // `is_known_responses_event_type` BEFORE decoding), so a frame that
-    // reaches this decoder with an unmodeled tag is a known-set/enum drift
-    // and must fail loudly (`Corrupt`) rather than be silently absorbed.
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct StreamingItemDoneOutput {
-    pub sequence_number: u64,
-    pub item: Output,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ContentPartChunk {
-    pub content_index: u64,
-    pub sequence_number: u64,
-    pub part: ContentPartChunkPart,
-}
-
-#[derive(Debug, Serialize, Clone)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ContentPartChunkPart {
-    Refusal {
-        refusal: String,
-    },
-    OutputText {
-        text: String,
-    },
-    SummaryText {
-        text: String,
-    },
-    /// Reasoning content, announced by `response.content_part.*` on some
-    /// gateways before its `response.reasoning_text.*` deltas.
-    ReasoningText {
-        text: String,
-    },
-    /// Unmodeled content part retained verbatim in neutral opaque metadata.
-    #[serde(untagged)]
-    Unknown(serde_json::Value),
-}
-
-/// Decode known tags only with a string text field and preserve unknown tags.
-/// Absent and nonstring tags return an error. Duplicate keys use the last value retained by
-/// `serde_json::Value`.
-impl<'de> Deserialize<'de> for ContentPartChunkPart {
+impl<'de> serde::Deserialize<'de> for Tagged {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        let text_field = |part: &str| -> Result<String, D::Error> {
-            value
-                .get("text")
-                .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned)
-                .ok_or_else(|| {
-                    serde::de::Error::custom(format!(
-                        "`{part}` content part is missing a string `text` field"
-                    ))
-                })
-        };
-        match value.get("type").cloned() {
-            Some(serde_json::Value::String(tag)) => match tag.as_str() {
-                "refusal" => Ok(Self::Refusal {
-                    refusal: value
-                        .get("refusal")
-                        .and_then(serde_json::Value::as_str)
-                        .ok_or_else(|| {
-                            serde::de::Error::custom("refusal part requires a string `refusal`")
-                        })?
-                        .to_owned(),
-                }),
-                "output_text" => Ok(Self::OutputText {
-                    text: text_field("output_text")?,
-                }),
-                "summary_text" => Ok(Self::SummaryText {
-                    text: text_field("summary_text")?,
-                }),
-                "reasoning_text" => Ok(Self::ReasoningText {
-                    text: text_field("reasoning_text")?,
-                }),
-                _ => Ok(Self::Unknown(value)),
-            },
-            Some(_) => Err(serde::de::Error::custom(
-                "content part `type` must be a string",
-            )),
-            None => Err(serde::de::Error::custom(
-                "a Responses content part needs a string `type` tag",
-            )),
+        let value = Value::deserialize(deserializer)?;
+        if value.str("type").is_some() {
+            Ok(Self(value))
+        } else {
+            Err(serde::de::Error::custom("the payload names no `type`"))
         }
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct DeltaTextChunk {
-    pub content_index: u64,
-    pub sequence_number: u64,
-    pub delta: String,
+/// Classify one payload by its `type`; a payload without one is the unary
+/// response object or an error envelope.
+fn classify_document_payload(data: &str) -> WireEvent<ResponsesEvent> {
+    if data.trim() == "[DONE]" {
+        return WireEvent::Known(ResponsesEvent::Sentinel);
+    }
+    wire::classify_or_untagged(
+        data,
+        "type",
+        |data| {
+            wire::classify_tagged_frame::<Tagged>(data, "type", is_document_event).map(
+                |Tagged(frame)| match frame.str("type") {
+                    Some("error") => ResponsesEvent::Failure(data.to_owned()),
+                    kind => ResponsesEvent::Frame {
+                        kind: kind.unwrap_or_default().to_owned(),
+                        raw: data.to_owned(),
+                        frame,
+                    },
+                },
+            )
+        },
+        |data| {
+            wire::classify_marker_keyed_frame::<Value>(data, WHOLE_BODY_MARKERS).map(|body| {
+                let error = body.get("error").is_some_and(|error| !error.is_null());
+                if error && body.get("output").is_none() && body.get("status").is_none() {
+                    ResponsesEvent::Failure(data.to_owned())
+                } else {
+                    ResponsesEvent::Whole(body)
+                }
+            })
+        },
+    )
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct DeltaTextChunkWithItemId {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_index: Option<u64>,
-    pub sequence_number: u64,
-    pub delta: String,
+/// The usage a Responses `usage` value reports; a counter that is absent or
+/// not a count is unreported. Its cost is the one the provider reports.
+pub(crate) fn usage_of(usage: &Value) -> Usage {
+    let count = |pointer: &str| usage.at(pointer).and_then(Lenient::as_u64_lenient);
+    Usage {
+        input_tokens: count("/input_tokens"),
+        output_tokens: count("/output_tokens"),
+        total_tokens: count("/total_tokens"),
+        cached_input_tokens: count("/input_tokens_details/cached_tokens"),
+        cache_creation_input_tokens: count("/input_tokens_details/cache_write_tokens"),
+        reasoning_tokens: count("/output_tokens_details/reasoning_tokens"),
+        ..Usage::default()
+    }
+    .cost(reported_cost(usage))
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct OutputTextChunk {
-    pub content_index: u64,
-    pub sequence_number: u64,
-    pub text: String,
+/// xAI cost ticks per USD.
+const TICKS_PER_USD: f64 = 1e10;
+
+/// The total a `usage` value reports in USD: xAI's integer
+/// `cost_in_usd_ticks`, or OpenRouter's `cost` in credits of one USD.
+fn reported_cost(usage: &Value) -> Option<Cost> {
+    let total = match usage.u64("cost_in_usd_ticks") {
+        Some(ticks) => ticks as f64 / TICKS_PER_USD,
+        None => usage.f64("cost").filter(|cost| cost.is_finite())?,
+    };
+    Some(Cost::from_total(total))
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct RefusalTextChunk {
-    pub content_index: u64,
-    pub sequence_number: u64,
-    pub refusal: String,
+/// The citations a message item's `output_text` parts state, in part order.
+/// The API does not document the unit of `start_index` and `end_index` and
+/// quotes no text, so each cites the whole block and its offsets stay in the
+/// item.
+fn citations_of(item: &Value) -> Vec<WireCitation> {
+    item.arr("content")
+        .iter()
+        .flat_map(|part| part.arr("annotations"))
+        .filter_map(source_of)
+        .map(|source| WireCitation::new(None, vec![source]))
+        .collect()
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ArgsTextChunk {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_index: Option<u64>,
-    pub sequence_number: u64,
-    /// The call's arguments, in the same type (and so under the same
-    /// classification) as the `output_item.done` item's
-    /// [`OutputFunctionCall::arguments`](super::OutputFunctionCall::arguments);
-    /// [`FunctionCallArguments::reconcile`] settles whether the two agree.
-    pub arguments: FunctionCallArguments,
+/// The source an annotation names; `None` for an annotation that names
+/// none or is of an unknown type.
+fn source_of(annotation: &Value) -> Option<Source> {
+    let text = |key: &str| {
+        annotation
+            .str(key)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    };
+    let location = match annotation.str("type")? {
+        "url_citation" => SourceLocation::Url { url: text("url")? },
+        "file_citation" | "file_path" | "container_file_citation" => SourceLocation::File {
+            file_id: text("file_id")?,
+            filename: text("filename"),
+            container_id: text("container_id"),
+        },
+        _ => return None,
+    };
+    let source = Source::new(location);
+    Some(match text("title") {
+        Some(title) => source.title(title),
+        None => source,
+    })
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct SummaryPartChunk {
-    pub summary_index: u64,
-    pub sequence_number: u64,
-    pub part: SummaryPartChunkPart,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Parent {
+    Message,
+    Reasoning,
 }
 
-/// A reasoning-summary text fragment (`response.reasoning_summary_text.delta`).
-///
-/// The delta and done events are distinct shapes with distinct members: a
-/// `delta` is required here and a `text` member is not accepted in its place,
-/// so a done-shaped payload can never parse as a fragment (nor the reverse).
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct SummaryTextDeltaChunk {
-    /// The reasoning summary this fragment belongs to.
-    pub summary_index: u64,
-    pub sequence_number: u64,
-    /// The incremental text.
-    pub delta: String,
+#[derive(Default)]
+struct MessagePart {
+    at: Option<usize>,
+    text: String,
+    raw: Option<Value>,
+    opaque: bool,
+    refusal: bool,
+    /// Last non-delta snapshot phase observed for activation, independent
+    /// of the containing message's canonical phase policy.
+    observed_phase: Option<String>,
 }
 
-/// A reasoning-summary text restatement (`response.reasoning_summary_text.done`).
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct SummaryTextDoneChunk {
-    /// The reasoning summary this restatement closes.
-    pub summary_index: u64,
-    pub sequence_number: u64,
-    /// The summary's full text.
-    pub text: String,
+#[derive(Default)]
+struct MessageState {
+    id: Option<String>,
+    phase: Option<String>,
+    parts: BTreeMap<u64, MessagePart>,
+    delta: bool,
+    complete: bool,
+    item: Option<Value>,
 }
 
-pub type SummaryPartChunkPart = ReasoningSummary;
+#[derive(Default)]
+struct ReasoningState {
+    at: Option<usize>,
+    id: Option<String>,
+    summary: BTreeMap<u64, Value>,
+    content: BTreeMap<u64, Value>,
+    item: Option<Map<String, Value>>,
+    complete: bool,
+    encrypted: Option<String>,
+    signature: Option<String>,
+}
 
-/// Interpretation used only by explicitly observed calls.
-/// Original supplied text is captured by the caller before `push` is invoked.
+impl ReasoningState {
+    fn raw(&self) -> Value {
+        let mut fields = self
+            .item
+            .clone()
+            .unwrap_or_else(|| Map::from_iter([("type".to_owned(), json!("reasoning"))]));
+        if let Some(id) = &self.id {
+            fields.insert("id".into(), json!(id));
+        }
+        fields.insert(
+            "summary".into(),
+            json!(self.summary.values().collect::<Vec<_>>()),
+        );
+        if !self.content.is_empty()
+            || fields
+                .get("content")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+        {
+            fields.insert(
+                "content".into(),
+                json!(self.content.values().collect::<Vec<_>>()),
+            );
+        } else {
+            fields.shift_remove("content");
+        }
+        if let Some(encrypted) = &self.encrypted {
+            fields.insert("encrypted_content".into(), json!(encrypted));
+        }
+        if let Some(signature) = &self.signature {
+            fields.insert("signature".into(), json!(signature));
+        }
+        Value::Object(fields)
+    }
+
+    fn carried(&self) -> bool {
+        self.encrypted.is_some()
+            || self.signature.is_some()
+            || (self.complete && self.id.is_some())
+            || !self.content.is_empty()
+            || !self.summary.is_empty()
+            || self.summary.values().any(|part| {
+                part.str("type") != Some("summary_text")
+                    || part.as_object().is_some_and(|fields| {
+                        fields.keys().any(|key| key != "type" && key != "text")
+                    })
+            })
+    }
+
+    fn has_opaque(&self) -> bool {
+        self.summary
+            .values()
+            .any(|part| reasoning_opaque(part, true))
+            || self
+                .content
+                .values()
+                .any(|part| reasoning_opaque(part, false))
+    }
+}
+
+/// Completion confidence comes only from the authoritative function item.
+/// It is independent of the parser's error and never inferred from fragments.
+enum CallConfidence {
+    Incomplete,
+    Asserted,
+}
+
+enum FunctionInput {
+    Parsed,
+    Malformed {
+        error: serde_json::Error,
+        confidence: CallConfidence,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FlushBoundary {
+    Partial,
+    GenuineTerminal,
+}
+
+enum CallEnding {
+    Pending,
+    Custom,
+    Function(FunctionInput),
+}
+
+impl CallEnding {
+    fn is_complete(&self) -> bool {
+        !matches!(self, Self::Pending)
+    }
+}
+
+struct CallState {
+    at: usize,
+    id: CallId,
+    item_id: Option<String>,
+    name: String,
+    namespace: Option<String>,
+    arguments: String,
+    sent: String,
+    overflowed: bool,
+    ending: CallEnding,
+}
+
+#[derive(Clone, PartialEq)]
+struct UndecidedPart {
+    id: Option<String>,
+    raw: Value,
+}
+
+/// One reply's strict decoder. All emitted parts belong to `Out`'s branded
+/// completion fold; this state holds wire correlation and provider restatements.
+pub struct ResponsesDecoder {
+    provider: String,
+    options: ResponsesStreamOptions,
+    reader_policy: ReaderPolicy,
+    upstream_reasoning_issuer: bool,
+    messages: BTreeMap<u64, MessageState>,
+    message_ids: HashMap<String, u64>,
+    reasoning: BTreeMap<u64, ReasoningState>,
+    /// The state slot each identified reasoning item owns.
+    reasoning_ids: HashMap<String, u64>,
+    /// The slot of the latest distinct reasoning item at a reused output index.
+    reused_reasoning_slots: HashMap<u64, u64>,
+    /// Where each call, reasoning or provider-item slot opened at an output
+    /// index an earlier item already used sorts: after every earlier item
+    /// there.
+    reused_orders: HashMap<u64, SourceOrder>,
+    calls: BTreeMap<u64, CallState>,
+    parents: HashMap<u64, Parent>,
+    undecided: BTreeMap<(u64, u64), Vec<UndecidedPart>>,
+    provider_items: HashSet<u64>,
+    /// The identified provider items already emitted. An output index is
+    /// not a provider item's identity: ChatGPT's envelope repair fills
+    /// every missing index with 0.
+    provider_item_ids: HashSet<String>,
+    finished_calls: HashSet<u64>,
+    call_items: HashMap<String, u64>,
+    /// The slot of the latest distinct call item at a reused output index.
+    reused_call_slots: HashMap<u64, u64>,
+    last_message_id: Option<String>,
+    /// The real text Draft last activated by a provider event. Interleaving
+    /// resets this without closing that Part or duplicating canonical content.
+    active_message_part: Option<usize>,
+    pending_flush_error: Option<ProviderError>,
+    terminal_issuer: bool,
+    finished: bool,
+}
+
+impl ResponsesDecoder {
+    /// A decoder for the named dialect and explicitly selected policies.
+    pub fn new(provider: &str, options: ResponsesStreamOptions) -> Self {
+        Self {
+            provider: provider.to_owned(),
+            options,
+            reader_policy: ReaderPolicy::HttpSse {
+                repair_envelopes: false,
+            },
+            upstream_reasoning_issuer: false,
+            messages: BTreeMap::new(),
+            message_ids: HashMap::new(),
+            reasoning: BTreeMap::new(),
+            reasoning_ids: HashMap::new(),
+            reused_reasoning_slots: HashMap::new(),
+            reused_orders: HashMap::new(),
+            calls: BTreeMap::new(),
+            parents: HashMap::new(),
+            undecided: BTreeMap::new(),
+            provider_items: HashSet::new(),
+            provider_item_ids: HashSet::new(),
+            finished_calls: HashSet::new(),
+            call_items: HashMap::new(),
+            reused_call_slots: HashMap::new(),
+            last_message_id: None,
+            active_message_part: None,
+            pending_flush_error: None,
+            terminal_issuer: false,
+            finished: false,
+        }
+    }
+
+    /// Repair only absent envelope coordinates, preserving invalid supplied
+    /// coordinates as defects and retaining the original corruption evidence.
+    pub fn with_envelope_repair(mut self) -> Self {
+        match &mut self.reader_policy {
+            ReaderPolicy::HttpSse { repair_envelopes } => *repair_envelopes = true,
+            #[cfg(any(feature = "websocket", test))]
+            ReaderPolicy::WebSocket => {}
+        }
+        self
+    }
+
+    #[cfg(any(feature = "websocket", test))]
+    pub(crate) fn with_websocket_reader(mut self) -> Self {
+        self.reader_policy = ReaderPolicy::WebSocket;
+        self
+    }
+
+    /// Resolve carried reasoning and items to the gateway's upstream issuer
+    /// once the terminal supplies the actual model.
+    pub fn with_upstream_reasoning_issuer(mut self) -> Self {
+        self.upstream_reasoning_issuer = true;
+        self
+    }
+
+    fn issuer(&self, response: &Value) -> String {
+        match response.str("model").filter(|model| !model.is_empty()) {
+            Some(model) if self.upstream_reasoning_issuer => {
+                crate::providers::openai::wire::upstream_reasoning_issuer(&self.provider, model)
+            }
+            _ => self.provider.clone(),
+        }
+    }
+
+    fn message_slot(&mut self, index: u64, id: Option<&str>, snapshot: Option<&[Value]>) -> u64 {
+        let Some(id) = id.filter(|id| !id.is_empty()) else {
+            return index;
+        };
+        if let Some(existing) = self.message_ids.get(id) {
+            return *existing;
+        }
+        // Only a completed exact restatement can claim anonymous deltas. An
+        // added item never aliases a distinct anonymous message by coincidence.
+        let own_empty = self
+            .messages
+            .get(&index)
+            .is_none_or(|message| message.parts.is_empty())
+            && !self.undecided.iter().any(|((slot, _), parts)| {
+                *slot == index
+                    && parts
+                        .iter()
+                        .any(|part| part.id.as_deref().is_none_or(|own| own == id))
+            });
+        let anonymous = own_empty.then_some(snapshot).flatten().and_then(|content| {
+            self.messages.iter().find_map(|(slot, message)| {
+                (message.id.is_none()
+                    && message.delta
+                    && !message.parts.is_empty()
+                    && content.len() == message.parts.len()
+                    && content.iter().enumerate().all(|(part_index, raw)| {
+                        message
+                            .parts
+                            .get(&(part_index as u64))
+                            .is_some_and(|part| part_matches(part, raw))
+                    }))
+                .then_some(*slot)
+            })
+        });
+        let slot = match anonymous {
+            Some(slot) => slot,
+            // A distinct message at an index a reasoning, call or provider
+            // item already holds gets its own slot, as those items do. A
+            // second message id there still joins the index's message:
+            // Copilot names one message by different ids.
+            None if self.reasoning_ids.values().any(|slot| *slot == index)
+                || self.reasoning.contains_key(&index)
+                || self.calls.contains_key(&index)
+                || self.call_items.values().any(|slot| *slot == index)
+                || self.provider_items.contains(&index) =>
+            {
+                let slot = REUSED_MESSAGE_SLOTS
+                    + self
+                        .reused_orders
+                        .keys()
+                        .filter(|slot| {
+                            (REUSED_MESSAGE_SLOTS..REUSED_PROVIDER_SLOTS).contains(*slot)
+                        })
+                        .count() as u64;
+                self.reuse(index, slot);
+                slot
+            }
+            None => index,
+        };
+        self.message_ids.insert(id.to_owned(), slot);
+        slot
+    }
+
+    /// Where content part `part` of message slot `slot` sorts among the
+    /// reply's blocks. A message at a reused index sorts after every earlier
+    /// item there; its parts keep arrival order.
+    fn message_order(&self, slot: u64, part: u64) -> SourceOrder {
+        self.reused_orders
+            .get(&slot)
+            .copied()
+            .unwrap_or(SourceOrder::new(slot, part))
+    }
+
+    fn relocate_terminal_messages(&mut self, output: &[Value]) -> Result<(), ProviderError> {
+        let mut claims = HashMap::new();
+        let mut moves = BTreeMap::new();
+        for (destination, item) in output.iter().enumerate() {
+            if item.str("type") != Some("message") {
+                continue;
+            }
+            let Some(id) = item.str("id").filter(|id| !id.is_empty()) else {
+                continue;
+            };
+            let Some(source) = self.message_ids.get(id).copied() else {
+                continue;
+            };
+            let destination = destination as u64;
+            if let Some(previous) = claims.insert(id, destination) {
+                return Err(ProviderError::Response(format!(
+                    "conflicting Responses terminal message ID {id}: claimed outputs {previous} and {destination}"
+                )));
+            }
+            if source == destination {
+                continue;
+            }
+            let occupied = |index| {
+                self.reasoning.contains_key(&index)
+                    || self.calls.contains_key(&index)
+                    || self.provider_items.contains(&index)
+                    || self.finished_calls.contains(&index)
+                    || self.call_items.values().any(|slot| *slot == index)
+            };
+            let Some(message) = self.messages.get(&source) else {
+                return Err(ProviderError::Response(format!(
+                    "conflicting Responses terminal message ownership at output {source}: item {id} has no message state"
+                )));
+            };
+            if message.id.as_deref() != Some(id)
+                || self.parents.get(&source) != Some(&Parent::Message)
+                || occupied(source)
+                || self
+                    .message_ids
+                    .iter()
+                    .any(|(other, slot)| *slot == source && other.as_str() != id)
+            {
+                return Err(ProviderError::Response(format!(
+                    "conflicting Responses terminal message ownership at output {source}: item {id} does not exclusively own its message state"
+                )));
+            }
+            if self.messages.contains_key(&destination)
+                || self.parents.contains_key(&destination)
+                || occupied(destination)
+                || self.message_ids.values().any(|slot| *slot == destination)
+            {
+                return Err(ProviderError::Response(format!(
+                    "conflicting Responses terminal message destination at output {destination}: occupied while relocating item {id} from output {source}"
+                )));
+            }
+            let content = item.arr("content");
+            for (part, raw) in content.iter().enumerate() {
+                let opaque = !matches!(raw.str("type"), Some("output_text" | "refusal"));
+                self.check_message_kind(source, part as u64, opaque, Some(id))?;
+            }
+            for ((slot, part), pending) in &self.undecided {
+                for pending in pending {
+                    if pending.id.as_deref() != Some(id) {
+                        if *slot == source || *slot == destination {
+                            return Err(ProviderError::Response(format!(
+                                "conflicting Responses terminal message pending ownership at output {slot}, content {part}: item {id} cannot claim an anonymous or foreign part"
+                            )));
+                        }
+                        continue;
+                    }
+                    let opaque =
+                        !matches!(pending.raw.str("type"), Some("output_text" | "refusal"));
+                    if let Some(stored) = message.parts.get(part)
+                        && stored.opaque != opaque
+                    {
+                        return Err(conflicting_kind(
+                            source,
+                            "content",
+                            *part,
+                            stored.opaque,
+                            opaque,
+                        ));
+                    }
+                    if let Some(raw) = usize::try_from(*part)
+                        .ok()
+                        .and_then(|part| content.get(part))
+                    {
+                        let incoming = !matches!(raw.str("type"), Some("output_text" | "refusal"));
+                        if opaque != incoming {
+                            return Err(conflicting_kind(
+                                source, "content", *part, opaque, incoming,
+                            ));
+                        }
+                    }
+                }
+            }
+            moves.insert(source, destination);
+        }
+        if moves.is_empty() {
+            return Ok(());
+        }
+        // Every claim is proved before moving the same states and their maps.
+        // Writer Part indices, activation and already delivered SourceOrder stay unchanged.
+        self.messages = std::mem::take(&mut self.messages)
+            .into_iter()
+            .map(|(source, message)| (moves.get(&source).copied().unwrap_or(source), message))
+            .collect();
+        self.parents = std::mem::take(&mut self.parents)
+            .into_iter()
+            .map(|(source, parent)| (moves.get(&source).copied().unwrap_or(source), parent))
+            .collect();
+        for slot in self.message_ids.values_mut() {
+            if let Some(destination) = moves.get(slot) {
+                *slot = *destination;
+            }
+        }
+        Ok(())
+    }
+
+    fn bind(
+        &mut self,
+        index: u64,
+        parent: Parent,
+        id: Option<&str>,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<(), ProviderError> {
+        if parent == Parent::Reasoning && self.parents.get(&index) == Some(&Parent::Message) {
+            return Err(ProviderError::Response(format!(
+                "conflicting Responses parent kind at output {index}: reasoning in a message"
+            )));
+        }
+        self.parents.entry(index).or_insert(parent);
+        // Parts with an explicit item id follow that item to its established
+        // position. Id-less parts bind only by their supplied output position.
+        let keys: Vec<_> = self.undecided.keys().copied().collect();
+        let mut ready = Vec::new();
+        for key in keys {
+            let Some(parts) = self.undecided.get_mut(&key) else {
+                continue;
+            };
+            let mut retained = Vec::new();
+            for part in std::mem::take(parts) {
+                let binds = match part.id.as_deref() {
+                    Some(own) => id == Some(own),
+                    None => key.0 == index,
+                };
+                if binds {
+                    ready.push((key.1, part.raw));
+                } else {
+                    retained.push(part);
+                }
+            }
+            *parts = retained;
+        }
+        self.undecided.retain(|_, parts| !parts.is_empty());
+        for (part, raw) in ready {
+            match parent {
+                Parent::Message => self.message_part(index, part, id, raw, out)?,
+                Parent::Reasoning => {
+                    self.reasoning_part(index, part, false, id, raw, false, out)?
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn message_delta(
+        &mut self,
+        index: u64,
+        part_index: u64,
+        id: Option<&str>,
+        delta: &str,
+        refusal: bool,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<(), ProviderError> {
+        let index = self.message_slot(index, id, None);
+        self.check_message_kind(index, part_index, false, id)?;
+        self.bind(index, Parent::Message, id, out)?;
+        let order = self.message_order(index, part_index);
+        let message = self.messages.entry(index).or_default();
+        if message.id.is_none() {
+            message.id = nonempty(id);
+        }
+        message.delta = true;
+        // deltas do not revoke the phase an actual message snapshot supplied.
+        let part = message.parts.entry(part_index).or_default();
+        part.refusal |= refusal;
+        let at = text_at(part, order, out)?;
+        activate_text(
+            &mut self.active_message_part,
+            at,
+            !part.text.is_empty(),
+            out,
+        )?;
+        part.text.push_str(delta);
+        out.push(at, delta)
+    }
+
+    fn check_message_kind(
+        &self,
+        index: u64,
+        part: u64,
+        opaque: bool,
+        id: Option<&str>,
+    ) -> Result<(), ProviderError> {
+        if let Some(stored) = self
+            .messages
+            .get(&index)
+            .and_then(|message| message.parts.get(&part))
+            && stored.opaque != opaque
+        {
+            return Err(conflicting_kind(
+                index,
+                "content",
+                part,
+                stored.opaque,
+                opaque,
+            ));
+        }
+        if !opaque
+            && self.undecided.get(&(index, part)).is_some_and(|parts| {
+                parts
+                    .iter()
+                    .any(|part| part.id.as_deref().is_none_or(|own| Some(own) == id))
+            })
+        {
+            return Err(conflicting_kind(index, "content", part, true, false));
+        }
+        Ok(())
+    }
+
+    fn message_part(
+        &mut self,
+        index: u64,
+        part_index: u64,
+        id: Option<&str>,
+        raw: Value,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<(), ProviderError> {
+        self.message_part_with_phase(index, part_index, id, raw, None, out)
+    }
+
+    fn message_part_with_phase(
+        &mut self,
+        index: u64,
+        part_index: u64,
+        id: Option<&str>,
+        raw: Value,
+        phase: Option<&str>,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<(), ProviderError> {
+        let kind = raw.str("type");
+        let opaque = !matches!(kind, Some("output_text" | "refusal"));
+        self.check_message_kind(index, part_index, opaque, id)?;
+        let order = self.message_order(index, part_index);
+        let message = self.messages.entry(index).or_default();
+        if message.id.is_none() {
+            message.id = nonempty(id);
+        }
+        let part = message.parts.entry(part_index).or_default();
+        part.opaque = opaque;
+        part.refusal |= kind == Some("refusal");
+        if !opaque {
+            let stated = raw
+                .str(if part.refusal { "refusal" } else { "text" })
+                .unwrap_or_default();
+            let at = text_at(part, order, out)?;
+            let metadata_changed = message_activation_metadata(part.raw.as_ref())
+                != message_activation_metadata(Some(&raw));
+            let phase_changed =
+                phase.is_some_and(|phase| part.observed_phase.as_deref() != Some(phase));
+            let has_new_text = stated
+                .strip_prefix(&part.text)
+                .is_some_and(|suffix| !suffix.is_empty());
+            if has_new_text || metadata_changed || phase_changed {
+                activate_text(
+                    &mut self.active_message_part,
+                    at,
+                    !part.text.is_empty(),
+                    out,
+                )?;
+            }
+            // Snapshots extend deltas; a shorter or contradictory snapshot
+            // cannot erase text the consumer already received.
+            if let Some(suffix) = stated.strip_prefix(&part.text) {
+                out.push(at, suffix)?;
+                part.text = stated.to_owned();
+            }
+        }
+        if let Some(phase) = phase {
+            part.observed_phase = Some(phase.to_owned());
+        }
+        part.raw = Some(raw);
+        Ok(())
+    }
+
+    fn message_item(
+        &mut self,
+        index: u64,
+        item: &Value,
+        completed: bool,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<(), ProviderError> {
+        let content = item.arr("content");
+        let index = self.message_slot(index, item.str("id"), completed.then_some(content));
+        // Check the whole snapshot before publishing any part of it.
+        for (part, raw) in content.iter().enumerate() {
+            let opaque = !matches!(raw.str("type"), Some("output_text" | "refusal"));
+            self.check_message_kind(index, part as u64, opaque, item.str("id"))?;
+        }
+        self.bind(index, Parent::Message, item.str("id"), out)?;
+        // the actual snapshot retains phase custody after streamed deltas.
+        let phase = item.str("phase");
+        for (part, raw) in content.iter().enumerate() {
+            self.message_part_with_phase(
+                index,
+                part as u64,
+                item.str("id"),
+                raw.clone(),
+                phase,
+                out,
+            )?;
+        }
+        let message = self.messages.entry(index).or_default();
+        // The first completed item states the message's identity; an id an
+        // announcement or delta stated first only stands in until then, and a
+        // later terminal restatement never replaces it.
+        if completed
+            && message.item.is_none()
+            && let Some(id) = nonempty(item.str("id"))
+        {
+            message.id = Some(id);
+        } else if message.id.is_none() {
+            message.id = nonempty(item.str("id"));
+        }
+        message.phase = item.str("phase").map(str::to_owned);
+        if completed {
+            message.complete = true;
+            message.item = Some(item.clone());
+            if let Some(id) = item.str("id").filter(|id| !id.is_empty()) {
+                self.last_message_id = Some(id.to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    fn reasoning_part(
+        &mut self,
+        index: u64,
+        part: u64,
+        summary: bool,
+        id: Option<&str>,
+        raw: Value,
+        append: bool,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<(), ProviderError> {
+        if self.parents.get(&index) == Some(&Parent::Message) {
+            return Err(ProviderError::Response(format!(
+                "conflicting Responses parent kind at output {index}, content {part}: a reasoning_text part in a message"
+            )));
+        }
+        let order = self.reasoning_order(index);
+        self.parents.entry(index).or_insert(Parent::Reasoning);
+        let reasoning = self.reasoning.entry(index).or_default();
+        if reasoning.id.is_none() {
+            reasoning.id = nonempty(id);
+        }
+        let parts = if summary {
+            &mut reasoning.summary
+        } else {
+            &mut reasoning.content
+        };
+        let opaque = reasoning_opaque(&raw, summary);
+        if let Some(old) = parts.get(&part) {
+            let stored = reasoning_opaque(old, summary);
+            if stored != opaque {
+                return Err(conflicting_kind(
+                    order.primary,
+                    if summary { "summary" } else { "content" },
+                    part,
+                    stored,
+                    opaque,
+                ));
+            }
+        }
+        let delta = append.then(|| raw.str("text").unwrap_or_default().to_owned());
+        if append && let Some(previous) = parts.get_mut(&part) {
+            let mut text = previous
+                .as_str()
+                .or_else(|| previous.str("text"))
+                .unwrap_or_default()
+                .to_owned();
+            text.push_str(raw.str("text").unwrap_or_default());
+            if previous.is_string() {
+                *previous = json!(text);
+            } else {
+                previous["text"] = json!(text);
+            }
+        } else {
+            parts.insert(part, raw);
+        }
+        if let Some(delta) = delta {
+            self.active_message_part = None;
+            Self::reasoning_delta(reasoning, order, &delta, out)?;
+        }
+        Ok(())
+    }
+
+    fn reasoning_delta(
+        reasoning: &mut ReasoningState,
+        order: SourceOrder,
+        delta: &str,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<(), ProviderError> {
+        if reasoning.at.is_none() {
+            let at = out.fresh_index();
+            out.in_source_order(order, |out| {
+                out.open(at, Block::Reasoning { redacted: false }, Value::Null)
+            })?;
+            reasoning.at = Some(at);
+        }
+        if let Some(at) = reasoning.at {
+            out.push(at, delta)?;
+        }
+        Ok(())
+    }
+
+    fn reasoning_item(
+        &mut self,
+        index: u64,
+        item: &Value,
+        completed: bool,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<(), ProviderError> {
+        let index = if completed {
+            self.reasoning_slot(index, item.str("id"))
+        } else {
+            self.opened_reasoning_slot(index, item.str("id"))
+        };
+        let order = self.reasoning_order(index);
+        self.bind(index, Parent::Reasoning, item.str("id"), out)?;
+        // All kind contradictions are checked before changing either array.
+        if let Some(state) = self.reasoning.get(&index) {
+            for (array, old, summary) in [
+                ("summary", &state.summary, true),
+                ("content", &state.content, false),
+            ] {
+                for (part, raw) in reasoning_array(item, array).iter().enumerate() {
+                    if let Some(stored) = old.get(&(part as u64)) {
+                        let was_opaque = reasoning_opaque(stored, summary);
+                        let opaque = reasoning_opaque(raw, summary);
+                        if was_opaque != opaque {
+                            return Err(conflicting_kind(
+                                order.primary,
+                                array,
+                                part as u64,
+                                was_opaque,
+                                opaque,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        let state = self.reasoning.entry(index).or_default();
+        if !state.complete || state.id.is_none() {
+            state.id = nonempty(item.str("id")).or_else(|| state.id.clone());
+        }
+        for (part, raw) in reasoning_array(item, "summary").into_iter().enumerate() {
+            state.summary.insert(part as u64, raw);
+        }
+        for (part, raw) in reasoning_array(item, "content").into_iter().enumerate() {
+            state.content.insert(part as u64, raw);
+        }
+        // A completed item owns its cipher/signature; terminal restatements
+        // fill missing fields instead of replacing that first authority.
+        if !state.complete || state.encrypted.is_none() {
+            state.encrypted =
+                nonempty(item.str("encrypted_content")).or_else(|| state.encrypted.clone());
+        }
+        if !state.complete || state.signature.is_none() {
+            state.signature = nonempty(item.str("signature")).or_else(|| state.signature.clone());
+        }
+        if state.item.is_none() || !state.complete {
+            state.item = Some(serde_json::from_value(item.clone())?);
+        }
+        state.complete |= completed;
+        Ok(())
+    }
+
+    fn call_added(
+        &mut self,
+        index: u64,
+        item: &Value,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<(), ProviderError> {
+        // Custom input is meaningful only in its whole done item. The original
+        // custom-input delta/done tags remain on the unknown channel.
+        if item.str("type") == Some("custom_tool_call") {
+            return Ok(());
+        }
+        self.active_message_part = None;
+        let source = index;
+        let index = self.call_slot(index, item.str("id"));
+        if self.finished_calls.contains(&index) {
+            return Ok(());
+        }
+        if let Some(id) = item.str("id").filter(|id| !id.is_empty()) {
+            self.call_items.entry(id.to_owned()).or_insert(index);
+        }
+        let order = self.slot_order(index, source);
+        let call = Self::call_state(self.calls.entry(index), order, item, out)?;
+        if call.name.is_empty()
+            && let Some(name) = item.str("name").filter(|name| !name.is_empty())
+        {
+            name.clone_into(&mut call.name);
+            if let Some(id) = item.str("call_id").filter(|id| !id.is_empty()) {
+                call.id = CallId::from_wire(id);
+            }
+            if call.item_id.is_none() {
+                call.item_id = nonempty(item.str("id"));
+            }
+            call.namespace = item.str("namespace").map(str::to_owned);
+            out.qualify(call.at, call.namespace.clone())?;
+            out.fragment(
+                Some(call.at),
+                CallFragment {
+                    id: item.str("call_id").filter(|id| !id.is_empty()),
+                    name: Some(&call.name),
+                    arguments: None,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    fn call_state<'a>(
+        entry: Entry<'a, u64, CallState>,
+        order: SourceOrder,
+        item: &Value,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<&'a mut CallState, ProviderError> {
+        let entry = match entry {
+            Entry::Occupied(entry) => return Ok(entry.into_mut()),
+            Entry::Vacant(entry) => entry,
+        };
+        let at = out.fresh_index();
+        let id = CallId::from_wire(item.str("call_id").unwrap_or_default());
+        let name = item.str("name").unwrap_or_default().to_owned();
+        let namespace = item.str("namespace").map(str::to_owned);
+        // Fragmented calls allow the first delta to precede an announced name.
+        out.in_source_order(order, |out| {
+            let fragment = CallFragment {
+                id: item.str("call_id").filter(|id| !id.is_empty()),
+                name: None,
+                arguments: None,
+            };
+            if name.is_empty() {
+                out.pending_call(at, fragment)
+            } else {
+                out.fragment(Some(at), fragment)
+            }
+        })?;
+        out.qualify(at, namespace.clone())?;
+        out.fragment(
+            Some(at),
+            CallFragment {
+                name: Some(&name),
+                ..CallFragment::default()
+            },
+        )?;
+        Ok(entry.insert(CallState {
+            at,
+            id,
+            item_id: nonempty(item.str("id")),
+            name,
+            namespace,
+            arguments: String::new(),
+            sent: String::new(),
+            overflowed: false,
+            ending: CallEnding::Pending,
+        }))
+    }
+
+    fn call_delta(
+        &mut self,
+        index: u64,
+        id: Option<&str>,
+        delta: &str,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<(), ProviderError> {
+        self.active_message_part = None;
+        let source = index;
+        let index = self.call_slot(index, id);
+        if self.finished_calls.contains(&index)
+            || self
+                .calls
+                .get(&index)
+                .is_some_and(|call| call.ending.is_complete())
+        {
+            return Ok(());
+        }
+        let order = self.slot_order(index, source);
+        let entry = self.calls.entry(index);
+        if matches!(&entry, Entry::Vacant(_))
+            && let Some(id) = id.filter(|id| !id.is_empty())
+        {
+            self.call_items.entry(id.to_owned()).or_insert(index);
+        }
+        let call = Self::call_state(
+            entry,
+            order,
+            &json!({"type":"function_call", "id":id.unwrap_or_default()}),
+            out,
+        )?;
+        // Mirror the accumulator's bounded fragment rule, including the
+        // gateway's replaceable standalone null placeholder.
+        if call.arguments.trim() == "null" && !delta.trim().is_empty() {
+            call.arguments.clear();
+            call.sent.clear();
+        }
+        if call.arguments.len().saturating_add(delta.len()) > MAX_TOOL_INPUT_BYTES {
+            call.overflowed = true;
+        } else {
+            call.arguments.push_str(delta);
+            call.sent.push_str(delta);
+        }
+        out.fragment(
+            Some(call.at),
+            CallFragment {
+                arguments: Some(delta),
+                ..CallFragment::default()
+            },
+        )
+    }
+
+    fn call_done(
+        &mut self,
+        index: u64,
+        item: &Value,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<(), ProviderError> {
+        let source = index;
+        let index = self.call_slot(index, item.str("id"));
+        if self.finished_calls.contains(&index)
+            || self
+                .calls
+                .get(&index)
+                .is_some_and(|call| call.ending.is_complete())
+        {
+            return Ok(());
+        }
+        if let Some(id) = item.str("id").filter(|id| !id.is_empty()) {
+            self.call_items.entry(id.to_owned()).or_insert(index);
+        }
+        if item.str("type") == Some("custom_tool_call") {
+            self.active_message_part = None;
+            let at = out.fresh_index();
+            let id = CallId::from_wire(item.str("call_id").unwrap_or_default());
+            let name = item.str("name").unwrap_or_default();
+            let name =
+                ToolName::new(name).map_err(|error| ProviderError::Response(error.to_string()))?;
+            let namespace = item.str("namespace").map(str::to_owned);
+            let custom: reader::CustomFields = reader::fields(item)?;
+            let input = custom.input.as_str();
+            let order = self.slot_order(index, source);
+            out.in_source_order(order, |out| {
+                out.open(
+                    at,
+                    Block::CustomCall {
+                        id: id.clone(),
+                        name,
+                        namespace: namespace.clone(),
+                    },
+                    item.clone(),
+                )
+            })?;
+            out.push(at, input)?;
+            self.calls.insert(
+                index,
+                CallState {
+                    at,
+                    id,
+                    item_id: nonempty(item.str("id")),
+                    name: item.str("name").unwrap_or_default().to_owned(),
+                    namespace,
+                    arguments: input.to_owned(),
+                    sent: input.to_owned(),
+                    overflowed: false,
+                    ending: CallEnding::Custom,
+                },
+            );
+        } else {
+            let order = self.slot_order(index, source);
+            let entry = self.calls.entry(index);
+            if matches!(&entry, Entry::Vacant(_)) {
+                self.active_message_part = None;
+            }
+            let call = Self::call_state(entry, order, item, out)?;
+            if call.name.is_empty() {
+                call.name = item.str("name").unwrap_or_default().to_owned();
+            }
+            if let Some(id) = item.str("call_id").filter(|id| !id.is_empty()) {
+                call.id = CallId::from_wire(id);
+            }
+            if call.item_id.is_none() {
+                call.item_id = nonempty(item.str("id"));
+            }
+            call.namespace = item.str("namespace").map(str::to_owned);
+            out.qualify(call.at, call.namespace.clone())?;
+            out.fragment(
+                Some(call.at),
+                CallFragment {
+                    id: item.str("call_id").filter(|id| !id.is_empty()),
+                    name: Some(&call.name),
+                    arguments: None,
+                },
+            )?;
+            let function: reader::FunctionFields = reader::fields(item)?;
+            let stated = function.arguments.as_str();
+            // Empty and whitespace arguments mean the parameterless object.
+            let arguments = if stated.trim().is_empty() {
+                "{}"
+            } else {
+                stated
+            };
+            call.ending = CallEnding::Function(match serde_json::from_str::<Value>(arguments) {
+                Ok(_) => FunctionInput::Parsed,
+                Err(error) => FunctionInput::Malformed {
+                    error,
+                    confidence: match function.status {
+                        reader::ToolStatus::Incomplete => CallConfidence::Incomplete,
+                        reader::ToolStatus::Completed | reader::ToolStatus::InProgress => {
+                            CallConfidence::Asserted
+                        }
+                    },
+                },
+            });
+            call.arguments = arguments.to_owned();
+            // A done item states the complete input; it is not an arguments
+            // delta. Retain earlier real fragments without inventing another.
+            out.restate(call.at, arguments)?;
+            call.sent = arguments.to_owned();
+            // The authoritative item wins over any overflowed fragments.
+            call.overflowed = false;
+            out.edit(call.at, |native| *native = item.clone())?;
+        }
+        if self.options.immediate_tool_calls {
+            self.finish_call(index, FlushBoundary::Partial, out)?;
+        }
+        Ok(())
+    }
+
+    /// The state slot for call item `id` at output `index`. An output index
+    /// is not a call's identity: a known item keeps its slot, and a distinct
+    /// item at an index another call item already holds gets its own slot
+    /// beyond every output index, so it is neither merged into nor dropped as
+    /// the earlier call. Id-less events follow the index's latest item.
+    fn call_slot(&mut self, index: u64, id: Option<&str>) -> u64 {
+        let current = self.reused_call_slots.get(&index).copied().unwrap_or(index);
+        let Some(id) = id.filter(|id| !id.is_empty()) else {
+            return current;
+        };
+        if let Some(slot) = self.call_items.get(id) {
+            return *slot;
+        }
+        if !self.call_items.values().any(|slot| *slot == current)
+            && !self.reasoning_ids.values().any(|slot| *slot == current)
+            && !self.provider_items.contains(&current)
+            && !self.message_ids.values().any(|slot| *slot == current)
+        {
+            return current;
+        }
+        let slot = self
+            .call_items
+            .values()
+            .copied()
+            .filter(|slot| *slot >= REUSED_CALL_SLOTS)
+            .max()
+            .map_or(REUSED_CALL_SLOTS, |slot| slot + 1);
+        self.reuse(index, slot);
+        self.reused_call_slots.insert(index, slot);
+        self.call_items.insert(id.to_owned(), slot);
+        slot
+    }
+
+    /// The state slot a reasoning event at output `index` reaches without
+    /// claiming one: a known item's own slot; for an id-less event, the
+    /// index's latest reasoning item; otherwise the index itself.
+    fn reasoning_slot_of(&self, index: u64, id: Option<&str>) -> u64 {
+        match id.filter(|id| !id.is_empty()) {
+            Some(id) => self.reasoning_ids.get(id).copied().unwrap_or(index),
+            None => self
+                .reused_reasoning_slots
+                .get(&index)
+                .copied()
+                .unwrap_or(index),
+        }
+    }
+
+    /// The state slot a reasoning event other than `output_item.added`
+    /// reaches: a known item's own slot, else the index's latest reasoning
+    /// item. Only an added item opens a slot. Copilot names one item by a
+    /// different id at `added`, at `done` and in the terminal restatement;
+    /// those ids join the slot the index holds, as upstream addresses them.
+    fn reasoning_slot(&mut self, index: u64, id: Option<&str>) -> u64 {
+        let current = self.reasoning_slot_of(index, None);
+        let Some(id) = id.filter(|id| !id.is_empty()) else {
+            return current;
+        };
+        *self.reasoning_ids.entry(id.to_owned()).or_insert(current)
+    }
+
+    /// The state slot an `output_item.added` reasoning item opens, keyed by
+    /// item id as call slots are. An output index is not a reasoning item's
+    /// identity: ChatGPT's envelope repair fills every missing index with 0.
+    /// A known item keeps its slot, and a distinct item added at an index
+    /// another reasoning item already holds gets its own slot beyond every
+    /// output index, so the two are never merged.
+    fn opened_reasoning_slot(&mut self, index: u64, id: Option<&str>) -> u64 {
+        let current = self.reasoning_slot_of(index, None);
+        let Some(id) = id.filter(|id| !id.is_empty()) else {
+            return current;
+        };
+        if let Some(slot) = self.reasoning_ids.get(id) {
+            return *slot;
+        }
+        if !self.reasoning_ids.values().any(|slot| *slot == current)
+            && !self.call_items.values().any(|slot| *slot == current)
+            && !self.provider_items.contains(&current)
+            && !self.message_ids.values().any(|slot| *slot == current)
+        {
+            self.reasoning_ids.insert(id.to_owned(), current);
+            return current;
+        }
+        let slot = REUSED_REASONING_SLOTS
+            + self
+                .reused_orders
+                .keys()
+                .filter(|slot| (REUSED_REASONING_SLOTS..REUSED_CALL_SLOTS).contains(*slot))
+                .count() as u64;
+        self.reuse(index, slot);
+        self.reused_reasoning_slots.insert(index, slot);
+        self.reasoning_ids.insert(id.to_owned(), slot);
+        slot
+    }
+
+    /// Record that `slot` opened at output `index` after another item of
+    /// either kind used it. A reused index cannot order its items by
+    /// position, so each later item sorts after the earlier ones there.
+    fn reuse(&mut self, index: u64, slot: u64) {
+        let later = self
+            .reused_orders
+            .values()
+            .filter(|order| order.primary == index)
+            .count() as u64
+            + 1;
+        self.reused_orders
+            .insert(slot, SourceOrder::new(index, REUSED_ORDER_BASE + later));
+    }
+
+    /// Where the block of state slot `slot`, reached at output `index`,
+    /// sorts among the reply's blocks.
+    fn slot_order(&self, slot: u64, index: u64) -> SourceOrder {
+        self.reused_orders
+            .get(&slot)
+            .copied()
+            .unwrap_or(SourceOrder::new(index, 0))
+    }
+
+    /// Where reasoning slot `slot`'s block sorts among the reply's blocks.
+    fn reasoning_order(&self, slot: u64) -> SourceOrder {
+        self.slot_order(slot, slot)
+    }
+
+    fn finish_call(
+        &mut self,
+        index: u64,
+        boundary: FlushBoundary,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<(), ProviderError> {
+        // A terminal cannot invent a tool name or close an unnamed slot.
+        // Its real Part and already delivered arguments remain a prefix.
+        if self
+            .calls
+            .get(&index)
+            .is_some_and(|call| call.name.is_empty())
+        {
+            return Ok(());
+        }
+        if boundary == FlushBoundary::Partial
+            && self
+                .calls
+                .get(&index)
+                .is_some_and(|call| !call.ending.is_complete())
+        {
+            return Ok(());
+        }
+        let Some(call) = self.calls.remove(&index) else {
+            return Ok(());
+        };
+        self.finished_calls.insert(index);
+        let complete = call.ending.is_complete();
+        match call.ending {
+            CallEnding::Custom => return out.finish(call.at),
+            CallEnding::Function(FunctionInput::Malformed {
+                confidence: CallConfidence::Incomplete,
+                ..
+            }) => return out.discard_call(call.at, DiscardReason::Incomplete),
+            CallEnding::Function(FunctionInput::Malformed {
+                error,
+                confidence: CallConfidence::Asserted,
+            }) => {
+                let provider = call.id.provider().map(|call_id| ProviderCallEvidence {
+                    call_id: call_id.clone(),
+                    item_id: call.item_id,
+                });
+                return Err(out.malformed_call_error(
+                    call.at,
+                    call.arguments,
+                    error.to_string(),
+                    provider,
+                ));
+            }
+            CallEnding::Pending => {
+                let arguments = if call.arguments.trim().is_empty() {
+                    "{}"
+                } else {
+                    &call.arguments
+                };
+                if call.overflowed || serde_json::from_str::<Value>(arguments).is_err() {
+                    // Genuine terminal evidence closes this never-done assembly;
+                    // neither item confidence nor a truncation cause is inferred.
+                    return out.discard_call(call.at, DiscardReason::UnfinishedAtTerminal);
+                }
+            }
+            CallEnding::Function(FunctionInput::Parsed) => {}
+        }
+        if call.arguments.trim().is_empty() {
+            out.restate(call.at, "{}")?;
+        } else if serde_json::from_str::<Value>(&call.arguments)
+            .is_ok_and(|arguments| !arguments.is_object())
+        {
+            // This carried boundary preserves F's valid JSON values without
+            // changing the default object-oriented ToolFunction parser.
+            out.preserve_non_object_call_arguments(call.at)?;
+        }
+        if complete {
+            out.finish(call.at)
+        } else if boundary == FlushBoundary::GenuineTerminal {
+            // Parseable input is not evidence that the provider finished
+            // the call. Leave its projected draft open so end/close_open marks
+            // it unfinished and the existing dispatch boundary refuses it.
+            Ok(())
+        } else {
+            out.close(call.at)
+        }
+    }
+
+    fn provider_item(
+        &mut self,
+        index: u64,
+        item: &Value,
+        arrival: Arrival,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<(), ProviderError> {
+        // A streamed item is known by its id, else by its index. A terminal
+        // restatement's index is its real position, so an item restated
+        // under an id the stream did not use is still the one streamed there.
+        let id = item.str("id").filter(|id| !id.is_empty());
+        let seen = id.is_some_and(|id| self.provider_item_ids.contains(id))
+            || (id.is_none() || arrival == Arrival::Restated)
+                && self.provider_items.contains(&index);
+        if seen {
+            return Ok(());
+        }
+        // A distinct item at an index another item already holds sorts
+        // after every earlier item there, as reused call and reasoning
+        // slots do.
+        let held = self.provider_items.contains(&index)
+            || self.call_items.values().any(|slot| *slot == index)
+            || self.reasoning_ids.values().any(|slot| *slot == index)
+            || self.message_ids.values().any(|slot| *slot == index);
+        let order = if held {
+            let slot = REUSED_PROVIDER_SLOTS
+                + self
+                    .reused_orders
+                    .keys()
+                    .filter(|slot| (REUSED_PROVIDER_SLOTS..REUSED_REASONING_SLOTS).contains(*slot))
+                    .count() as u64;
+            self.reuse(index, slot);
+            self.slot_order(slot, index)
+        } else {
+            SourceOrder::new(index, 0)
+        };
+        self.provider_items.insert(index);
+        if let Some(id) = id {
+            self.provider_item_ids.insert(id.to_owned());
+        }
+        let at = out.fresh_index();
+        out.in_source_order(order, |out| {
+            out.whole(at, Block::ProviderItem { provider: None }, item.clone(), "")
+        })
+    }
+
+    fn output(
+        &mut self,
+        index: u64,
+        item: &Value,
+        arrival: Arrival,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<(), ProviderError> {
+        let completed = arrival != Arrival::Added;
+        match item.str("type") {
+            Some("message") => self.message_item(index, item, completed, out),
+            Some("reasoning") => self.reasoning_item(index, item, completed, out),
+            Some("function_call" | "custom_tool_call") if completed => {
+                self.call_done(index, item, out)
+            }
+            Some("function_call" | "custom_tool_call") => self.call_added(index, item, out),
+            _ if completed => self.provider_item(index, item, arrival, out),
+            _ => Ok(()),
+        }
+    }
+
+    fn item_event(
+        &mut self,
+        kind: &str,
+        frame: Value,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<(), ProviderError> {
+        let index = reader::fields::<reader::ItemEnvelope>(&frame)?.output_index;
+        let id = frame.str("item_id");
+        let index = id
+            .and_then(|id| self.message_ids.get(id))
+            .copied()
+            .unwrap_or(index);
+        let part = frame.u64("content_index").unwrap_or(0);
+        match kind {
+            "response.output_item.added" => self.output(
+                index,
+                frame.get("item").unwrap_or(&Value::Null),
+                Arrival::Added,
+                out,
+            ),
+            "response.output_item.done" => {
+                self.active_message_part = None;
+                self.output(
+                    index,
+                    frame.get("item").unwrap_or(&Value::Null),
+                    Arrival::Done,
+                    out,
+                )
+            }
+            "response.output_text.delta" | "response.refusal.delta" => self.message_delta(
+                index,
+                part,
+                id,
+                &reader::fields::<reader::Delta>(&frame)?.delta,
+                kind == "response.refusal.delta",
+                out,
+            ),
+            "response.content_part.added" | "response.content_part.done" => {
+                let raw = frame.get("part").unwrap_or(&Value::Null).clone();
+                match raw.str("type") {
+                    Some("output_text" | "refusal") => {
+                        let index = self.message_slot(index, id, None);
+                        self.check_message_kind(index, part, false, id)?;
+                        self.bind(index, Parent::Message, id, out)?;
+                        self.message_part(index, part, id, raw, out)
+                    }
+                    Some("summary_text") => {
+                        let index = self.reasoning_slot(index, id);
+                        self.bind(index, Parent::Reasoning, id, out)?;
+                        self.reasoning_part(index, part, true, id, raw, false, out)
+                    }
+                    Some("reasoning_text") => {
+                        let index = self.reasoning_slot(index, id);
+                        self.bind(index, Parent::Reasoning, id, out)?;
+                        self.reasoning_part(index, part, false, id, raw, false, out)
+                    }
+                    _ => {
+                        let index = self.reasoning_slot_of(index, id);
+                        match self.parents.get(&index) {
+                            Some(Parent::Message) => self.message_part(index, part, id, raw, out),
+                            Some(Parent::Reasoning) => {
+                                self.reasoning_part(index, part, false, id, raw, false, out)
+                            }
+                            None => {
+                                let waiting = UndecidedPart {
+                                    id: id.map(str::to_owned),
+                                    raw,
+                                };
+                                let parts = self.undecided.entry((index, part)).or_default();
+                                if !parts.contains(&waiting) {
+                                    parts.push(waiting);
+                                }
+                                Ok(())
+                            }
+                        }
+                    }
+                }
+            }
+            "response.reasoning_summary_part.added" | "response.reasoning_summary_part.done" => {
+                let index = self.reasoning_slot(index, id);
+                self.bind(index, Parent::Reasoning, id, out)?;
+                self.reasoning_part(
+                    index,
+                    reader::fields::<reader::SummaryEnvelope>(&frame)?.summary_index,
+                    true,
+                    id,
+                    frame.get("part").unwrap_or(&Value::Null).clone(),
+                    false,
+                    out,
+                )
+            }
+            "response.reasoning_summary_text.delta"
+            | "response.reasoning_summary_text.done"
+            | "response.reasoning_text.delta"
+            | "response.reasoning_text.done" => {
+                let summary = kind.starts_with("response.reasoning_summary");
+                let append = kind.ends_with(".delta");
+                let part = if summary {
+                    reader::fields::<reader::SummaryEnvelope>(&frame)?.summary_index
+                } else {
+                    part
+                };
+                let text = if append {
+                    reader::fields::<reader::Delta>(&frame)?.delta
+                } else {
+                    reader::fields::<reader::Text>(&frame)?.text
+                };
+                let index = self.reasoning_slot(index, id);
+                self.bind(index, Parent::Reasoning, id, out)?;
+                self.reasoning_part(index, part, summary, id, json!({"type":if summary { "summary_text" } else { "reasoning_text" }, "text":text}), append, out)
+            }
+            "response.function_call_arguments.delta" => self.call_delta(
+                index,
+                id,
+                &reader::fields::<reader::Delta>(&frame)?.delta,
+                out,
+            ),
+            // These done text/argument fields are typed observations but their
+            // output-item restatement is the owning completion authority.
+            "response.output_text.done"
+            | "response.refusal.done"
+            | "response.function_call_arguments.done" => Ok(()),
+            _ => Ok(()),
+        }
+    }
+
+    fn flush_messages(&mut self, out: &mut Out<'_, Completion>) -> Result<(), ProviderError> {
+        for (index, message) in std::mem::take(&mut self.messages) {
+            // A message still in a reused slot is carried at its output index.
+            let position = self.message_order(index, 0).primary;
+            let unknown_fields = message
+                .item
+                .as_ref()
+                .map(super::unknown_message_fields)
+                .unwrap_or_default();
+            let carried = !unknown_fields.is_empty()
+                || message.parts.len() != 1
+                || message.phase.is_some()
+                || message
+                    .item
+                    .as_ref()
+                    .is_some_and(|item| item.str("phase").is_some())
+                || message.parts.values().any(|part| {
+                    part.opaque
+                        || part.refusal
+                        || part
+                            .raw
+                            .as_ref()
+                            .and_then(Value::as_object)
+                            .is_some_and(|fields| {
+                                fields.keys().any(|key| key != "type" && key != "text")
+                            })
+                });
+            for (part_index, mut part) in message.parts {
+                if carried {
+                    let mut raw = part.raw.take().unwrap_or_else(
+                        || json!({"type":if part.refusal {"refusal"} else {"output_text"}}),
+                    );
+                    if !part.opaque {
+                        let mut fields: Map<String, Value> = serde_json::from_value(raw)?;
+                        let key = if part.refusal { "refusal" } else { "text" };
+                        fields.insert(key.to_owned(), json!(part.text));
+                        raw = Value::Object(fields);
+                    }
+                    let item = json!({"content":[raw], "id":message.id, "phase":message.phase});
+                    let mut text = super::carried_message_parts(&item, position, None)?.remove(0);
+                    text = text.with_unknown_message_fields(unknown_fields.clone());
+                    text.payload.position = CarriedPosition::MessageContent {
+                        item_index: position,
+                        part_index,
+                    };
+                    let at = text_at(&mut part, self.message_order(index, part_index), out)?;
+                    if !part.opaque {
+                        out.set_citations(
+                            at,
+                            text.payload
+                                .item
+                                .arr("annotations")
+                                .iter()
+                                .filter_map(source_of)
+                                .map(|source| WireCitation::new(None, vec![source]))
+                                .collect(),
+                        );
+                    }
+                    out.finish_carried_text(at, text)?;
+                } else if let Some(at) = part.at {
+                    if message.complete {
+                        if let Some(item) = &message.item {
+                            let mut item = item.clone();
+                            if let Some(raw) = item
+                                .get_mut("content")
+                                .and_then(Value::as_array_mut)
+                                .and_then(|parts| parts.first_mut())
+                            {
+                                raw["text"] = json!(part.text);
+                            }
+                            out.edit(at, |native| *native = item)?;
+                            out.set_citations(
+                                at,
+                                message.item.as_ref().map(citations_of).unwrap_or_default(),
+                            );
+                        }
+                        out.finish(at)?;
+                    } else {
+                        out.close(at)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn flush_reasoning(&mut self, out: &mut Out<'_, Completion>) -> Result<(), ProviderError> {
+        for (index, mut state) in std::mem::take(&mut self.reasoning) {
+            // Typed part/done restatements alone are not live deltas or
+            // completed items. Unknown parts retain their partial evidence.
+            if !state.complete && state.at.is_none() && !state.has_opaque() {
+                continue;
+            }
+            let item = state.raw();
+            if state.carried() {
+                // blank signature metadata has no canonical text contribution.
+                // Retain the untouched item as evidence, including its original signature.
+                let mut projection = item.clone();
+                if projection
+                    .str("signature")
+                    .is_some_and(|value| value.trim().is_empty())
+                    && let Some(fields) = projection.as_object_mut()
+                {
+                    fields.shift_remove("signature");
+                }
+                let mut reasoning = super::carried_reasoning(&projection, None)?;
+                reasoning.payload.item = item.clone();
+                // A known, identified, wholly empty item (Copilot's and xAI's
+                // contentless reasoning) is a reasoning block like any other,
+                // as in F, so the next request replays it (G165 reopened by
+                // mec-rig-port-answers-1 Q5).
+                let at = match state.at {
+                    Some(at) => at,
+                    None => {
+                        let at = out.fresh_index();
+                        out.in_source_order(self.reasoning_order(index), |out| {
+                            out.open(at, Block::Reasoning { redacted: false }, Value::Null)
+                        })?;
+                        at
+                    }
+                };
+                out.restate(at, &reasoning.display_text())?;
+                let authority = if state.complete {
+                    ReasoningAuthority::ProviderRestated
+                } else {
+                    ReasoningAuthority::Partial
+                };
+                out.finish_carried_reasoning_with_authority(at, reasoning, authority)?;
+            } else if let Some(at) = state.at.take() {
+                if state.complete {
+                    out.edit(at, |native| *native = item)?;
+                    out.finish(at)?;
+                } else {
+                    out.close(at)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn flush(
+        &mut self,
+        boundary: FlushBoundary,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<(), ProviderError> {
+        for (_, parts) in std::mem::take(&mut self.undecided) {
+            for part in parts {
+                out.unknown(part.raw.into());
+            }
+        }
+        self.flush_messages(out)?;
+        self.flush_reasoning(out)?;
+        let mut first_error = None;
+        for index in self.calls.keys().copied().collect::<Vec<_>>() {
+            if let Err(error) = self.finish_call(index, boundary, out) {
+                first_error.get_or_insert(error);
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn merge_reasoning(
+        &mut self,
+        response: &Value,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<(), ProviderError> {
+        for (index, item) in response.arr("output").iter().enumerate() {
+            if item.str("type") == Some("reasoning") {
+                self.reasoning_item(index as u64, item, true, out)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// retain observed buffered custody before the original local refusal.
+    /// Flush errors never replace the first error or prove a provider terminal.
+    fn refuse_buffered(
+        &mut self,
+        error: ProviderError,
+        out: &mut Out<'_, Completion>,
+    ) -> ProviderError {
+        if !self.terminal_issuer {
+            out.stamp_carried_issuer(&self.provider);
+        }
+        if let Err(flush_error) = self.flush(FlushBoundary::Partial, out) {
+            self.pending_flush_error.get_or_insert(flush_error);
+        }
+        self.finished = true;
+        error
+    }
+
+    /// Only an announced pending function's genuine terminal item may
+    /// finish that same call. A terminal output position is not its identity.
+    fn terminal_announced_function_call(
+        &mut self,
+        item: &Value,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<bool, ProviderError> {
+        let Some(item_id) = item.str("id").filter(|id| !id.is_empty()) else {
+            return Ok(false);
+        };
+        let Some(index) = self.call_items.get(item_id).copied() else {
+            return Ok(false);
+        };
+        let Some(call) = self.calls.get(&index) else {
+            return Ok(false);
+        };
+        if self.finished_calls.contains(&index)
+            || !matches!(call.ending, CallEnding::Pending)
+            || call.item_id.as_deref() != Some(item_id)
+            || call.name.is_empty()
+        {
+            return Ok(false);
+        }
+        let Some(call_id) = call.id.provider() else {
+            return Ok(false);
+        };
+        // Check every identity claim before call_done may restate arguments or
+        // edit Native. This applies to any item kind using this live function ID,
+        // and to contradictory same-type identities even before completed status.
+        for (field, matches) in [
+            ("kind", item.str("type") == Some("function_call")),
+            ("name", item.str("name") == Some(call.name.as_str())),
+            ("call ID", item.str("call_id") == Some(call_id.as_str())),
+            (
+                "namespace",
+                item.str("namespace") == call.namespace.as_deref(),
+            ),
+        ] {
+            if !matches {
+                return Err(ProviderError::Response(format!(
+                    "conflicting Responses terminal function call {item_id}: {field} contradicts its announcement"
+                )));
+            }
+        }
+        if item.str("status") != Some("completed") {
+            // A full terminal cannot promote an announced unfinished call.
+            // Keep its delivered prefix; the terminal restatement stays raw.
+            return Ok(true);
+        }
+        self.call_done(index, item, out)?;
+        Ok(true)
+    }
+
+    fn terminal(
+        &mut self,
+        response: Value,
+        whole: bool,
+        mut out: Out<'_, Completion>,
+    ) -> Result<Flow, ProviderError> {
+        let terminal_message_id = response
+            .arr("output")
+            .iter()
+            .find(|item| item.str("type") == Some("message"))
+            .and_then(|item| nonempty(item.str("id")));
+        if whole
+            && self.reasoning.is_empty()
+            && !response
+                .arr("output")
+                .iter()
+                .any(|item| item.str("type") == Some("reasoning"))
+            && let Some(text) = response.str("reasoning").filter(|text| !text.is_empty())
+        {
+            let at = out.fresh_index();
+            out.whole_reasoning_with_authority(
+                at,
+                Value::Null,
+                text,
+                ReasoningAuthority::ProviderRestated,
+            )?;
+        }
+        // Whole-response indices are source positions, not writer Part indices.
+        let mut first_error = self
+            .relocate_terminal_messages(response.arr("output"))
+            .err();
+        for (index, item) in response.arr("output").iter().enumerate() {
+            // after a conflict, only independently validated later reasoning
+            // may join the buffered prefix. No successful terminal is sealed.
+            if first_error.is_some() && item.str("type") != Some("reasoning") {
+                continue;
+            }
+            match self.terminal_announced_function_call(item, &mut out) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+            }
+            // Other streamed terminal calls retain their existing route; only
+            // whole-body decoding supplies new or unannounced whole calls (G195).
+            if (whole || !matches!(item.str("type"), Some("function_call" | "custom_tool_call")))
+                && let Err(error) = self.output(index as u64, item, Arrival::Restated, &mut out)
+            {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(self.refuse_buffered(error, &mut out));
+        }
+        // Some gateways report only a top-level reasoning string.
+        if !whole
+            && self.reasoning.is_empty()
+            && let Some(text) = response.str("reasoning").filter(|text| !text.is_empty())
+        {
+            let at = out.fresh_index();
+            out.whole(at, Block::Reasoning { redacted: false }, Value::Null, text)?;
+        }
+        self.flush(FlushBoundary::GenuineTerminal, &mut out)?;
+        let issuer = self.issuer(&response);
+        out.stamp_carried_issuer(&issuer);
+        self.terminal_issuer = true;
+        let message_id = terminal_message_id.or_else(|| self.last_message_id.clone());
+        let (reason, error) = finish_reason_of(&response);
+        // A valid whole reply follows the fork's completed decoding path even
+        // for failed/cancelled status. Its raw error stays in response evidence;
+        // only an actual failed event supplies an in-band provider error.
+        let error = if whole { None } else { error };
+        self.finished = true;
+        Ok(out.end(Finish {
+            usage: response.get("usage").map(usage_of).unwrap_or_default(),
+            reason,
+            message_id: message_id.and_then(ProviderMessageId::new),
+            response_id: nonempty(response.str("id")),
+            model: nonempty(response.str("model")),
+            error,
+        }))
+    }
+}
+
+fn nonempty(value: Option<&str>) -> Option<String> {
+    value.filter(|value| !value.is_empty()).map(str::to_owned)
+}
+
+fn conflicting_kind(
+    output: u64,
+    array: &str,
+    index: u64,
+    stored: bool,
+    incoming: bool,
+) -> ProviderError {
+    ProviderError::Response(format!(
+        "conflicting Responses content part kind at output {output}, {array} {index}: stored {} part restated as {}",
+        if stored { "opaque" } else { "text" },
+        if incoming { "opaque" } else { "text" }
+    ))
+}
+
+fn part_matches(part: &MessagePart, raw: &Value) -> bool {
+    match raw.str("type") {
+        Some("output_text") => {
+            !part.opaque && !part.refusal && raw.str("text") == Some(part.text.as_str())
+        }
+        Some("refusal") => {
+            !part.opaque && part.refusal && raw.str("refusal") == Some(part.text.as_str())
+        }
+        _ => part.opaque && part.raw.as_ref() == Some(raw),
+    }
+}
+
+fn text_at(
+    part: &mut MessagePart,
+    order: SourceOrder,
+    out: &mut Out<'_, Completion>,
+) -> Result<usize, ProviderError> {
+    if let Some(at) = part.at {
+        return Ok(at);
+    }
+    let at = out.fresh_index();
+    out.in_source_order(order, |out| out.open(at, Block::Text, Value::Null))?;
+    part.at = Some(at);
+    Ok(at)
+}
+
+/// A provider return reactivates the existing live Part; a first fragment
+/// continues to let the default writer allocate its one Start.
+fn activate_text(
+    active: &mut Option<usize>,
+    at: usize,
+    started: bool,
+    out: &mut Out<'_, Completion>,
+) -> Result<(), ProviderError> {
+    if *active != Some(at) && started {
+        out.resume_text(at)?;
+    }
+    *active = Some(at);
+    Ok(())
+}
+
+/// F's text_block metadata comparison, used only to decide activation.
+/// Raw sibling bytes stay intact in MessagePart and carried canonical text.
+fn message_activation_metadata(raw: Option<&Value>) -> (bool, serde_json::Map<String, Value>) {
+    let refusal = raw.and_then(|raw| raw.str("type")) == Some("refusal");
+    let extras = raw
+        .filter(|raw| raw.str("type") == Some("output_text"))
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|fields| fields.iter())
+        .filter(|(key, value)| {
+            key.as_str() != "type"
+                && key.as_str() != "text"
+                && !value.is_null()
+                && !value.as_array().is_some_and(Vec::is_empty)
+                && !value.as_object().is_some_and(serde_json::Map::is_empty)
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    (refusal, extras)
+}
+
+fn reasoning_array(item: &Value, field: &str) -> Vec<Value> {
+    match item.get(field) {
+        Some(Value::String(text)) => vec![json!({"type":"reasoning_text", "text":text})],
+        Some(Value::Array(parts)) => parts.clone(),
+        _ => Vec::new(),
+    }
+}
+
+fn reasoning_opaque(part: &Value, summary: bool) -> bool {
+    if !summary && part.is_string() {
+        return false;
+    }
+    part.str("type")
+        != Some(if summary {
+            "summary_text"
+        } else {
+            "reasoning_text"
+        })
+}
+
+/// Preserve the provider's exact incomplete reason without synthesizing a
+/// failure for an explicitly accepted partial terminal.
+pub(crate) fn finish_reason_of(response: &Value) -> (Option<FinishReason>, Option<String>) {
+    let reason = match response.str("status") {
+        Some("completed") => Some(FinishReason::Stop),
+        Some("incomplete") => Some(
+            match response
+                .at("/incomplete_details/reason")
+                .and_then(Value::as_str)
+                .filter(|reason| !reason.is_empty())
+            {
+                Some("max_output_tokens") => FinishReason::Length,
+                Some("content_filter") => FinishReason::ContentFilter,
+                Some(reason) => FinishReason::Other(reason.to_owned()),
+                None => FinishReason::Other("incomplete".to_owned()),
+            },
+        ),
+        Some("queued" | "in_progress") | None | Some("") => None,
+        Some(status) => Some(FinishReason::Other(status.to_owned())),
+    };
+    let error = match response.str("status") {
+        Some(status @ ("failed" | "cancelled")) => {
+            let parts: Vec<_> = ["/error/code", "/error/message"]
+                .iter()
+                .filter_map(|key| response.at(key).and_then(Value::as_str))
+                .collect();
+            Some(if parts.is_empty() {
+                format!("Response {status}")
+            } else {
+                parts.join(": ")
+            })
+        }
+        _ => None,
+    };
+    (reason, error)
+}
+
+impl<'id> Decoder<'id, Completion> for ResponsesDecoder {
+    type Event = ResponsesEvent;
+
+    fn classify(&self, frame: WireFrame) -> WireEvent<ResponsesEvent> {
+        self.reader_policy.classify(&frame.as_str())
+    }
+
+    fn decode(
+        &mut self,
+        event: ResponsesEvent,
+        mut out: Out<'id, Completion>,
+    ) -> Result<Flow, ProviderError> {
+        if self.finished {
+            return Ok(Flow::More);
+        }
+        match event {
+            ResponsesEvent::Frame { kind, frame, raw } => match kind.as_str() {
+                "response.completed" => self.terminal(
+                    frame.get("response").unwrap_or(&Value::Null).clone(),
+                    false,
+                    out,
+                ),
+                "response.incomplete" if self.options.incomplete == IncompleteTerminal::Accept => {
+                    let mut response: Map<String, Value> =
+                        reader::fields(frame.get("response").unwrap_or(&Value::Null))?;
+                    response.insert("status".to_owned(), json!("incomplete"));
+                    self.terminal(Value::Object(response), false, out)
+                }
+                "response.incomplete" | "response.failed" => {
+                    // Refused terminals retain only already observed content,
+                    // complete calls and their final reasoning authority.
+                    if let Err(error) = self
+                        .merge_reasoning(frame.get("response").unwrap_or(&Value::Null), &mut out)
+                    {
+                        self.pending_flush_error = Some(error);
+                    }
+                    if let Err(error) = self.flush(FlushBoundary::Partial, &mut out) {
+                        self.pending_flush_error.get_or_insert(error);
+                    }
+                    self.finished = true;
+                    Err(ProviderError::from_provider_body(raw))
+                }
+                kind if is_lifecycle_event(kind) => Ok(Flow::More),
+                kind => match self.item_event(kind, frame, &mut out) {
+                    Ok(()) => Ok(Flow::More),
+                    Err(error) => Err(self.refuse_buffered(error, &mut out)),
+                },
+            },
+            ResponsesEvent::Whole(body) => self.terminal(body, true, out),
+            ResponsesEvent::Failure(raw) => {
+                if let Err(error) = self.flush(FlushBoundary::Partial, &mut out) {
+                    self.pending_flush_error = Some(error);
+                }
+                self.finished = true;
+                Err(ProviderError::from_provider_body(raw))
+            }
+            ResponsesEvent::Sentinel => Ok(Flow::More),
+        }
+    }
+
+    fn flush_before_terminal_error(
+        &mut self,
+        mut out: Out<'id, Completion>,
+    ) -> Result<(), ProviderError> {
+        if !self.terminal_issuer {
+            out.stamp_carried_issuer(&self.provider);
+        }
+        let flushed = self.flush(FlushBoundary::Partial, &mut out);
+        match self.pending_flush_error.take() {
+            Some(error) => Err(error),
+            None => flushed,
+        }
+    }
+
+    fn eof(&mut self, mut out: Out<'id, Completion>) -> Result<Flow, ProviderError> {
+        if !self.terminal_issuer {
+            out.stamp_carried_issuer(&self.provider);
+        }
+        self.flush(FlushBoundary::Partial, &mut out)?;
+        Ok(Flow::More)
+    }
+
+    fn incomplete_eof(&self) -> IncompleteEof {
+        IncompleteEof::KeepPartial
+    }
+}
+
+/// The decoder and its strict reassembler share one acceptance rule.
+fn classify_reader_payload(data: &str, repair_envelopes: bool) -> WireEvent<ResponsesEvent> {
+    if !repair_envelopes {
+        return classify_responses_payload(data);
+    }
+    let mut classified = wire::classify_with_repair(
+        data,
+        classify_responses_payload,
+        reader::repair,
+        |error| {
+            <serde_json::Error as serde::de::Error>::custom(format!(
+                "invalid JSON frame in buffered Responses SSE body: {error}"
+            ))
+        },
+        || {
+            let kind = serde_json::from_str::<Value>(data)
+                .ok()
+                .and_then(|value| nonempty(value.str("type")))
+                .unwrap_or_else(|| "unknown".to_owned());
+            <serde_json::Error as serde::de::Error>::custom(format!(
+                "malformed `{kind}` event in buffered Responses SSE body"
+            ))
+        },
+    );
+    // Typed repair never replaces the provider's received refusal evidence.
+    if let WireEvent::Known(ResponsesEvent::Frame { raw, .. }) = &mut classified {
+        *raw = data.to_owned();
+    }
+    classified
+}
+
+#[cfg(test)]
+mod authority_tests;
+#[cfg(test)]
+mod carried_reader_tests;
+#[cfg(test)]
+mod citation_tests;
+pub(crate) mod document;
 #[cfg(feature = "completion-observations")]
 pub mod observed;
-
+#[cfg(test)]
+mod pending_tests;
+#[cfg(test)]
+mod resume_tests;
 #[cfg(test)]
 mod tests;

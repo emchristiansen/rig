@@ -15,28 +15,20 @@ rig-core = "0.42.0"
 You can also run `cargo add rig-vertexai rig-core` to add the most recent versions of the dependencies to your project.
 
 See the [`/examples`](./examples) folder for usage examples.
-[`ecs_host_model`](examples/ecs_host_model.rs) shows retained-runtime SDK
-preparation and per-poll runtime context on ECS workers, with explicit shutdown
-ordering. It makes a live, potentially billable call when run; compilation alone
-is not an authentication or service test.
-
 ## Raw responses
 
-`CompletionModel::raw_completion` returns the public
-`rig_vertexai::completion::VertexGenerateContentOutput` wrapper. It can be stored
-in typed library APIs or recovered from a normalized response without another RPC:
+A response's `raw` is the reply's REST JSON: the SDK's `GenerateContentResponse`
+serialized, with enum values spelled by name. It can be recovered from a
+normalized response without another RPC:
 
 ```rust
+use google_cloud_aiplatform_v1::model::GenerateContentResponse;
 use rig_core::{completion::CompletionResponse, serde_json};
-use rig_vertexai::completion::VertexGenerateContentOutput;
 
-fn recover(response: CompletionResponse) -> Result<VertexGenerateContentOutput, serde_json::Error> {
+fn recover(response: CompletionResponse) -> Result<GenerateContentResponse, serde_json::Error> {
     serde_json::from_value(response.raw)
 }
 ```
-
-With the facade's `vertexai` feature, the same type is available at
-`rig::vertexai::completion::VertexGenerateContentOutput`.
 
 ## Setup
 
@@ -48,7 +40,7 @@ gcloud auth application-default login
 
 ## Supplying your own SDK client
 
-`Client::from_env()` (and `Client::builder()` without either explicit credentials
+`VertexAi::from_env()` (and `VertexAi::builder()` without either explicit credentials
 or a supplied service) resolves Application Default Credentials. That resolution builds
 `google-cloud-auth`'s token cache, which **spawns a refresh task on the current
 Tokio runtime while it is being constructed**: call it inside a runtime
@@ -69,7 +61,7 @@ let service = PredictionService::builder()
     .build()
     .await?;
 
-let client = rig_vertexai::Client::builder()
+let client = rig_vertexai::VertexAi::builder()
     .with_project("my-project")
     .with_location("us-central1")
     .with_prediction_service(service)

@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 2992322369403042042,
+    "run_spec": 1238955108246867705,
     "handlers": [
       {
         "key": "golden/model:default",
@@ -70,11 +70,12 @@
             }
           ],
           "usage": {},
-          "message_id": null,
-          "response_id": null,
+          "origin": {
+            "api": "mock.script",
+            "provider": "mock",
+            "model": "mock-model"
+          },
           "finish_reason": null,
-          "provider": "mock",
-          "model": null,
           "raw": {
             "choice": [
               {

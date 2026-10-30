@@ -10,32 +10,31 @@ pub(super) mod observed;
 
 use crate::completion::{self, ProviderCapabilities};
 use crate::error::EncodeError;
+use crate::json_utils::Lenient;
 use crate::observe::ObservedError;
 use crate::operation::Completion;
-use crate::providers::openai::wire::{OpenAI, ResponsesContract};
+use crate::providers::openai::wire::OpenAIConfig;
+pub(crate) use crate::providers::openai::wire::ResponsesContract;
 use crate::wire::{
-    AdapterEvent, AdapterUsage, AdapterVerdict, Body, Encoded, Framing, Mode, ObservationSink, Wire,
+    AdapterUsage, AdapterVerdict, Capabilities, Descriptor, Encoded, Framing, Mode,
+    ObservationSink, UsageObservation, Wire,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use super::request_compression::RequestCompression;
 use super::request_headers::RequestHeaders;
 use super::responses_lite::{CodexRequestShape, ResponsesLiteError};
 use super::streaming::{IncompleteTerminal, ResponsesDecoder, ResponsesStreamOptions};
-use super::{
-    CompletionRequest, InputRequirement, ResponsesRequestParams, ResponsesRequestTool,
-    ResponsesToolDefinition, SystemInstructionsPlacement,
-};
 
-/// The per-request session header the ChatGPT dialect sends when no Codex
-/// identity names the conversation.
 const SESSION_ID_PER_REQUEST_HEADER: &str = "session_id";
+use super::{ResponsesToolDefinition, SystemInstructionsPlacement};
 
 /// The Responses wire: `POST /responses`, SSE when streamed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Responses {
     /// The provider this wire speaks to.
-    pub provider: OpenAI,
+    pub provider: OpenAIConfig,
     /// The model to address.
     pub model: String,
     /// Tools added to every request from this wire.
@@ -86,7 +85,7 @@ impl Responses {
         request: completion::CompletionRequest,
         mode: Mode,
         headers: impl FnOnce(
-            &OpenAI,
+            &OpenAIConfig,
             &completion::CompletionRequest,
             http::request::Builder,
         ) -> Result<http::request::Builder, EncodeError>,
@@ -103,51 +102,31 @@ impl Responses {
             &request,
             http::Request::post(self.provider.uri(quirks.path, None)),
         )?);
-        let request = self.responses_request(
-            request,
-            streaming,
-            self.codex_identity.as_ref(),
-            InputRequirement::NonEmpty,
-        )?;
+        let mode = if streaming {
+            Mode::Streaming
+        } else {
+            Mode::Unary
+        };
+        let body = self.responses_request(&request, super::Delivery::Http(mode))?;
         if self.codex_request_shape.is_lite() {
             builder = builder.header(super::responses_lite::HTTP_HEADER, "true");
+        }
+        if let Some(identity) = &self.codex_identity {
+            super::codex_identity::require_codex(self).map_err(EncodeError::request)?;
+            if let Some(headers) = builder.headers_mut() {
+                headers.remove(SESSION_ID_PER_REQUEST_HEADER);
+            }
+            builder = identity.stamp_headers(builder);
         }
         crate::providers::internal::trace_json(
             crate::providers::internal::LogTarget::Completions,
             "Responses completion request",
-            &request,
+            &body,
         );
-        let body = match &self.codex_identity {
-            // The conversation's identity replaces the per-request session id:
-            // the same dashed headers and body fields its websocket frames
-            // carry, so both transports name one conversation alike.
-            Some(identity) => {
-                // An identity can reach a wire by field assignment or serde as
-                // well as through `with_codex_identity`; it is refused here
-                // all the same, before anything is stamped.
-                super::codex_identity::require_codex(self).map_err(EncodeError::request)?;
-                if let Some(headers) = builder.headers_mut() {
-                    headers.remove(SESSION_ID_PER_REQUEST_HEADER);
-                }
-                builder = identity.stamp_headers(builder);
-                let mut body = match serde_json::to_value(&request)? {
-                    serde_json::Value::Object(body) => body,
-                    other => {
-                        return Err(EncodeError::request(format!(
-                            "a Responses request must serialize to a JSON object, got {other}"
-                        )));
-                    }
-                };
-                identity.stamp(&mut body)?;
-                serde_json::to_vec(&body)?
-            }
-            None => serde_json::to_vec(&request)?,
-        };
         let (builder, body) = self.request_compression.apply(builder, body)?;
-
         let request = builder
             .header(http::header::CONTENT_TYPE, "application/json")
-            .body(Body::Bytes(body))?;
+            .body(body.into_body())?;
 
         let framing = if streaming {
             Framing::Sse
@@ -156,7 +135,9 @@ impl Responses {
         };
         let encoded = Encoded::new(request, framing)
             .with_request_id_header(self.provider.dialect.request_id_header)
-            .with_captured_response_headers(self.provider.dialect.response_header_prefix);
+            .with_captured_response_headers(self.provider.dialect.response_header_prefix)
+            .with_route(Some(self.provider.dialect.quirks.responses.path))
+            .with_projection(project_payload);
         Ok(if codex {
             encoded.with_relaxed_content_type()
         } else {
@@ -182,7 +163,7 @@ impl Responses {
 
     /// Create a wire with the provider's instruction placement and dialect's
     /// strict-tool default, without additional tools.
-    pub fn new(provider: OpenAI, model: impl Into<String>) -> Self {
+    pub fn new(provider: OpenAIConfig, model: impl Into<String>) -> Self {
         Self {
             system_instructions: provider.system_instructions_placement(),
             strict_tools: provider.dialect.quirks.responses.strict_tools_by_default,
@@ -318,112 +299,6 @@ impl Responses {
     pub fn with_system_instructions_as_messages(self) -> Self {
         self.with_system_instructions_placement(SystemInstructionsPlacement::InputSystemMessages)
     }
-
-    /// The Responses request this wire sends, before serialization.
-    /// Refuse, by name, a provider item this wire cannot replay: one another
-    /// issuer produced. Items it issued, and items of unknown provenance, go
-    /// back verbatim; nothing is dropped here.
-    fn refuse_unreplayable_provider_items(
-        &self,
-        history: &[crate::message::Message],
-    ) -> Result<(), EncodeError> {
-        let issuers = <Self as crate::wire::Wire>::replay_issuers(self, Some(&self.model));
-        for message in history {
-            let crate::message::Message::Assistant { content, .. } = message else {
-                continue;
-            };
-            for part in content.iter() {
-                if let crate::message::AssistantContent::ProviderItem(item) = part
-                    && !issuers.iter().any(|issuer| item.replayable_to(issuer))
-                {
-                    return Err(crate::message::UnreplayableProviderItem::new(
-                        self.provider.dialect.name,
-                        item,
-                    )
-                    .into());
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn responses_request(
-        &self,
-        request: completion::CompletionRequest,
-        streaming: bool,
-        identity: Option<&super::codex_identity::CodexIdentity>,
-        input_requirement: InputRequirement,
-    ) -> Result<CompletionRequest, EncodeError> {
-        let issuers = self.replay_issuers(request.model.as_deref().or(Some(&self.model)));
-        for message in &request.chat_history {
-            if let crate::message::Message::Assistant { content, .. } = message {
-                for part in content {
-                    if let crate::message::AssistantContent::Reasoning(reasoning) = part
-                        && reasoning.has_opaque_parts()
-                        && !issuers.iter().any(|issuer| reasoning.replayable_to(issuer))
-                    {
-                        return Err(EncodeError::request(
-                            crate::message::UnrepresentableOpaqueContent::new(
-                                "OpenAI Responses with incompatible reasoning provenance",
-                            ),
-                        ));
-                    }
-                }
-            }
-        }
-        let quirks = &self.provider.dialect.quirks.responses;
-        self.refuse_unreplayable_provider_items(&request.chat_history)?;
-        let lite_identity = super::responses_lite::validate_activation(
-            self.codex_request_shape,
-            quirks.contract,
-            self.provider.dialect.name,
-            self.system_instructions,
-            identity,
-        )
-        .map_err(EncodeError::request)?;
-        let mut request = CompletionRequest::convert(
-            ResponsesRequestParams {
-                model: self.model.clone(),
-                request,
-                system_instructions_placement: self.system_instructions,
-            },
-            input_requirement,
-        )?;
-        // Typed request tools, then declared tools, then this wire's defaults.
-        request.tools.extend(
-            self.tools
-                .iter()
-                .cloned()
-                .map(ResponsesRequestTool::Defined),
-        );
-        if self.strict_tools {
-            // Strict mode rewrites a declared tool only by its own
-            // transformation; see `ResponsesRequestTool::with_strict`.
-            request.tools = request
-                .tools
-                .into_iter()
-                .map(ResponsesRequestTool::normalize)
-                .collect();
-        }
-        if let Some(instructions) = &self.provider.instructions {
-            request.instructions = Some(merge_instructions(
-                instructions,
-                request.instructions.as_deref(),
-            ));
-        }
-        if quirks.contract == ResponsesContract::Codex {
-            shape_codex_request(&mut request).map_err(EncodeError::request)?;
-        }
-        if let Some(identity) = lite_identity {
-            super::responses_lite::shape_request(&mut request, identity)
-                .map_err(EncodeError::request)?;
-            // Lite may have created `reasoning`; the shared include rule
-            // follows it.
-            request.additional_parameters.request_reasoning_ciphertext();
-        }
-        request.stream = streaming.then_some(true);
-        Ok(request)
-    }
 }
 
 /// A caller-set request control this adapter refuses on the Codex Responses
@@ -465,70 +340,66 @@ pub enum UnsupportedCodexControl {
     Temperature,
 }
 
-/// Shape a request for the Codex contract: state `store: false` when the
-/// caller left it unset, and refuse by name each caller-set control this
-/// adapter does not send on the contract ([`UnsupportedCodexControl`]).
-///
-/// Nothing else is rewritten. Cache identity (`prompt_cache_key`,
-/// `client_metadata`), metadata, service tier, text format, parallel tool
-/// calls and user reach the wire as set, and the encrypted-reasoning include
-/// follows the rule every dialect shares (requested alongside `reasoning`)
-/// rather than being forced on. An unset refused control emits no field, so a
-/// request that sets none of them is sent as built.
-fn shape_codex_request(request: &mut CompletionRequest) -> Result<(), UnsupportedCodexControl> {
-    if request.max_output_tokens.is_some() {
-        return Err(UnsupportedCodexControl::MaxOutputTokens);
+/// Apply the Codex contract to the final merged body without clearing caller fields.
+pub(crate) fn shape_codex_body(body: &mut Map<String, Value>) -> Result<(), EncodeError> {
+    // These two controls were recognized by the fork's additional-parameter
+    // decoder, which ran before any valid-value Codex refusal.
+    let decode_error = |error| {
+        EncodeError::request(format!(
+            "Invalid OpenAI Responses additional_params payload: {error}"
+        ))
+    };
+    let top_p =
+        serde_json::from_value::<Option<f64>>(body.get("top_p").cloned().unwrap_or(Value::Null))
+            .map_err(decode_error)?;
+    let store =
+        serde_json::from_value::<Option<bool>>(body.get("store").cloned().unwrap_or(Value::Null))
+            .map_err(decode_error)?;
+    if body
+        .get("max_output_tokens")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err(EncodeError::request(
+            UnsupportedCodexControl::MaxOutputTokens,
+        ));
     }
-    if request.temperature.is_some() {
-        return Err(UnsupportedCodexControl::Temperature);
+    if body
+        .get("temperature")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err(EncodeError::request(UnsupportedCodexControl::Temperature));
     }
-    if request.additional_parameters.top_p.is_some() {
-        return Err(UnsupportedCodexControl::TopP);
+    if top_p.is_some() {
+        return Err(EncodeError::request(UnsupportedCodexControl::TopP));
     }
-    match request.additional_parameters.store {
-        Some(true) => return Err(UnsupportedCodexControl::Store),
+    match store {
+        Some(true) => return Err(EncodeError::request(UnsupportedCodexControl::Store)),
         Some(false) => {}
-        // `store: false` is the one value the gateway wants stated.
-        None => request.additional_parameters.store = Some(false),
+        None => {
+            body.insert("store".to_owned(), Value::Bool(false));
+        }
     }
     Ok(())
 }
 
-/// Merge a gateway's own instructions ahead of the caller's preamble,
-/// without repeating them when the preamble already carries them.
-fn merge_instructions(instructions: &str, existing: Option<&str>) -> String {
-    match existing.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(existing) if existing.contains(instructions) => existing.to_owned(),
-        Some(existing) => format!("{instructions}\n\n{existing}"),
-        None => instructions.to_owned(),
-    }
-}
-
 impl Wire for Responses {
     type Op = Completion;
-    type Decoder = ResponsesDecoder;
+    type Payload = crate::wire::Encoded;
+    type Frame = crate::wire::WireFrame;
+    type Decoder<'id> = ResponsesDecoder;
+    type Reassembler = super::streaming::document::Response;
 
-    fn credential_stamp(&self) -> Option<crate::wire::CredentialStamp> {
-        self.provider.credential_stamp()
-    }
-
-    fn name(&self) -> &str {
-        self.provider.dialect.name
-    }
-
-    fn model(&self) -> Option<&str> {
-        Some(&self.model)
-    }
-
-    fn replay_issuers(&self, model: Option<&str>) -> Vec<String> {
-        crate::providers::openai::wire::replay_issuers(
-            &self.provider.dialect,
-            model.unwrap_or(&self.model),
-        )
-    }
-
-    fn route(&self) -> Option<&str> {
-        Some(self.provider.dialect.quirks.responses.path)
+    /// The xAI contract does not compose native structured output with tools.
+    fn describe(&self) -> Descriptor<'_> {
+        Descriptor::new(self.provider.dialect.name)
+            .model(self.model.as_str())
+            .capabilities(Capabilities::completion(
+                ProviderCapabilities::default().with_native_output_tool_composition(
+                    self.provider.dialect.quirks.responses.contract != ResponsesContract::Xai,
+                ),
+            ))
+            .replay(self)
+            .usage_observation(UsageObservation::PayloadSnapshots)
     }
 
     fn encode(
@@ -536,13 +407,20 @@ impl Wire for Responses {
         request: completion::CompletionRequest,
         mode: Mode,
     ) -> Result<Encoded, EncodeError> {
-        self.encode_with_headers(request, mode, OpenAI::completion_headers)
+        self.encode_with_headers(request, mode, OpenAIConfig::completion_headers)
     }
 
-    fn decoder(&self, mode: Mode) -> ResponsesDecoder {
-        // The contract is per transport: a unary reply (including a gateway
-        // that answers a unary call with an event stream) accepts an
-        // incomplete terminal; a streamed one takes the wire's policy.
+    fn reassembler(&self) -> Self::Reassembler {
+        super::streaming::document::Response::with_strict_reader(
+            self.provider.dialect.quirks.responses.contract == ResponsesContract::Codex,
+        )
+    }
+
+    fn credential_stamp(&self) -> Option<crate::wire::CredentialStamp> {
+        self.provider.credential_stamp()
+    }
+
+    fn decoder_in<'id>(&self, mode: Mode) -> Self::Decoder<'id> {
         let incomplete = match mode {
             Mode::Unary => IncompleteTerminal::Accept,
             Mode::Streaming => self.streamed_incomplete,
@@ -550,121 +428,196 @@ impl Wire for Responses {
         self.decoder_with_incomplete(incomplete)
     }
 
-    fn capabilities(&self) -> ProviderCapabilities {
-        // The xAI contract does not compose native structured output with tools.
-        ProviderCapabilities::default().with_native_output_tool_composition(
-            self.provider.dialect.quirks.responses.contract != ResponsesContract::Xai,
-        )
+    fn decoder<'id>(&self) -> Self::Decoder<'id> {
+        self.decoder_with_incomplete(self.streamed_incomplete)
     }
 }
 
-/// Normalize a whole Responses body through the decoder and completion fold.
-/// Return serialization, decoder, or fold errors without performing I/O.
-#[cfg(any(test, feature = "websocket"))]
-pub(crate) fn fold_body(
-    provider: &str,
-    response: super::CompletionResponse,
-) -> Result<completion::CompletionResponse, crate::error::ProviderError> {
-    use super::streaming::ResponsesEvent;
-    use crate::operation::AdapterOutput;
-    use crate::wire::{Decoder, Fold, Operation, Reply, Sink};
-
-    let reply = Reply {
-        provider: provider.to_owned(),
-        raw: serde_json::to_value(&response)?,
-        provider_request_id: response.provider_request_id.clone(),
-        // A body already in hand: no reply headers came with it.
-        response_headers: crate::completion::ProviderResponseHeaders::new(),
-    };
-    // A whole body is a unary reply, whose contract accepts an incomplete
-    // terminal.
-    let mut decoder = ResponsesDecoder::new(
-        provider,
-        ResponsesStreamOptions::strict().with_incomplete(IncompleteTerminal::Accept),
-    );
-    let mut out = AdapterOutput::new();
-    decoder.interpret(ResponsesEvent::Whole(Box::new(response)), &mut out);
-
-    let mut fold = <Completion as Operation>::Fold::default();
-    for item in Sink::<Completion>::drain(&mut out) {
-        fold.absorb(item?)?;
+impl crate::completion::ReplayTarget for Responses {
+    fn check_carried_text(
+        &self,
+        _part: &crate::message::CarriedText,
+    ) -> Result<(), crate::message::UnrepresentableOpaqueContent> {
+        Ok(())
     }
-    fold.finish(reply)
+
+    // The effective request model selects reasoning issuers at final encoding.
+    fn check_carried_reasoning(
+        &self,
+        _part: &crate::message::CarriedReasoning,
+    ) -> Result<(), crate::message::UnrepresentableOpaqueContent> {
+        Ok(())
+    }
+
+    /// Carried items keep the fork's per-item issuer rule, independently of
+    /// Origin and the requested model's native replay rules. The configured
+    /// wire's accepted issuer families are the same ones the fork checked.
+    fn check_provider_item(
+        &self,
+        item: &crate::message::ProviderItem,
+    ) -> Result<(), crate::message::UnreplayableProviderItem> {
+        let issuers =
+            crate::providers::openai::wire::replay_issuers(&self.provider.dialect, &self.model);
+        if issuers.iter().any(|issuer| item.replayable_to(issuer)) {
+            Ok(())
+        } else {
+            Err(crate::message::UnreplayableProviderItem::new(
+                self.provider.dialect.name,
+                item,
+            ))
+        }
+    }
+
+    /// Section 6.3 of the typed-options design, by dialect.
+    fn map_options(
+        &self,
+        request: &crate::completion::CompletionRequest,
+        fields: crate::completion::options::OptionFields<'_>,
+    ) -> crate::completion::options::OptionMap {
+        crate::providers::openai::options::responses_options(self, request, fields)
+    }
+
+    fn api(&self) -> crate::message::Api {
+        crate::message::Api::from_static("openai.responses")
+    }
+
+    fn provider(&self) -> &str {
+        self.provider.dialect.name
+    }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// The wire's own tools are declared beside the request's.
+    fn declares_tools(&self, request: &completion::CompletionRequest) -> bool {
+        !self.tools.is_empty() || crate::completion::history::declares_tools(request)
+    }
+
+    /// A call item names its id in `call_id`.
+    fn call_id_slot(&self) -> Option<&'static str> {
+        Some("/call_id")
+    }
+
+    /// An edited block keeps its item's `id` and `type`, a message its
+    /// `phase`, and reasoning its ciphertext, so the items after it stay
+    /// paired (pi's text signature is `{id, phase}`).
+    fn identity(&self, item: &Value) -> Map<String, Value> {
+        let keys: &[&str] = match item.str("type") {
+            Some("message") => &["type", "id", "phase"],
+            Some("reasoning") => &["type", "id", "encrypted_content"],
+            Some("function_call" | "custom_tool_call") => &["type", "id"],
+            _ => &[],
+        };
+        keys.iter()
+            .filter_map(|key| Some(((*key).to_owned(), item.get(*key)?.clone())))
+            .collect()
+    }
+
+    /// A reasoning item goes only with the item it preceded.
+    fn needs_next(&self, item: &Value) -> bool {
+        item.str("type") == Some("reasoning")
+    }
+
+    /// Responses reads images in user input and in function outputs, never
+    /// in assistant messages, and only on a model with vision input. Every
+    /// documented model calls tools except `o1-mini` and `o1-preview`.
+    fn accepts(&self, model: &str) -> crate::completion::Accepts {
+        let images = reads_images(self.provider.dialect.quirks.responses.contract, model);
+        let model = model.to_ascii_lowercase();
+        crate::completion::Accepts {
+            user_images: images,
+            assistant_images: false,
+            tool_result_images: images,
+            tools: !(model.starts_with("o1-mini") || model.starts_with("o1-preview")),
+        }
+    }
+
+    /// Responses carries user and tool-result images as data URLs, URLs or
+    /// file ids, documents as files or text, and no audio, video or
+    /// assistant image. File ids need a dialect that resolves them, and
+    /// xAI's `input_image` takes none.
+    fn encodes(&self, _model: &str, media: crate::completion::Media<'_>) -> bool {
+        use crate::completion::{Media, Place};
+        use crate::message::{DocumentData, DocumentSourceKind as Source};
+        let quirks = &self.provider.dialect.quirks;
+        let file_ids = quirks.accepts_file_ids;
+        match media {
+            Media::Image(_, Place::Assistant) | Media::Audio(_) | Media::Video(_) => false,
+            Media::Image(image, _) => {
+                super::image_part(image, self.codex_request_shape.is_lite()).is_some()
+                    && (!matches!(image.data, Source::FileId(_))
+                        || file_ids && quirks.responses.contract != ResponsesContract::Xai)
+            }
+            Media::Document(document) => {
+                super::document_part(document).is_some()
+                    && (file_ids || !matches!(document.data, DocumentData::File(Source::FileId(_))))
+            }
+        }
+    }
+
+    /// A request naming `previous_response_id` or a `conversation`
+    /// continues state the provider stores, which holds the calls its first
+    /// results answer.
+    fn continues_stored(&self, request: &completion::CompletionRequest) -> bool {
+        ["previous_response_id", "conversation"].iter().any(|key| {
+            crate::completion::options::param(self, request, key)
+                .is_some_and(|value| !value.is_null())
+        })
+    }
+
+    /// pi's `normalizeIdPart`: characters outside `[a-zA-Z0-9_-]` become
+    /// `_`, the id is cut to 64 characters and loses its trailing `_`.
+    fn normalize_tool_call_id(
+        &self,
+        id: &str,
+        _model: &str,
+        _source: Option<&crate::message::Origin>,
+    ) -> String {
+        use crate::providers::internal::wire_ids::{legal_call_id, short_hash};
+        let legal = legal_call_id(id, 64);
+        match legal.trim_end_matches('_') {
+            // An id with nothing legal in it still names its call.
+            "" => short_hash(id),
+            trimmed => trimmed.to_owned(),
+        }
+    }
 }
 
-#[derive(Default, Deserialize)]
-struct TokenDetails {
-    #[serde(default, deserialize_with = "crate::observe::lenient_count")]
-    cached_tokens: Option<u64>,
-    #[serde(default, deserialize_with = "crate::observe::lenient_count")]
-    reasoning_tokens: Option<u64>,
-}
-
-#[derive(Deserialize)]
-struct Usage {
-    #[serde(default, deserialize_with = "crate::observe::lenient_count")]
-    input_tokens: Option<u64>,
-    #[serde(default, deserialize_with = "crate::observe::lenient_count")]
-    output_tokens: Option<u64>,
-    #[serde(default, deserialize_with = "crate::observe::lenient_count")]
-    total_tokens: Option<u64>,
-    #[serde(default)]
-    input_tokens_details: Option<TokenDetails>,
-    #[serde(default)]
-    output_tokens_details: Option<TokenDetails>,
-}
-
-#[derive(Deserialize)]
-struct IncompleteDetails {
-    reason: Option<String>,
-}
-
-/// The response object, whether it arrived nested under a stream event's
-/// `response` or as the unary reply itself. Every field is optional: this is
-/// the observation parse, and a payload that carries none of them projects
-/// nothing rather than failing.
-#[derive(Default, Deserialize)]
-struct ResponseObject {
-    id: Option<String>,
-    model: Option<String>,
-    status: Option<String>,
-    incomplete_details: Option<IncompleteDetails>,
-    usage: Option<Usage>,
-    error: Option<ObservedError>,
-}
-
-#[derive(Deserialize)]
-struct Payload {
-    #[serde(rename = "type")]
-    kind: Option<String>,
-    response: Option<ResponseObject>,
-    /// The unary reply *is* the response object, so the same fields are
-    /// read at the top level rather than declared a second time.
-    #[serde(flatten)]
-    unwrapped: ResponseObject,
-    // The stream `error` event's own fields.
-    code: Option<serde_json::Value>,
-    message: Option<String>,
+/// Whether `model` reads images, past a `vendor/` prefix: its catalog
+/// entry's input, or for a model the catalog does not list its vendor's
+/// documented text-only models. An unknown model reads them.
+fn reads_images(contract: ResponsesContract, model: &str) -> bool {
+    let model = model.rsplit('/').next().unwrap_or_default();
+    match contract {
+        ResponsesContract::Xai => crate::catalog::reads_images_or(
+            crate::providers::xai::DIALECT.name,
+            model,
+            crate::providers::xai::reads_images,
+        ),
+        ResponsesContract::OpenAi | ResponsesContract::Codex => crate::catalog::reads_images_or(
+            crate::providers::openai::wire::OPENAI.name,
+            model,
+            crate::providers::openai::reads_images,
+        ),
+    }
 }
 
 /// The facts a Responses payload carries before normalization discards
-/// them: the verdict, the model, the response id, the usage and any error
-/// envelope.
+/// them: the verdict, the model, the response id, usage and any error envelope.
 ///
 /// The unary reply is the response object itself; a stream event wraps that
 /// object under `response` (`response.created`, `.completed`, `.failed`,
 /// `.incomplete`) or, for `error`, carries the envelope's fields itself.
-pub(crate) fn project_payload(payload: &[u8], sink: &mut dyn ObservationSink) {
+pub(crate) fn project_payload(payload: &[u8], sink: &mut ObservationSink<'_>) {
     let Ok(payload) = serde_json::from_slice::<Payload>(payload) else {
         return;
     };
     if payload.kind.as_deref() == Some("error") {
-        // The event carries its envelope either nested under `error` or as
-        // its own top-level fields; the nested form names the error type.
         payload
             .unwrapped
             .error
-            .unwrap_or(ObservedError {
+            .unwrap_or(PayloadError {
                 code: payload.code,
                 kind: None,
                 message: payload.message,
@@ -674,24 +627,24 @@ pub(crate) fn project_payload(payload: &[u8], sink: &mut dyn ObservationSink) {
     }
     let object = payload.response.unwrap_or(payload.unwrapped);
     if let Some(usage) = object.usage {
-        sink.emit(AdapterEvent::Usage {
-            usage: AdapterUsage {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                total_tokens: usage.total_tokens,
-                cached_input_tokens: usage.input_tokens_details.and_then(|d| d.cached_tokens),
-                reasoning_tokens: usage.output_tokens_details.and_then(|d| d.reasoning_tokens),
-                tool_input_tokens: None,
-            },
+        sink.usage_snapshot(AdapterUsage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            total_tokens: usage.total_tokens,
+            cached_input_tokens: usage
+                .input_tokens_details
+                .and_then(|details| details.cached_tokens),
+            reasoning_tokens: usage
+                .output_tokens_details
+                .and_then(|details| details.reasoning_tokens),
+            tool_input_tokens: None,
         });
     }
-    // `status` is the provider's verdict; `in_progress` on a stream's
-    // opening event is not one yet, so it is left out of the projection.
-    let finish_reason = object
-        .status
-        .filter(|status| status != "in_progress" && status != "queued");
     let verdict = AdapterVerdict {
-        finish_reason: finish_reason.map(|value| sink.scrub(&value)),
+        finish_reason: object
+            .status
+            .filter(|status| status != "in_progress" && status != "queued")
+            .map(|value| sink.scrub(&value)),
         block_reason: None,
         detail: object
             .incomplete_details
@@ -706,5 +659,82 @@ pub(crate) fn project_payload(payload: &[u8], sink: &mut dyn ObservationSink) {
     }
 }
 
+#[derive(Default, Deserialize)]
+struct PayloadTokenDetails {
+    #[serde(default, deserialize_with = "payload_count")]
+    cached_tokens: Option<u64>,
+    #[serde(default, deserialize_with = "payload_count")]
+    reasoning_tokens: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct PayloadUsage {
+    #[serde(default, deserialize_with = "payload_count")]
+    input_tokens: Option<u64>,
+    #[serde(default, deserialize_with = "payload_count")]
+    output_tokens: Option<u64>,
+    #[serde(default, deserialize_with = "payload_count")]
+    total_tokens: Option<u64>,
+    #[serde(default)]
+    input_tokens_details: Option<PayloadTokenDetails>,
+    #[serde(default)]
+    output_tokens_details: Option<PayloadTokenDetails>,
+}
+
+fn payload_count<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    Ok(Value::deserialize(deserializer)?.as_u64())
+}
+
+#[derive(Deserialize)]
+struct PayloadIncompleteDetails {
+    reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PayloadError {
+    code: Option<Value>,
+    #[serde(rename = "type", alias = "status")]
+    kind: Option<String>,
+    message: Option<String>,
+}
+
+impl PayloadError {
+    fn emit(self, sink: &mut ObservationSink<'_>) {
+        ObservedError {
+            code: self.code,
+            kind: self.kind,
+            message: self.message,
+        }
+        .emit(sink);
+    }
+}
+
+/// Private observation read shape; malformed known fields abort projection.
+#[derive(Default, Deserialize)]
+struct PayloadResponseObject {
+    id: Option<String>,
+    model: Option<String>,
+    status: Option<String>,
+    incomplete_details: Option<PayloadIncompleteDetails>,
+    usage: Option<PayloadUsage>,
+    error: Option<PayloadError>,
+}
+
+#[derive(Deserialize)]
+struct Payload {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    response: Option<PayloadResponseObject>,
+    #[serde(flatten)]
+    unwrapped: PayloadResponseObject,
+    code: Option<Value>,
+    message: Option<String>,
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod carried_tests;

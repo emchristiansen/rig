@@ -11,20 +11,18 @@
 //! ```
 
 use crate::completion;
-use crate::driver::{Bound, WireDriver};
-use crate::driver::{TriagedFrame, triage_frame};
+use crate::completion::options::FinalBody;
+use crate::driver::Model;
 use crate::error::{CorruptFrame, EncodeError, ProviderError};
 use crate::http_client::{self, NoBody};
-use crate::operation::Completion;
+use crate::operation::{Completion, Turn};
 use crate::providers::openai::responses_api::streaming::{
-    IncompleteTerminal, ItemChunk, ResponseChunk, ResponseChunkKind, ResponsesDecoder,
-    StreamingCompletionChunk, classify_responses_frame,
+    IncompleteTerminal, ResponsesDecoder, ResponsesEvent, classify_websocket_payload, document,
+    is_lifecycle_event,
 };
 use crate::providers::openai::responses_api::wire::Responses;
-use crate::streaming::StreamEvent;
-use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
-use crate::wire::WireFrame;
-use crate::wire::{Fold, Operation, Reply, Wire};
+use crate::streaming::Item;
+use crate::wire::{Call, Flow, Mode, Operation, Reply, Shared, Wire, WireFrame};
 use crate::ws_client::{
     BoxedWebSocketConnection, ConnectOptions, Frame, ReadyFrame, UnsupportedCapability,
     WebSocketClientExt, WebSocketConnection,
@@ -32,8 +30,6 @@ use crate::ws_client::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::time::Duration;
-
-use crate::providers::openai::responses_api::{CompletionResponse, ResponseStatus};
 
 pub mod codex;
 
@@ -87,33 +83,36 @@ impl ResponsesWebSocketCreateOptions {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct ResponsesWebSocketClientEvent<'a> {
-    #[serde(rename = "type")]
-    kind: ResponsesWebSocketClientEventKind,
-    #[serde(flatten)]
-    request: &'a crate::providers::openai::responses_api::CompletionRequest,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    generate: Option<bool>,
+/// The canonical prepared request and its sealed websocket frame body.
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedTurn {
+    pub(crate) request: completion::CompletionRequest,
+    pub(crate) body: FinalBody,
+    pub(crate) context: super::DeltaContext,
 }
 
-impl<'a> ResponsesWebSocketClientEvent<'a> {
-    fn create(
-        request: &'a crate::providers::openai::responses_api::CompletionRequest,
-        generate: Option<bool>,
-    ) -> Self {
-        Self {
-            kind: ResponsesWebSocketClientEventKind::ResponseCreate,
-            request,
-            generate,
-        }
-    }
+/// The closed frame plan applied by the Responses request merge.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct WebSocketCreate {
+    pub(crate) input: WebSocketCreateInput,
+    pub(crate) stamps: Map<String, Value>,
+    pub(crate) identity: Option<super::codex_identity::CodexIdentity>,
+    pub(crate) lite: bool,
+    pub(crate) automatic_previous: Option<String>,
+    pub(crate) generate: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-enum ResponsesWebSocketClientEventKind {
-    #[serde(rename = "response.create")]
-    ResponseCreate,
+/// The input a websocket frame sends before its body is sealed.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum WebSocketCreateInput {
+    Full,
+    Delta {
+        envelope: FinalBody,
+        input: WireDelta,
+        previous_response_id: String,
+    },
 }
 
 /// A protocol error event emitted by OpenAI WebSocket mode.
@@ -219,131 +218,30 @@ pub struct ResponsesWebSocketDoneEvent {
     /// The event type.
     #[serde(rename = "type")]
     pub kind: ResponsesWebSocketDoneEventKind,
-    /// The provider payload for the finished response.
-    pub response: ResponsesWebSocketDoneResponse,
+    /// The complete terminal object. Sparse objects retain every field;
+    /// modeled fields are checked whenever present.
+    #[serde(deserialize_with = "websocket_done_response")]
+    pub response: Value,
 }
 
-/// A validated WebSocket terminal object, including supported sparse replies.
-/// Every modeled structural field is checked when present. Unknown fields and
-/// optional echoed metadata retain the full response decoder's leniency.
-#[derive(Debug, Clone)]
-pub struct ResponsesWebSocketDoneResponse {
-    raw: Map<String, Value>,
-    id: String,
-    status: ResponseStatus,
-    full: Option<Box<CompletionResponse>>,
-}
-
-impl ResponsesWebSocketDoneResponse {
-    /// The complete provider object, including fields the client does not model.
-    #[must_use]
-    pub fn as_object(&self) -> &Map<String, Value> {
-        &self.raw
-    }
-
-    /// The provider's response identifier.
-    #[must_use]
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-
-    /// The provider's status, including future string values.
-    #[must_use]
-    pub fn status(&self) -> &ResponseStatus {
-        &self.status
-    }
-}
-
-impl Serialize for ResponsesWebSocketDoneResponse {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.raw.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for ResponsesWebSocketDoneResponse {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = Map::<String, Value>::deserialize(deserializer)?;
-        let id = serde_json::from_value(
-            raw.get("id")
-                .cloned()
-                .ok_or_else(|| <D::Error as serde::de::Error>::missing_field("id"))?,
-        )
-        .map_err(serde::de::Error::custom)?;
-        let status = serde_json::from_value(
-            raw.get("status")
-                .cloned()
-                .ok_or_else(|| <D::Error as serde::de::Error>::missing_field("status"))?,
-        )
-        .map_err(serde::de::Error::custom)?;
-
-        // These are CompletionResponseWire's structural fields and exact types;
-        // metadata and its deliberately permissive reasoning echo stay raw.
-        validate_done_field::<super::ResponseObject>(&raw, "object")
-            .and_then(|()| validate_done_field::<u64>(&raw, "created_at"))
-            .and_then(|()| validate_done_field::<String>(&raw, "model"))
-            .and_then(|()| validate_done_field::<Option<super::ResponseError>>(&raw, "error"))
-            .and_then(|()| {
-                validate_done_field::<Option<super::IncompleteDetailsReason>>(
-                    &raw,
-                    "incomplete_details",
-                )
-            })
-            .and_then(|()| validate_done_field::<Option<String>>(&raw, "instructions"))
-            .and_then(|()| validate_done_field::<Option<u64>>(&raw, "max_output_tokens"))
-            .and_then(|()| validate_done_field::<Option<super::ResponsesUsage>>(&raw, "usage"))
-            .and_then(|()| validate_done_field::<Vec<super::Output>>(&raw, "output"))
-            .and_then(|()| {
-                validate_done_field::<Vec<super::ResponsesToolDefinition>>(&raw, "tools")
-            })
-            .map_err(serde::de::Error::custom)?;
-
-        let full = if ["id", "object", "created_at", "status", "model"]
-            .iter()
-            .all(|key| raw.contains_key(*key))
-        {
-            Some(Box::new(
-                serde_json::from_value(Value::Object(raw.clone()))
-                    .map_err(serde::de::Error::custom)?,
-            ))
-        } else {
-            None
-        };
-        Ok(Self {
-            raw,
-            id,
-            status,
-            full,
-        })
-    }
-}
-
-fn validate_done_field<T: serde::de::DeserializeOwned>(
-    raw: &Map<String, Value>,
-    field: &str,
-) -> Result<(), serde_json::Error> {
-    if let Some(value) = raw.get(field) {
-        serde_json::from_value::<T>(value.clone()).map_err(|error| {
-            <serde_json::Error as serde::de::Error>::custom(format!(
-                "response.done.response.{field}: {error}"
-            ))
-        })?;
-    }
-    Ok(())
+fn websocket_done_response<'de, D>(deserializer: D) -> Result<Value, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let response = Value::deserialize(deserializer)?;
+    super::streaming::websocket_done(&response).map_err(serde::de::Error::custom)?;
+    Ok(response)
 }
 
 impl ResponsesWebSocketDoneEvent {
     /// Returns the response ID if the payload includes one.
     #[must_use]
     pub fn response_id(&self) -> Option<&str> {
-        Some(self.response.id())
+        self.response.get("id").and_then(Value::as_str)
     }
 
-    fn status(&self) -> &ResponseStatus {
-        self.response.status()
-    }
-
-    fn as_completion_response(&self) -> Option<CompletionResponse> {
-        self.response.full.as_deref().cloned()
+    fn status(&self) -> Option<&str> {
+        self.response.get("status").and_then(Value::as_str)
     }
 }
 
@@ -357,17 +255,24 @@ pub enum ResponsesWebSocketDoneEventKind {
 /// A server event emitted by OpenAI WebSocket mode.
 #[derive(Debug, Clone)]
 pub enum ResponsesWebSocketEvent {
-    /// A response lifecycle event such as `response.created` or `response.completed`.
-    Response(ResponseChunk),
-    /// A streaming item/delta event such as `response.output_text.delta`.
-    Item(ItemChunk),
+    /// A response lifecycle event such as `response.created` or
+    /// `response.completed`, with the response object it carries.
+    Response {
+        /// The event's `type`.
+        kind: String,
+        /// The response object, as the provider sent it.
+        response: Value,
+    },
+    /// A streaming item or delta event such as `response.output_text.delta`,
+    /// as the provider sent it.
+    Item(Value),
     /// A protocol-level websocket error event.
     Error(ResponsesWebSocketErrorEvent),
     /// An optional `response.done` event emitted by OpenAI over WebSockets.
     Done(ResponsesWebSocketDoneEvent),
     /// A server event whose `type` this client does not model, surfaced with
     /// its tag and complete parsed payload rather than discarded, and retained
-    /// for [`StreamEvent::Unknown`] passthrough.
+    /// for [`Item::Unknown`] passthrough.
     Unknown(UnrecognizedEvent),
 }
 
@@ -388,48 +293,68 @@ pub struct UnrecognizedEvent {
     pub payload: crate::streaming::UnknownPayload,
 }
 
-/// The new input for a forward-only incremental turn — never empty.
-///
-/// An incremental turn chains onto a live tip and replaces the captured
-/// envelope's `input` wholesale, so an empty delta would send a chained
-/// `response.create` carrying nothing new. The field is private, so the
-/// constructors below are the only way in, and there is deliberately no
-/// `Deserialize` that could bypass them.
-#[derive(Debug, Clone)]
-pub struct InputDelta(Vec<super::InputItem>);
+/// One incremental input with explicit canonical or literal wire provenance.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InputDeltaItem {
+    /// A Rig message lowered through the Responses input encoder.
+    Canonical(crate::message::Message),
+    /// A literal provider input item sent with its value unchanged.
+    Raw(Value),
+}
 
-/// Returned when an incremental delta would carry no input items.
+/// The new source input for a forward-only incremental turn.
+/// Lowering must also produce at least one wire item before the frame is sent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InputDelta(Vec<InputDeltaItem>);
+
+/// Returned when an incremental delta carries no input items.
 #[derive(Debug, thiserror::Error)]
 #[error("an incremental delta must carry at least one input item")]
 pub struct EmptyInputDeltaError;
 
 impl InputDelta {
-    /// A delta of exactly one item. Infallible by construction.
+    /// A delta containing one canonical or literal input item.
     #[must_use]
-    pub fn one(item: super::InputItem) -> Self {
+    pub fn one(item: InputDeltaItem) -> Self {
         Self(vec![item])
     }
 
-    /// A delta from many items, rejecting the empty case.
-    pub fn new(items: Vec<super::InputItem>) -> Result<Self, EmptyInputDeltaError> {
+    /// A delta from source items, refusing the empty case.
+    pub fn new(items: Vec<InputDeltaItem>) -> Result<Self, EmptyInputDeltaError> {
         if items.is_empty() {
             return Err(EmptyInputDeltaError);
         }
         Ok(Self(items))
     }
 
-    /// The items, surrendered to the caller.
+    /// Return the source items with their provenance unchanged.
     #[must_use]
-    pub fn into_vec(self) -> Vec<super::InputItem> {
+    pub fn into_vec(self) -> Vec<InputDeltaItem> {
         self.0
     }
 }
 
-impl TryFrom<Vec<super::InputItem>> for InputDelta {
+impl TryFrom<Vec<InputDeltaItem>> for InputDelta {
     type Error = EmptyInputDeltaError;
-
-    fn try_from(items: Vec<super::InputItem>) -> Result<Self, Self::Error> {
+    fn try_from(items: Vec<InputDeltaItem>) -> Result<Self, Self::Error> {
         Self::new(items)
+    }
+}
+
+/// Nonempty wire input admitted by the internal WebSocket frame merge.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct WireDelta(Vec<Value>);
+
+impl WireDelta {
+    pub(crate) fn new(items: Vec<Value>) -> Result<Self, EmptyInputDeltaError> {
+        if items.is_empty() {
+            return Err(EmptyInputDeltaError);
+        }
+        Ok(Self(items))
+    }
+    pub(crate) fn into_vec(self) -> Vec<Value> {
+        self.0
     }
 }
 
@@ -496,11 +421,11 @@ enum Continuation {
     Blocked(IncrementalSendRefused),
     /// A turn built from this envelope is in flight. It becomes the eligible
     /// envelope only if that turn completes.
-    InFlight(Box<super::CompletionRequest>),
+    InFlight(Box<PreparedTurn>),
     /// The last turn completed as `tip`; a delta may continue it by reusing
     /// `envelope`'s non-input configuration.
     Eligible {
-        envelope: Box<super::CompletionRequest>,
+        envelope: Box<PreparedTurn>,
         tip: String,
     },
 }
@@ -607,7 +532,7 @@ impl ResponsesWebSocketEvent {
     #[must_use]
     pub fn response_id(&self) -> Option<&str> {
         match self {
-            Self::Response(chunk) => Some(&chunk.response.id),
+            Self::Response { response, .. } => response.get("id").and_then(Value::as_str),
             Self::Done(done) => done.response_id(),
             Self::Item(_) | Self::Error(_) | Self::Unknown(_) => None,
         }
@@ -617,18 +542,21 @@ impl ResponsesWebSocketEvent {
     #[must_use]
     pub fn is_terminal(&self) -> bool {
         match self {
-            Self::Response(chunk) => matches!(
-                chunk.kind,
-                ResponseChunkKind::ResponseCompleted
-                    | ResponseChunkKind::ResponseFailed
-                    | ResponseChunkKind::ResponseIncomplete
-            ),
+            Self::Response { kind, .. } => is_terminal_kind(kind),
             Self::Error(_) | Self::Done(_) => true,
             // An unmodelled event ends nothing at the protocol level; whether it
             // is tolerable is the consumer's decision, not this predicate's.
             Self::Item(_) | Self::Unknown(_) => false,
         }
     }
+}
+
+/// Whether a lifecycle event of `kind` ends the turn.
+fn is_terminal_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "response.completed" | "response.failed" | "response.incomplete"
+    )
 }
 
 /// A builder for an OpenAI Responses WebSocket session.
@@ -680,6 +608,15 @@ impl ResponsesWebSocketSessionBuilder {
 }
 
 impl ResponsesWebSocketSessionBuilder {
+    /// Open a session over the bundled tungstenite backend with the configured
+    /// timeouts. Return handshake construction, transport, or provider errors.
+    #[cfg(all(feature = "tungstenite", not(target_family = "wasm")))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "tungstenite")))]
+    pub async fn connect(self) -> Result<ResponsesWebSocketSession, ProviderError> {
+        self.connect_with(&rig_tungstenite::TungsteniteClient::new())
+            .await
+    }
+
     /// Open a session over `backend` with the configured timeouts.
     /// Return handshake construction, transport, or provider errors.
     pub async fn connect_with<W>(
@@ -722,6 +659,8 @@ pub struct ResponsesWebSocketSession {
     /// of an in-flight turn handed the session, until the caller takes it.
     turn_state: Option<String>,
     in_flight: bool,
+    /// The fold of the turn in flight, opened when it was sent.
+    turn: Option<Turn>,
     event_timeout: Option<Duration>,
     closed: bool,
     failed: bool,
@@ -762,6 +701,7 @@ impl ResponsesWebSocketSession {
             recovered: Vec::new(),
             socket: connection,
             in_flight: false,
+            turn: None,
             event_timeout,
             closed: false,
             failed: false,
@@ -852,14 +792,28 @@ impl ResponsesWebSocketSession {
         options: ResponsesWebSocketCreateOptions,
     ) -> Result<(), ProviderError> {
         self.ensure_can_send()?;
-        let request = self.prepare_request(
+        let input_requirement = super::InputRequirement::for_create(&options);
+        let envelope = self.prepare_request(
             completion_request,
             Chaining::Automatic,
             None,
-            super::InputRequirement::for_create(&options),
+            input_requirement,
         )?;
-        let frame = encode_frame(&request, options.generate, |_| Ok(()))?;
-        self.send_encoded(request, frame).await
+        let body = self.wire.websocket_request_with_identity(
+            &envelope.request,
+            None,
+            input_requirement,
+            WebSocketCreate {
+                input: WebSocketCreateInput::Full,
+                stamps: Map::new(),
+                identity: None,
+                lite: false,
+                automatic_previous: self.previous_response_id.clone(),
+                generate: options.generate,
+            },
+        )?;
+        let frame = encode_frame(&body)?;
+        self.send_encoded(envelope, frame).await
     }
 
     /// Refuse a send the session cannot take: closed, failed, a turn already
@@ -874,11 +828,9 @@ impl ResponsesWebSocketSession {
         }
 
         if !self.recovered.is_empty() {
-            return Err(ProviderError::Request(Box::new(
-                UncollectedRecoveredFrames {
-                    count: self.recovered.len(),
-                },
-            )));
+            return Err(ProviderError::request(UncollectedRecoveredFrames {
+                count: self.recovered.len(),
+            }));
         }
 
         Ok(())
@@ -886,9 +838,7 @@ impl ResponsesWebSocketSession {
 
     /// The envelope and tip an incremental continuation would chain onto, or
     /// the reason there is none.
-    pub(crate) fn continuation(
-        &self,
-    ) -> Result<(&super::CompletionRequest, &str), IncrementalSendRefused> {
+    pub(crate) fn continuation(&self) -> Result<(&PreparedTurn, &str), IncrementalSendRefused> {
         match &self.continuation {
             Continuation::Eligible { envelope, tip } => Ok((envelope, tip)),
             Continuation::Blocked(reason) => Err(reason.clone()),
@@ -905,7 +855,7 @@ impl ResponsesWebSocketSession {
     /// turn completes.
     pub(crate) async fn send_encoded(
         &mut self,
-        envelope: super::CompletionRequest,
+        envelope: PreparedTurn,
         frame: String,
     ) -> Result<(), ProviderError> {
         self.ensure_can_send()?;
@@ -913,12 +863,18 @@ impl ResponsesWebSocketSession {
         // handshake of Rig's to refuse, so the identity rule is checked again
         // here, before any frame is written.
         self.wire.provider.sendable_identity()?;
+        let describe = self.wire.describe();
+        let turn = Completion::fold(
+            &envelope.request,
+            &mut Call::new(&describe, Mode::Streaming),
+        );
 
         if let Err(error) = self.socket.send(Frame::Text(frame)).await {
             return Err(self.fail_session(websocket_provider_error(error)));
         }
         self.continuation = Continuation::InFlight(Box::new(envelope));
         self.in_flight = true;
+        self.turn = Some(turn);
 
         Ok(())
     }
@@ -1067,7 +1023,7 @@ impl ResponsesWebSocketSession {
                 }
                 // Real turn data with no turn in flight: fail loudly, and hand
                 // back the unmodelled frames that preceded it.
-                ResponsesWebSocketEvent::Response(_)
+                ResponsesWebSocketEvent::Response { .. }
                 | ResponsesWebSocketEvent::Item(_)
                 | ResponsesWebSocketEvent::Error(_)
                 | ResponsesWebSocketEvent::Done(_) => {
@@ -1122,12 +1078,18 @@ impl ResponsesWebSocketSession {
             ResponsesWebSocketCreateOptions::warmup(),
         )
         .await?;
-        let response = self.wait_for_completed_response().await?;
-        Ok(response.id)
+        let response = self.wait_for_terminal_response().await?.0;
+        response
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                ProviderError::Response("the websocket warmup has no response id".into())
+            })
     }
 
     /// Sends a completion turn and collects the final OpenAI response,
-    /// normalized; its `raw` is the provider's own terminal response object.
+    /// normalized; its `raw` is the `Response` the turn's events rebuild.
     pub async fn completion(
         &mut self,
         completion_request: crate::completion::CompletionRequest,
@@ -1136,24 +1098,12 @@ impl ResponsesWebSocketSession {
         self.collect_completion().await
     }
 
-    /// Collect the in-flight turn and normalize it.
-    ///
-    /// An incomplete turn is a terminal, not a failure: its partial output is
-    /// kept and its finish reason says why it stopped.
+    /// Collect the in-flight turn through its decoder and reassembler.
+    /// Incomplete turns retain their partial output and truthful finish reason.
     pub(crate) async fn collect_completion(
         &mut self,
     ) -> Result<completion::CompletionResponse, ProviderError> {
-        let provider = self.wire.name().to_owned();
-        let (response, events) = self.wait_for_terminal_response().await?;
-        let folded = fold_events(&provider, events, &response)?;
-        if folded.choice.is_empty() {
-            // The turn carried no content events but its terminal body
-            // restates `output[]` (the shape a warmed-up or replayed session
-            // answers with): fold that body, through the same decoder's
-            // unary variant.
-            return super::wire::fold_body(&provider, response);
-        }
-        Ok(folded)
+        Ok(self.wait_for_terminal_response().await?.1)
     }
 
     /// Closes the websocket connection.
@@ -1174,111 +1124,98 @@ impl ResponsesWebSocketSession {
         result
     }
 
-    /// Validate and shape a Rig request into this session's Responses request.
-    ///
-    /// [`Chaining::Automatic`] continues the retained response ID unless the
-    /// request names its own; [`Chaining::Root`] never adds one.
+    /// Prepare the canonical request and seal its full websocket frame.
+    /// Automatic chaining fills an absent effective response ID;
+    /// a root send keeps only the response ID the request names.
     pub(crate) fn prepare_request(
         &self,
         completion_request: crate::completion::CompletionRequest,
         chaining: Chaining,
         identity: Option<&super::codex_identity::CodexIdentity>,
         input_requirement: super::InputRequirement,
-    ) -> Result<crate::providers::openai::responses_api::CompletionRequest, ProviderError> {
-        // Direct session requests bypass builder validation.
-        completion_request.validate_message_content()?;
-
-        let mut request =
-            self.wire
-                .responses_request(completion_request, false, identity, input_requirement)?;
-
-        // WebSocket mode is always event-driven, so these HTTP/SSE-specific flags
-        // are ignored by the provider and only add noise to the payload. A
-        // Codex session, the only caller with an identity, states
-        // `stream: true` instead, as the official client does on every frame.
-        request.stream = identity.map(|_| true);
-        request.additional_parameters.background = None;
-
-        match chaining {
-            Chaining::Automatic => {
-                if request.additional_parameters.previous_response_id.is_none() {
-                    request
-                        .additional_parameters
-                        .previous_response_id
-                        .clone_from(&self.previous_response_id);
-                }
-            }
-            Chaining::Root => {}
-        }
-
-        Ok(request)
+    ) -> Result<PreparedTurn, ProviderError> {
+        let request = Completion::prepare(completion_request, &self.wire.describe())?;
+        let (body, context) = self.wire.prepare_websocket_request_with_identity(
+            &request,
+            identity,
+            input_requirement,
+            WebSocketCreate {
+                input: WebSocketCreateInput::Full,
+                stamps: Map::new(),
+                identity: identity.cloned(),
+                lite: identity.is_some() && self.wire.codex_request_shape.is_lite(),
+                automatic_previous: (chaining == Chaining::Automatic)
+                    .then(|| self.previous_response_id.clone())
+                    .flatten(),
+                generate: None,
+            },
+        )?;
+        Ok(PreparedTurn {
+            request,
+            body,
+            context,
+        })
     }
 
-    pub(crate) async fn wait_for_completed_response(
-        &mut self,
-    ) -> Result<CompletionResponse, ProviderError> {
+    pub(crate) async fn wait_for_completed_response(&mut self) -> Result<Value, ProviderError> {
         Ok(self.wait_for_terminal_response().await?.0)
     }
 
-    /// The decoder one websocket turn's events are folded through.
-    ///
-    /// The websocket transport accepts `response.incomplete` as a terminal
-    /// and reports it with its truthful finish reason, whatever the wire's
-    /// streamed-SSE policy says: that policy is the HTTP stream's contract.
-    fn turn_decoder(&self) -> ResponsesDecoder {
-        self.wire
-            .decoder_with_incomplete(IncompleteTerminal::Accept)
-    }
-
-    /// Collect decoded events and the provider's completed or incomplete response.
-    /// Transport, protocol, and decoder failures return an error and discard
-    /// collected events. A terminal event without a response body is an error.
+    /// Collect the completed or incomplete turn through the current decoder
+    /// and reassembler. Transport, protocol and decoder failures are errors.
     async fn wait_for_terminal_response(
         &mut self,
-    ) -> Result<(CompletionResponse, Vec<StreamEvent>), ProviderError> {
-        // Frames arrive incrementally; finish only after a provider terminal event.
-        let mut driver = WireDriver::<Completion, _>::new(self.turn_decoder());
-        let mut events = Vec::new();
+    ) -> Result<(Value, completion::CompletionResponse), ProviderError> {
+        let provider = self.wire.describe().name.to_owned();
+        let Some(turn) = self.turn.take() else {
+            return Err(ProviderError::Provider(
+                "No OpenAI websocket response is currently in flight on this session".to_string(),
+            ));
+        };
+        let reply = std::sync::Mutex::new(Shared::new(turn));
+        let mut decoder = self
+            .wire
+            .decoder_with_incomplete(IncompleteTerminal::Accept)
+            .with_websocket_reader();
+        let mut document = document::Response::with_websocket_reader();
         loop {
             let (event, payload) = self.next_event_with_payload().await?;
             match event {
-                ResponsesWebSocketEvent::Response(chunk) => {
-                    let terminal = matches!(
-                        chunk.kind,
-                        ResponseChunkKind::ResponseCompleted
-                            | ResponseChunkKind::ResponseFailed
-                            | ResponseChunkKind::ResponseIncomplete
-                    );
-                    if !terminal {
-                        drain(&mut driver, &mut events, payload)?;
+                ResponsesWebSocketEvent::Response { kind, response } => {
+                    if !is_terminal_kind(&kind) {
+                        feed(&mut decoder, &mut document, &reply, payload)?;
                         continue;
                     }
                     // A failed turn is reported from its own envelope; only a
                     // completed or incomplete one reaches the decoder, whose
-                    // terminal record closes the turn.
-                    let response = terminal_response_result(chunk.response)?;
-                    drain(&mut driver, &mut events, payload)?;
-                    driver.finish();
-                    for item in driver.drain() {
-                        events.push(item?);
-                    }
-                    return Ok((response, events));
+                    // end closes the turn.
+                    let response = terminal_response_result(response)?;
+                    let ended = feed(&mut decoder, &mut document, &reply, payload)?;
+                    let folded = fold_reply(
+                        reply,
+                        ended,
+                        &provider,
+                        crate::wire::document::Reassemble::finish(document),
+                    )?;
+                    return Ok((response, folded));
                 }
                 ResponsesWebSocketEvent::Done(done) => {
-                    if let Some(response) = done.as_completion_response() {
+                    if ["id", "object", "created_at", "status", "model"]
+                        .iter()
+                        .all(|key| done.response.get(*key).is_some())
+                    {
                         // A failed turn is reported from its own envelope, as
                         // on the `response.failed` path.
-                        let response = terminal_response_result(response)?;
-                        // `response.done` carries the response object itself,
-                        // which is the decoder's unary shape: hand it over as
-                        // the frame it is.
-                        let body = serde_json::to_string(&done.response)?;
-                        drain(&mut driver, &mut events, body)?;
-                        driver.finish();
-                        for item in driver.drain() {
-                            events.push(item?);
-                        }
-                        return Ok((response, events));
+                        let response = terminal_response_result(done.response)?;
+                        let ended =
+                            feed(&mut decoder, &mut document, &reply, response.to_string())?;
+                        let folded = fold_reply(
+                            reply,
+                            ended,
+                            &provider,
+                            crate::wire::document::Reassemble::finish(document),
+                        )?;
+                        return Ok((response, folded));
                     }
 
                     let message = if let Some(response_id) = done.response_id() {
@@ -1299,9 +1236,9 @@ impl ResponsesWebSocketSession {
                     // response.failed path. A status the event reports is kept.
                     return Err(provider_error_from_event(&error));
                 }
-                // Unknown frames retain their raw payload through decoder passthrough.
+                // Unknown frames keep their raw payload.
                 ResponsesWebSocketEvent::Item(_) | ResponsesWebSocketEvent::Unknown(_) => {
-                    drain(&mut driver, &mut events, payload)?;
+                    feed(&mut decoder, &mut document, &reply, payload)?;
                 }
             }
         }
@@ -1309,58 +1246,52 @@ impl ResponsesWebSocketSession {
 
     fn update_state_for_event(&mut self, event: &ResponsesWebSocketEvent) {
         let ending = match event {
-            ResponsesWebSocketEvent::Response(chunk) => match chunk.kind {
-                ResponseChunkKind::ResponseCompleted => {
-                    let response_id = chunk.response.id.clone();
-                    self.previous_response_id = Some(response_id.clone());
-                    self.pending_done_response_id = Some(response_id.clone());
-                    TurnEnding::Completed {
-                        response_id: Some(response_id),
+            ResponsesWebSocketEvent::Response { kind, response } => {
+                let response_id = response
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                match kind.as_str() {
+                    "response.completed" => {
+                        self.previous_response_id.clone_from(&response_id);
+                        self.pending_done_response_id.clone_from(&response_id);
+                        TurnEnding::Completed { response_id }
                     }
-                }
-                // An incomplete turn still produced a response the next
-                // automatically chained turn can continue, so it keeps
-                // `previous_response_id` like a completed one. It is not an
-                // eligible tip for an incremental continuation.
-                ResponseChunkKind::ResponseIncomplete => {
-                    let response_id = chunk.response.id.clone();
-                    self.previous_response_id = Some(response_id.clone());
-                    self.pending_done_response_id = Some(response_id.clone());
-                    TurnEnding::Incomplete {
-                        response_id: Some(response_id),
+                    // Automatic sends may continue an incomplete response,
+                    // while incremental sends require a completed tip.
+                    "response.incomplete" => {
+                        self.previous_response_id.clone_from(&response_id);
+                        self.pending_done_response_id.clone_from(&response_id);
+                        TurnEnding::Incomplete { response_id }
                     }
+                    "response.failed" => {
+                        self.pending_done_response_id = response_id;
+                        self.previous_response_id = None;
+                        TurnEnding::NotCompleted
+                    }
+                    _ => return,
                 }
-                ResponseChunkKind::ResponseFailed => {
-                    self.pending_done_response_id = Some(chunk.response.id.clone());
-                    self.previous_response_id = None;
-                    TurnEnding::NotCompleted
-                }
-                ResponseChunkKind::ResponseCreated | ResponseChunkKind::ResponseInProgress => {
-                    return;
-                }
-            },
+            }
             ResponsesWebSocketEvent::Done(done) => {
                 let response_id = done.response_id().map(str::to_owned);
                 let ending = match done.status() {
-                    ResponseStatus::Completed => {
+                    Some("completed") => {
                         if let Some(response_id) = &response_id {
                             self.previous_response_id = Some(response_id.clone());
                         }
                         TurnEnding::Completed { response_id }
                     }
-                    ResponseStatus::Incomplete => {
+                    Some("incomplete") => {
                         if let Some(response_id) = &response_id {
                             self.previous_response_id = Some(response_id.clone());
                         }
                         TurnEnding::Incomplete { response_id }
                     }
-                    ResponseStatus::Failed
-                    | ResponseStatus::Cancelled
-                    | ResponseStatus::Other(_) => {
+                    Some("in_progress" | "queued") => TurnEnding::NotCompleted,
+                    _ => {
                         self.previous_response_id = None;
                         TurnEnding::NotCompleted
                     }
-                    ResponseStatus::InProgress | ResponseStatus::Queued => TurnEnding::NotCompleted,
                 };
                 self.pending_done_response_id = None;
                 ending
@@ -1386,6 +1317,7 @@ impl ResponsesWebSocketSession {
     }
 
     fn abort_turn(&mut self) {
+        self.turn = None;
         self.previous_response_id = None;
         self.pending_done_response_id = None;
         self.continuation = Continuation::Blocked(IncrementalSendRefused::LastTurnNotCompleted);
@@ -1449,100 +1381,82 @@ impl Drop for ResponsesWebSocketSession {
 /// Whether a full send continues the session's retained response ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Chaining {
-    /// Continue the retained response ID unless the request names its own
-    /// (OpenAI websocket mode).
     Automatic,
-    /// Root a fresh chain: add no `previous_response_id` (Codex full sends).
     Root,
 }
 
-/// Serialize one `response.create` frame for `request`, letting `stamp` add
-/// provider fields at the top level of the body before it is written.
-fn encode_frame(
-    request: &super::CompletionRequest,
-    generate: Option<bool>,
-    stamp: impl FnOnce(&mut Map<String, Value>) -> Result<(), EncodeError>,
-) -> Result<String, ProviderError> {
-    let event = ResponsesWebSocketClientEvent::create(request, generate);
-    let mut body = match serde_json::to_value(&event)? {
-        Value::Object(body) => body,
-        other => {
-            return Err(EncodeError::request(format!(
-                "an OpenAI websocket response.create event must serialize to a JSON object, got {other}"
-            ))
-            .into());
-        }
-    };
-    stamp(&mut body)?;
-
+/// Serialize the frame sealed by the Responses request merge.
+fn encode_frame(request: &FinalBody) -> Result<String, ProviderError> {
     crate::providers::internal::trace_json(
         crate::providers::internal::LogTarget::Completions,
         "OpenAI websocket request",
-        &body,
+        request,
     );
-
-    Ok(serde_json::to_string(&body)?)
+    Ok(serde_json::to_string(request)?)
 }
 
-/// Feed one message to the wire's decoder and take what it produced.
-///
-/// This surface is unary, so an `Err` item the decoder pushed (a corrupt
-/// frame, a terminal record that failed to serialize) fails the turn, as it
-/// would on a buffered HTTP reply.
-fn drain(
-    driver: &mut WireDriver<Completion, ResponsesDecoder>,
-    events: &mut Vec<StreamEvent>,
+/// Feed one message to the turn's reassembler and decoder.
+fn feed(
+    decoder: &mut ResponsesDecoder,
+    document: &mut document::Response,
+    reply: &std::sync::Mutex<Shared<Completion>>,
     payload: String,
-) -> Result<(), ProviderError> {
-    driver.push(WireFrame::Text(payload));
-    for item in driver.drain() {
-        events.push(item?);
+) -> Result<bool, ProviderError> {
+    let flow = crate::driver::step(
+        decoder,
+        Some(document),
+        reply,
+        WireFrame::Text(payload),
+        None,
+    )?;
+    let mut shared = reply
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while let Some(item) = shared.take() {
+        let _ = item?;
     }
-    Ok(())
+    Ok(matches!(flow, Flow::Ended(_)))
 }
 
-/// Fold events into a normalized response, retaining the terminal body as raw JSON.
-/// Return fold or serialization errors.
-fn fold_events(
+/// Fold the turn's events and end into the normalized response, whose raw
+/// is the `Response` the turn's events rebuild, as a stream's is.
+fn fold_reply(
+    reply: std::sync::Mutex<Shared<Completion>>,
+    ended: bool,
     provider: &str,
-    events: Vec<StreamEvent>,
-    response: &CompletionResponse,
+    raw: Value,
 ) -> Result<completion::CompletionResponse, ProviderError> {
-    let mut fold = <Completion as Operation>::Fold::default();
-    for event in events {
-        fold.absorb(event)?;
-    }
-    fold.finish(Reply {
+    let fed = if ended {
+        Ok(())
+    } else {
+        Err(ProviderError::Truncated)
+    };
+    let reply_of = Reply {
         provider: provider.to_owned(),
-        raw: serde_json::to_value(response)?,
+        raw,
         // The websocket carries no reply headers past the handshake.
         provider_request_id: None,
         response_headers: crate::completion::ProviderResponseHeaders::new(),
-    })
+    };
+    crate::driver::settle(reply, fed, reply_of).outcome
 }
 
-fn terminal_response_result(
-    response: CompletionResponse,
-) -> Result<CompletionResponse, ProviderError> {
-    match response.status {
-        ResponseStatus::Completed => Ok(response),
+fn terminal_response_result(response: Value) -> Result<Value, ProviderError> {
+    match response.get("status").and_then(Value::as_str) {
+        // An incomplete response (e.g. hitting `max_output_tokens`) is a
+        // genuine terminal: the partial output and usage are kept, and the
+        // decoder maps its status and reason to the finish.
+        Some("completed" | "incomplete") | None => Ok(response),
         // Preserve provider error envelopes as reserialized JSON without an HTTP status.
         // Without an error object, return a local diagnostic instead.
-        ResponseStatus::Failed => match response.error.as_ref() {
-            Some(error) => Err(ProviderError::from_provider_body(
-                serde_json::to_string(&response).unwrap_or_else(|_| error.message.clone()),
-            )),
+        Some("failed") => match response.get("error").filter(|error| !error.is_null()) {
+            Some(_) => Err(ProviderError::from_provider_body(response.to_string())),
             None => Err(ProviderError::Provider(response_error_message(
                 "failed response",
             ))),
         },
-        // An incomplete response (e.g. hitting `max_output_tokens`) is a
-        // genuine terminal: the partial output and usage are kept, and the
-        // normalization path maps the status/incomplete_details to a finish
-        // reason via `map_finish_reason`, matching the unary and SSE paths.
-        ResponseStatus::Incomplete => Ok(response),
-        other => Err(ProviderError::Provider(format!(
-            "OpenAI websocket response ended in state {other:?}"
+        Some(other) => Err(ProviderError::Provider(format!(
+            "OpenAI websocket response ended in state `{other}`"
         ))),
     }
 }
@@ -1603,11 +1517,9 @@ fn parse_server_event(payload: &str) -> Result<Option<ResponsesWebSocketEvent>, 
     }
 
     let corrupt = |event_type: Option<&str>, error| {
-        ProviderError::CorruptFrame(CorruptFrame::text(
-            event_type.map(ToOwned::to_owned),
-            payload,
-            error,
-        ))
+        ProviderError::CorruptFrame(
+            CorruptFrame::text(event_type.map(ToOwned::to_owned), payload, error).into(),
+        )
     };
     let event_type =
         serde_json::from_str::<EventType>(payload).map_err(|error| corrupt(None, error))?;
@@ -1618,25 +1530,37 @@ fn parse_server_event(payload: &str) -> Result<Option<ResponsesWebSocketEvent>, 
         kind @ "response.done" => serde_json::from_str(payload)
             .map(|d| Some(ResponsesWebSocketEvent::Done(d)))
             .map_err(|error| corrupt(Some(kind), error)),
-        _ => Ok(Some(
-            match triage_frame(classify_responses_frame(payload))? {
-                TriagedFrame::Event(StreamingCompletionChunk::Response(response)) => {
-                    ResponsesWebSocketEvent::Response(response)
+        _ => Ok(
+            match crate::driver::triage(classify_websocket_payload(payload))? {
+                Item::Event(ResponsesEvent::Frame {
+                    kind, mut frame, ..
+                }) => {
+                    if is_lifecycle_event(&kind) {
+                        let response = frame
+                            .as_object_mut()
+                            .and_then(|frame| frame.shift_remove("response"))
+                            .unwrap_or_else(|| Value::Object(Map::new()));
+                        Some(ResponsesWebSocketEvent::Response { kind, response })
+                    } else {
+                        Some(ResponsesWebSocketEvent::Item(frame))
+                    }
                 }
-                TriagedFrame::Event(StreamingCompletionChunk::Delta(item)) => {
-                    ResponsesWebSocketEvent::Item(item)
-                }
-                // The tag comes from the probe above: reaching this arm proves
-                // it decoded exactly one top-level string `type`, the same key
-                // the classifier read.
-                TriagedFrame::Unknown(payload) => {
-                    ResponsesWebSocketEvent::Unknown(UnrecognizedEvent {
+                Item::Event(ResponsesEvent::Whole(value)) => {
+                    Some(ResponsesWebSocketEvent::Unknown(UnrecognizedEvent {
                         kind: event_type.kind,
-                        payload,
-                    })
+                        payload: value.into(),
+                    }))
                 }
+                Item::Event(ResponsesEvent::Failure(body)) => {
+                    return Err(ProviderError::from_provider_body(body));
+                }
+                Item::Event(ResponsesEvent::Sentinel) => None,
+                Item::Unknown(value) => Some(ResponsesWebSocketEvent::Unknown(UnrecognizedEvent {
+                    kind: event_type.kind,
+                    payload: value,
+                })),
             },
-        )),
+        ),
     }
 }
 
@@ -1737,50 +1661,25 @@ fn keepalive_flood_error(budget: usize) -> ProviderError {
 
 /// A backend capability the keepalive needs and the backend lacks.
 fn unsupported_capability_error(capability: &'static str) -> ProviderError {
-    ProviderError::Request(Box::new(UnsupportedCapability { capability }))
+    ProviderError::request(UnsupportedCapability { capability })
 }
 
 /// Convert transport errors, retaining rejected-upgrade status, body, and request ID.
 /// Failures without a provider response retain transport error classification.
 fn websocket_provider_error(error: http_client::Error) -> ProviderError {
     let provider_request_id = error.non_success_headers().and_then(|headers| {
-        crate::providers::internal::request_id_from_headers(headers, REQUEST_ID_HEADER)
+        crate::driver::http_transport::request_id_from(headers, REQUEST_ID_HEADER)
     });
     ProviderError::from_transport_error(error).with_provider_request_id(provider_request_id)
 }
 
-/// Construct Responses WebSocket sessions from a bound wire and a supplied backend.
-pub trait ResponsesWebSocketExt {
-    /// Start configuring a websocket session for this wire's model.
-    fn responses_websocket_builder(&self) -> ResponsesWebSocketSessionBuilder;
-
-    /// Open a websocket session over `backend`, with default options.
-    fn responses_websocket_with<W>(
-        &self,
-        backend: &W,
-    ) -> impl std::future::Future<Output = Result<ResponsesWebSocketSession, ProviderError>>
-    + WasmCompatSend
-    where
-        W: WebSocketClientExt + WasmCompatSync,
-        Self: WasmCompatSync;
-}
-
-impl<H> ResponsesWebSocketExt for Bound<Responses, H> {
-    fn responses_websocket_builder(&self) -> ResponsesWebSocketSessionBuilder {
+impl<T> Model<Responses, T> {
+    /// Start configuring a Responses WebSocket session for this model. Open
+    /// it with [`connect_with`](ResponsesWebSocketSessionBuilder::connect_with)
+    /// and a backend, or, under the `tungstenite` feature, with
+    /// [`connect`](ResponsesWebSocketSessionBuilder::connect).
+    pub fn responses_websocket(&self) -> ResponsesWebSocketSessionBuilder {
         ResponsesWebSocketSessionBuilder::new(self.wire.clone())
-    }
-
-    fn responses_websocket_with<W>(
-        &self,
-        backend: &W,
-    ) -> impl std::future::Future<Output = Result<ResponsesWebSocketSession, ProviderError>>
-    + WasmCompatSend
-    where
-        W: WebSocketClientExt + WasmCompatSync,
-        Self: WasmCompatSync,
-    {
-        let builder = self.responses_websocket_builder();
-        async move { builder.connect_with(backend).await }
     }
 }
 

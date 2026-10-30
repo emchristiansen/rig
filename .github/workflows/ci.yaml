@@ -28,7 +28,9 @@ concurrency:
 jobs:
   # Formatting, the migration-guide preamble, CWD-independent fixture paths,
   # the browser worker's JavaScript test, sibling-file test layout, the
-  # scenario catalog, and xtask's own tests. Compiles only xtask.
+  # scenario catalog, xtask's own tests, the cassette acceptance index and
+  # the reply bank.
+  # Compiles only xtask.
   guards:
     name: stable / guards
     runs-on: ubuntu-latest
@@ -45,6 +47,10 @@ jobs:
         run: cargo xtask verify --check source-guards
       - if: ${{ !cancelled() }}
         run: cargo xtask verify --check tooling
+      - if: ${{ !cancelled() }}
+        run: cargo xtask verify --check acceptance
+      - if: ${{ !cancelled() }}
+        run: cargo xtask verify --check bank
 
   # CHANGELOG.md, crates/*/CHANGELOG.md, MIGRATING.md and docs/migrations/ are
   # written on the release PR only. Release PRs (a `release-plz-*` head or the
@@ -97,10 +103,10 @@ jobs:
           save-if: ${{ github.repository == '0xPlaygrounds/rig' && github.event_name == 'push' }}
       - run: cargo xtask verify --check default-tests
 
-  # The required parity lane owns the root agent/ECS matrices and world
-  # golden replay; default-tests and bus-verification exclude these tests.
-  ecs-parity:
-    name: stable / ecs parity
+  # The effect-corpus lane owns the agent golden producers and the
+  # golden-pairing guard; default-tests and bus-verification exclude them.
+  effect-corpus:
+    name: stable / effect corpus
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -110,7 +116,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           save-if: ${{ github.repository == '0xPlaygrounds/rig' && github.event_name == 'push' }}
-      - run: cargo xtask verify --check ecs-parity
+      - run: cargo xtask verify --check effect-corpus
 
   # Cross-crate contract tripwires, each with its own feature configuration:
   # rig-core/rig-agent under all features with zero retries for the telemetry
@@ -150,6 +156,35 @@ jobs:
         with:
           save-if: ${{ github.repository == '0xPlaygrounds/rig' && github.event_name == 'push' }}
       - run: cargo xtask verify --check derive
+
+  # The coverage gate's cheap parts: line and branch coverage of every
+  # production file, from an instrumented all-features run of the local
+  # nextest profile, and the cassette corpus's request facts and reply
+  # shapes, each against crates/rig-cassette/coverage. Mutation is too slow
+  # for every PR; `cargo xtask coverage --check --mutants` runs it locally.
+  # No warm cache: the instrumented build shares no artifacts with the rest.
+  # A failed run prints the unstable.tsv rows for every lost region and
+  # uploads its measurement, so a race this runner exposes can be adopted.
+  coverage:
+    name: stable / coverage gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/rust-setup
+        with:
+          components: llvm-tools
+          nextest: "true"
+          protoc: "true"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - run: cargo xtask verify --check coverage
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-measurement
+          path: target/coverage/*.tsv
+          if-no-files-found: ignore
 
   # Every interleaving of the bus's wait/wake models under loom.
   loom:
@@ -227,9 +262,9 @@ jobs:
           save-if: ${{ github.repository == '0xPlaygrounds/rig' && github.event_name == 'push' }}
       - run: cargo xtask verify --check wasm-rig-core
       - if: ${{ !cancelled() }}
-        run: cargo xtask verify --check wasm-rig-cassette
+        run: cargo xtask verify --check wasm-rig-http
       - if: ${{ !cancelled() }}
-        run: cargo xtask verify --check wasm-rig-ecs
+        run: cargo xtask verify --check wasm-rig-cassette
       - if: ${{ !cancelled() }}
         run: cargo xtask verify --check wasm-rig-reqwest
       - if: ${{ !cancelled() }}
@@ -269,11 +304,3 @@ jobs:
       - env:
           CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
         run: cargo xtask verify --check wasm-rig-agent-bus_wasm
-      - if: ${{ !cancelled() }}
-        env:
-          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
-        run: cargo xtask verify --check wasm-rig-ecs-bus_wasm
-      - if: ${{ !cancelled() }}
-        env:
-          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
-        run: cargo xtask verify --check wasm-rig-ecs-run_wasm

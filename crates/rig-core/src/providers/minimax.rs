@@ -1,14 +1,16 @@
 //! MiniMax's endpoints and model identifiers.
 //!
 //! Global and China configurations support chat-completions and Messages wires,
-//! using `MINIMAX_API_KEY`.
+//! using `MINIMAX_API_KEY`. [`from_env`] and [`new`] build a client on the
+//! chat-completions [`MINIMAX`](crate::providers::openai::wire::MINIMAX)
+//! dialect; [`anthropic_from_env`] and [`anthropic_new`] build a Messages-format
+//! client.
 //!
 //! ```no_run
 //! use rig_core::providers::minimax;
-//! use rig_core::providers::openai::wire::{MINIMAX, OpenAI};
 //!
 //! # fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let model = OpenAI::from_env_with(&MINIMAX)?.chat(minimax::MINIMAX_M2_7);
+//! let model = minimax::from_env()?.chat(minimax::MINIMAX_M2_7);
 //! # let _ = model;
 //! # Ok(())
 //! # }
@@ -37,3 +39,25 @@ pub const MINIMAX_M2_1: &str = "MiniMax-M2.1";
 pub const MINIMAX_M2_1_HIGHSPEED: &str = "MiniMax-M2.1-highspeed";
 /// `MiniMax-M2`
 pub const MINIMAX_M2: &str = "MiniMax-M2";
+
+/// Whether MiniMax `model` reads images: M2 models are text only, and M3
+/// reads images. The name is matched in any case, as gateways lowercase it.
+/// Every wire MiniMax serves applies this rule to an id the catalog does not
+/// list.
+pub(crate) fn reads_images(model: &str) -> bool {
+    !model.to_ascii_lowercase().starts_with("minimax-m2")
+}
+
+pub mod extension;
+
+/// The provider key: the dialect name, a reply's `Origin::provider` and
+/// the typed provider-options key.
+pub const PROVIDER_NAME: &str = "minimax";
+
+crate::client::macros::openai_vendor!(crate::providers::openai::wire::MINIMAX, "MiniMax");
+crate::client::macros::anthropic_vendor!(
+    crate::providers::anthropic::wire::MINIMAX,
+    "MiniMax",
+    anthropic_from_env,
+    anthropic_new
+);

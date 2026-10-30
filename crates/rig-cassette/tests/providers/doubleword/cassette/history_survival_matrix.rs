@@ -1,15 +1,14 @@
 //! Doubleword history survival: tool-call ids across three prompts.
 
-use rig::completion::CompletionModel;
-
-use super::super::support::{BoundDoubleword, with_doubleword_cassette};
+use super::super::support::with_doubleword_cassette;
 use crate::history_survival::driver::{Cell, Expect, Transport};
+use rig_test_support::cassette_models::OpenAiModels;
 
 fn params() -> Option<serde_json::Value> {
     None
 }
 
-fn model(client: BoundDoubleword, cell: Cell) -> impl CompletionModel + 'static {
+fn model(client: OpenAiModels, cell: Cell) -> rig::Model<rig::providers::openai::wire::OpenAiWire> {
     client.completion(cell.model)
 }
 
@@ -18,6 +17,7 @@ const fn cell(transport: Transport, expect: Expect) -> Cell {
         provider: "doubleword",
         model: rig::providers::doubleword::QWEN3_5_397B_A17B,
         params,
+        options: crate::history_survival::Options::none,
         max_tokens: 2048,
         transport,
         expect,

@@ -20,8 +20,8 @@ mod recorder;
 mod replay;
 
 pub use log::{
-    CHECKPOINT_FORMAT, Checkpoint, EffectLog, LogHeader, ProgramIdentity, RecordedStreamError,
-    stable_hash,
+    CHECKPOINT_FORMAT, Checkpoint, EffectLog, LogHeader, ProgramIdentity, RecordedStreamDone,
+    RecordedStreamError, canonical_local_ids, stable_hash,
 };
 pub use recorder::EffectLogRecorder;
 pub use replay::{EffectLogReplayer, ReplayRefusals, RequestCheck};

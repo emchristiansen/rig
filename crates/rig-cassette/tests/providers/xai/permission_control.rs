@@ -4,7 +4,6 @@ use anyhow::Result;
 use rig::agent::{
     AgentHook, DispatchAction, DispatchEvent, OutcomeAction, OutcomeEvent, stream_to_stdout,
 };
-use rig::prelude::*;
 use rig::providers::xai;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
@@ -179,8 +178,7 @@ async fn permission_control_prompt_example() -> Result<()> {
         |client| async move {
             let cleanup = FileCleanup::new("blocking")?;
 
-            let agent = client
-                .agent(xai::GROK_4)
+            let agent = rig::AgentBuilder::new(client.completion(xai::GROK_4))
                 .preamble("You are a helpful assistant that can read files using different methods.")
                 .tool(ReadFileHead {
                     path: cleanup.path().to_path_buf(),
@@ -188,6 +186,7 @@ async fn permission_control_prompt_example() -> Result<()> {
                 .tool(ReadFileTail {
                     path: cleanup.path().to_path_buf(),
                 })
+                .additional_params(serde_json::json!({ "store": false }))
                 .build();
 
             let call_count = Arc::new(AtomicUsize::new(0));
@@ -223,8 +222,7 @@ async fn permission_control_streaming_example() -> Result<()> {
         |client| async move {
             let cleanup = FileCleanup::new("streaming")?;
 
-            let agent = client
-                .agent(xai::GROK_4)
+            let agent = rig::AgentBuilder::new(client.completion(xai::GROK_4))
                 .preamble("You are a helpful assistant that can read files using different methods.")
                 .tool(ReadFileHead {
                     path: cleanup.path().to_path_buf(),
@@ -232,6 +230,7 @@ async fn permission_control_streaming_example() -> Result<()> {
                 .tool(ReadFileTail {
                     path: cleanup.path().to_path_buf(),
                 })
+                .additional_params(serde_json::json!({ "store": false }))
                 .build();
 
             let call_count = Arc::new(AtomicUsize::new(0));
@@ -252,7 +251,7 @@ async fn permission_control_streaming_example() -> Result<()> {
 
             let final_response = stream_to_stdout(&mut stream).await?;
             let last = last_result.lock().expect("lock last_result").clone();
-            assert_nonempty_response(final_response.output());
+            assert_nonempty_response(&final_response.output());
             anyhow::ensure!(
                 final_response
                     .output()

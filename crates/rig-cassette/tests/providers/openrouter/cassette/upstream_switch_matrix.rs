@@ -1,31 +1,32 @@
-//! Reasoning through OpenRouter belongs to the upstream family that produced
-//! it. A conversation that moves between families inside OpenRouter must not
-//! forward one family's signatures to another, and the home family's
-//! reasoning must return intact when the conversation comes back.
+//! Reasoning through OpenRouter replays only to the model that produced it.
+//! A conversation that moves to another model, of any family, sends that
+//! model the reasoning as plain text and no signature or ciphertext, and the
+//! home model's signed reasoning returns intact when the conversation comes
+//! back.
 //!
 //! The switch cells run a Claude tool turn, continue on Gemini, then return
 //! to Claude, all through OpenRouter. The same-family cells continue a Claude
-//! tool turn on another Claude model. Each runs on the chat route, and the
+//! tool turn on another Claude model, which is another model too. Each runs on the chat route, and the
 //! `responses_` cells repeat them on OpenRouter's Responses route, where
 //! Claude's signature rides beside the reasoning item. Each is checked from
 //! the recorded bytes: which signatures and reasoning texts every request
 //! carries.
 
 use futures::StreamExt;
-use rig::completion::{CompletionModel, CompletionRequest, ToolDefinition};
-use rig::message::{AssistantContent, Message, ToolResultContent, UserContent};
+use rig::completion::{CompletionRequest, ToolDefinition};
+use rig::message::{AssistantContent, AssistantMessage, Message, ToolResultContent, UserContent};
+use rig_test_support::cassette_models::OpenAiModels;
 use serde_json::{Value, json};
 
-use super::super::support::{BoundOpenRouter, with_openrouter_cassette};
+use super::super::support::with_openrouter_cassette;
 
 const CLAUDE: &str = "anthropic/claude-haiku-4.5";
-const CLAUDE_SONNET: &str = "anthropic/claude-sonnet-4.6";
 const GEMINI: &str = "google/gemini-3-flash-preview";
 const CODE: &str = "amber-5521";
 
 fn lookup() -> ToolDefinition {
     ToolDefinition {
-        name: "lookup_code".to_owned(),
+        name: rig_core::message::ToolName::new("lookup_code").expect("tool name"),
         description: "Return the code stored for a record. Always call it before answering."
             .to_owned(),
         parameters: json!({
@@ -37,22 +38,15 @@ fn lookup() -> ToolDefinition {
 }
 
 fn request(route: Route, history: Vec<Message>) -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        chat_history: history,
-        documents: vec![],
-        tools: vec![lookup()],
-        temperature: None,
-        max_tokens: Some(4096),
-        tool_choice: None,
-        // The Responses route takes an effort, not a token budget.
-        additional_params: Some(match route {
-            Route::Chat => json!({ "reasoning": { "max_tokens": 1024 } }),
-            Route::Responses => json!({ "reasoning": { "effort": "low" } }),
-        }),
-        output_schema: None,
-        record_telemetry_content: false,
-    }
+    let mut request = CompletionRequest::from(history);
+    request.tools = vec![lookup()];
+    request.max_tokens = Some(4096);
+    // The Responses route takes an effort, not a token budget.
+    request.options = rig::completion::GenerationOptions::default().reasoning(match route {
+        Route::Chat => rig::completion::Reasoning::Budget { tokens: 1024 },
+        Route::Responses => rig::completion::Reasoning::Effort(rig::completion::Effort::Low),
+    });
+    request
 }
 
 /// Which OpenRouter endpoint a cell drives.
@@ -63,12 +57,12 @@ enum Route {
 }
 
 async fn turn(
-    client: &BoundOpenRouter,
+    client: &OpenAiModels,
     route: Route,
     model: &str,
     history: Vec<Message>,
     streamed: bool,
-) -> Vec<AssistantContent> {
+) -> AssistantMessage {
     let request = request(route, history);
     match route {
         Route::Chat => run(client.completion(model), request, streamed).await,
@@ -76,28 +70,30 @@ async fn turn(
     }
 }
 
-async fn run<M: CompletionModel>(
-    model: M,
+/// The turn the model answered, with who answered it.
+async fn run<W, T>(
+    model: rig::driver::Model<W, T>,
     request: CompletionRequest,
     streamed: bool,
-) -> Vec<AssistantContent> {
-    if !streamed {
-        return model
-            .completion(request)
-            .await
-            .expect("the turn completes")
-            .choice
-            .to_vec();
-    }
-    let mut stream = model.stream(request).await.expect("the stream opens");
-    while let Some(item) = stream.next().await {
-        item.expect("a stream item");
-    }
-    stream.finish().expect("a terminal record").choice.to_vec()
+) -> AssistantMessage
+where
+    W: rig::wire::Wire<Op = rig::operation::Completion>,
+    T: rig::driver::Transport<W>,
+{
+    let response = if streamed {
+        let mut stream = model.stream(request).expect("the stream opens");
+        while let Some(item) = stream.next().await {
+            item.expect("a stream item");
+        }
+        stream.finish().await.expect("a terminal record")
+    } else {
+        model.call(request).await.expect("the turn completes")
+    };
+    response.head().with_content(response.choice.clone())
 }
 
-fn text(choice: &[AssistantContent]) -> String {
-    choice
+fn text(turn: &AssistantMessage) -> String {
+    turn.content
         .iter()
         .filter_map(|content| match content {
             AssistantContent::Text(text) => Some(text.text.as_str()),
@@ -107,48 +103,37 @@ fn text(choice: &[AssistantContent]) -> String {
 }
 
 /// A Claude tool turn answered: the prompt, the reply, and the result.
-async fn claude_tool_turn(client: &BoundOpenRouter, route: Route, streamed: bool) -> Vec<Message> {
+async fn claude_tool_turn(client: &OpenAiModels, route: Route, streamed: bool) -> Vec<Message> {
     let prompt = Message::user("Think it through, then call lookup_code for record alpha.");
     let first = turn(client, route, CLAUDE, vec![prompt.clone()], streamed).await;
     let call = first
-        .iter()
-        .find_map(|content| match content {
-            AssistantContent::ToolCall(call) => Some(call.clone()),
-            _ => None,
-        })
+        .tool_calls()
+        .next()
+        .cloned()
         .unwrap_or_else(|| panic!("Claude calls lookup_code: {first:?}"));
     vec![
         prompt,
-        Message::Assistant {
-            id: None,
-            content: first.into_iter().collect(),
-        },
+        Message::Assistant(first),
         Message::User {
-            content: vec![UserContent::tool_result_for(
+            content: vec![UserContent::tool_result(
                 call.id.clone(),
-                call.provider.clone(),
                 call.function.name.clone(),
                 vec![ToolResultContent::text(format!(
                     "record alpha: code {CODE}"
                 ))],
-            )]
-            .into_iter()
-            .collect(),
+            )],
         },
     ]
 }
 
-async fn switch(client: BoundOpenRouter, route: Route, streamed: bool) {
+async fn switch(client: OpenAiModels, route: Route, streamed: bool) {
     let mut history = claude_tool_turn(&client, route, streamed).await;
     history.push(Message::user(
         "Without calling any tool, repeat the code you were given, exactly.",
     ));
     let on_gemini = turn(&client, route, GEMINI, history.clone(), streamed).await;
     assert!(text(&on_gemini).contains(CODE), "{on_gemini:?}");
-    history.push(Message::Assistant {
-        id: None,
-        content: on_gemini.into_iter().collect(),
-    });
+    history.push(Message::Assistant(on_gemini));
     history.push(Message::user(
         "Without calling any tool, say the code once more, in uppercase.",
     ));
@@ -157,15 +142,6 @@ async fn switch(client: BoundOpenRouter, route: Route, streamed: bool) {
         text(&home).to_uppercase().contains(&CODE.to_uppercase()),
         "{home:?}"
     );
-}
-
-async fn same_family(client: BoundOpenRouter, route: Route, streamed: bool) {
-    let mut history = claude_tool_turn(&client, route, streamed).await;
-    history.push(Message::user(
-        "Now report the code, without calling any tool.",
-    ));
-    let other = turn(&client, route, CLAUDE_SONNET, history, streamed).await;
-    assert!(text(&other).contains(CODE), "{other:?}");
 }
 
 /// Every reasoning value in `value`: `opaque` collects signatures and
@@ -224,13 +200,12 @@ fn reasoning_values(value: &Value, opaque: &mut Vec<String>, all: &mut Vec<Strin
     }
 }
 
-/// Each exchange's request, as sent, and the opaque and all reasoning values
-/// its reply delivered.
+/// Each exchange's request, as sent, and the opaque reasoning values its
+/// reply delivered.
 struct Exchange {
     request: Value,
     sent: String,
     opaque: Vec<String>,
-    all: Vec<String>,
 }
 
 fn exchanges(scenario: &str) -> Vec<Exchange> {
@@ -246,7 +221,6 @@ fn exchanges(scenario: &str) -> Vec<Exchange> {
                 request,
                 sent,
                 opaque,
-                all,
             }
         })
         .collect()
@@ -269,10 +243,10 @@ fn assert_switch_recorded(scenario: &str) {
     );
     assert!(
         turns[0]
-            .all
+            .opaque
             .iter()
             .all(|value| !turns[1].sent.contains(value.as_str())),
-        "no Claude reasoning reaches Gemini"
+        "no Claude signature reaches Gemini"
     );
     let back_home = carried(&turns[2].request);
     assert!(
@@ -284,24 +258,10 @@ fn assert_switch_recorded(scenario: &str) {
     );
     assert!(
         turns[1]
-            .all
+            .opaque
             .iter()
             .all(|value| !turns[2].sent.contains(value.as_str())),
-        "no Gemini reasoning reaches Claude"
-    );
-}
-
-fn assert_same_family_recorded(scenario: &str) {
-    let turns = exchanges(scenario);
-    assert_eq!(turns.len(), 2, "a Claude turn and its continuation");
-    assert!(
-        !turns[0].opaque.is_empty(),
-        "Claude delivered signed reasoning"
-    );
-    let next = carried(&turns[1].request);
-    assert!(
-        turns[0].opaque.iter().all(|value| next.contains(value)),
-        "the family's signed reasoning continues intact on another Claude model"
+        "no Gemini signature reaches Claude"
     );
 }
 
@@ -324,24 +284,6 @@ async fn switch_streamed() {
 }
 
 #[tokio::test]
-async fn same_family_unary() {
-    with_openrouter_cassette("upstream_switch_matrix/same_family_unary", |client| {
-        same_family(client, Route::Chat, false)
-    })
-    .await;
-    assert_same_family_recorded("upstream_switch_matrix/same_family_unary");
-}
-
-#[tokio::test]
-async fn same_family_streamed() {
-    with_openrouter_cassette("upstream_switch_matrix/same_family_streamed", |client| {
-        same_family(client, Route::Chat, true)
-    })
-    .await;
-    assert_same_family_recorded("upstream_switch_matrix/same_family_streamed");
-}
-
-#[tokio::test]
 async fn responses_switch_unary() {
     with_openrouter_cassette("upstream_switch_matrix/responses_switch_unary", |client| {
         switch(client, Route::Responses, false)
@@ -358,24 +300,4 @@ async fn responses_switch_streamed() {
     )
     .await;
     assert_switch_recorded("upstream_switch_matrix/responses_switch_streamed");
-}
-
-#[tokio::test]
-async fn responses_same_family_unary() {
-    with_openrouter_cassette(
-        "upstream_switch_matrix/responses_same_family_unary",
-        |client| same_family(client, Route::Responses, false),
-    )
-    .await;
-    assert_same_family_recorded("upstream_switch_matrix/responses_same_family_unary");
-}
-
-#[tokio::test]
-async fn responses_same_family_streamed() {
-    with_openrouter_cassette(
-        "upstream_switch_matrix/responses_same_family_streamed",
-        |client| same_family(client, Route::Responses, true),
-    )
-    .await;
-    assert_same_family_recorded("upstream_switch_matrix/responses_same_family_streamed");
 }

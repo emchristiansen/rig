@@ -29,7 +29,7 @@ pub struct InvalidCallId(pub String);
 
 impl From<InvalidCallId> for ProviderError {
     fn from(error: InvalidCallId) -> Self {
-        ProviderError::Request(Box::new(error))
+        ProviderError::request(error)
     }
 }
 
@@ -140,9 +140,9 @@ impl LiveCalls {
     /// the realtime session id. Refuses a provider whose dialect does not
     /// speak the Codex contract.
     pub fn new(provider: OpenAI) -> Result<Self, NotTheCodexBackend> {
-        if provider.dialect.quirks.responses.contract != ResponsesContract::Codex {
+        if provider.config().dialect.quirks.responses.contract != ResponsesContract::Codex {
             return Err(NotACodexWire {
-                dialect: provider.dialect.name,
+                dialect: provider.config().dialect.name,
             });
         }
         let identity = CodexIdentity::generate();
@@ -242,7 +242,7 @@ impl LiveCalls {
         }
         let url = format!(
             "{}/{REALTIME_CALLS_PATH}?{REALTIME_CALLS_QUERY}",
-            self.provider.base_url.trim_end_matches('/')
+            self.provider.config().base_url.trim_end_matches('/')
         );
         let body = serde_json::to_vec(&Body {
             sdp: offer_sdp,
@@ -276,10 +276,9 @@ impl LiveCalls {
         &self,
         builder: http::request::Builder,
     ) -> Result<http::request::Builder, EncodeError> {
-        let mut builder = self
-            .provider
-            .identify(self.provider.authenticate(builder))?;
-        if let Some(account_id) = &self.provider.account_id {
+        let config = self.provider.config();
+        let mut builder = config.identify(config.authenticate(builder))?;
+        if let Some(account_id) = &config.account_id {
             builder = builder.header("ChatGPT-Account-Id", account_id);
         }
         Ok(self.request_headers.stamp(
@@ -293,13 +292,13 @@ impl LiveCalls {
 
     /// The reply header naming the provider's request id.
     pub(crate) fn request_id_header(&self) -> Option<&'static str> {
-        self.provider.dialect.request_id_header
+        self.provider.config().dialect.request_id_header
     }
 
     /// The credential source the driver reads once for each request, when
     /// the provider has one.
     pub(crate) fn credential_stamp(&self) -> Option<CredentialStamp> {
-        self.provider.credential_stamp()
+        self.provider.config().credential_stamp()
     }
 }
 

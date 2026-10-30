@@ -22,44 +22,43 @@ use lancedb::{
     query::{QueryBase, VectorQuery},
 };
 use rig_core::{
-    embeddings::embedding::EmbeddingModel,
     vector_store::{
-        VectorStoreError, VectorStoreIndex,
+        VectorSearchIdResult, VectorSearchResult, VectorStoreError, VectorStoreIndex,
         request::{FilterError, SearchFilter, VectorSearchRequest},
     },
     wasm_compat::WasmCompatSend,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use utils::{FilterTableColumns, QueryToJson};
+use utils::{execute_query, filter_embeddings};
 
 mod utils;
 
 /// Vector index over a LanceDB table.
 ///
-/// Queries are embedded with the same model `M` that populated the table, so
+/// Queries are embedded with the same model that populated the table, so
 /// results are meaningless under another model. See [`LanceDbVectorIndex::top_n`]
 /// for a worked example.
-pub struct LanceDbVectorIndex<M> {
-    model: M,
+pub struct LanceDbVectorIndex {
+    model: rig_core::DynModel<rig_core::operation::Embedding>,
     table: lancedb::Table,
     /// Column holding each record's id.
     id_field: String,
     search_params: SearchParams,
 }
 
-impl<M: EmbeddingModel> LanceDbVectorIndex<M> {
+impl LanceDbVectorIndex {
     /// Creates an index over an existing table whose ids live in `id_field`.
     /// The table is not inspected, so a wrong column surfaces at query time.
     pub async fn new(
         table: lancedb::Table,
-        model: M,
+        model: impl Into<rig_core::DynModel<rig_core::operation::Embedding>>,
         id_field: &str,
         search_params: SearchParams,
     ) -> Result<Self, lancedb::Error> {
         Ok(Self {
             table,
-            model,
+            model: model.into(),
             id_field: id_field.to_string(),
             search_params,
         })
@@ -351,23 +350,22 @@ impl SearchParams {
     }
 }
 
-impl<M: EmbeddingModel> VectorStoreIndex for LanceDbVectorIndex<M> {
+impl VectorStoreIndex for LanceDbVectorIndex {
     type Filter = LanceDBFilter;
 
-    /// Returns matches as `(distance, id, row)` with embedding columns projected
+    /// Returns matches scored by distance, with embedding columns projected
     /// out. A row missing its distance scores zero, and a row whose id column is
     /// absent or non-textual gets a placeholder id.
     ///
     /// # Example
     /// ```no_run
-    /// use rig_core::providers::openai::{self, wire::OpenAI};
+    /// use rig_core::providers::openai::{self, OpenAI};
     /// use rig_core::vector_store::VectorStoreIndex;
     /// use rig_core::vector_store::request::VectorSearchRequest;
     /// use rig_lancedb::{LanceDbVectorIndex, SearchParams};
-    /// use rig_reqwest::prelude::*;
     ///
     /// # async fn example(table: lancedb::Table) -> Result<(), anyhow::Error> {
-    /// let openai_client = OpenAI::from_env()?.bound()?;
+    /// let openai_client = OpenAI::from_env()?;
     /// let model = openai_client.embedding(openai::TEXT_EMBEDDING_ADA_002, None);
     /// let vector_store_index =
     ///     LanceDbVectorIndex::new(table, model, "id", SearchParams::default()).await?;
@@ -384,8 +382,13 @@ impl<M: EmbeddingModel> VectorStoreIndex for LanceDbVectorIndex<M> {
     async fn top_n<T: DeserializeOwned + WasmCompatSend>(
         &self,
         req: VectorSearchRequest<LanceDBFilter>,
-    ) -> Result<Vec<(f64, String, T)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchResult<T>>, VectorStoreError> {
         let prompt_embedding = self.model.embed_text(req.query()).await?;
+        let schema = self
+            .table
+            .schema()
+            .await
+            .map_err(VectorStoreError::datastore)?;
 
         let mut query = self
             .table
@@ -393,36 +396,17 @@ impl<M: EmbeddingModel> VectorStoreIndex for LanceDbVectorIndex<M> {
             .map_err(VectorStoreError::datastore)?
             .limit(req.samples() as usize)
             .distance_range(None, req.threshold().map(|x| x as f32))
-            .select(lancedb::query::Select::Columns(
-                self.table
-                    .schema()
-                    .await
-                    .map_err(VectorStoreError::datastore)?
-                    .filter_embeddings(),
-            ));
+            .select(lancedb::query::Select::Columns(filter_embeddings(&schema)));
 
         if let Some(filter) = req.filter() {
             query = query.only_if(filter.clone().into_inner()?);
         }
 
-        self.build_query(query)
-            .execute_query()
+        execute_query(&self.build_query(query))
             .await?
             .into_iter()
             .enumerate()
-            .map(|(i, value)| {
-                Ok((
-                    match value.get("_distance") {
-                        Some(Value::Number(distance)) => distance.as_f64().unwrap_or_default(),
-                        _ => 0.0,
-                    },
-                    match value.get(self.id_field.as_str()) {
-                        Some(Value::String(id)) => id.clone(),
-                        _ => format!("unknown{i}"),
-                    },
-                    serde_json::from_value(value).map_err(VectorStoreError::JsonError)?,
-                ))
-            })
+            .map(|(i, value)| search_result(value, &self.id_field, i))
             .collect()
     }
 
@@ -431,7 +415,7 @@ impl<M: EmbeddingModel> VectorStoreIndex for LanceDbVectorIndex<M> {
     async fn top_n_ids(
         &self,
         req: VectorSearchRequest<LanceDBFilter>,
-    ) -> Result<Vec<(f64, String)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchIdResult>, VectorStoreError> {
         let prompt_embedding = self.model.embed_text(req.query()).await?;
 
         let mut query = self
@@ -447,22 +431,45 @@ impl<M: EmbeddingModel> VectorStoreIndex for LanceDbVectorIndex<M> {
             query = query.only_if(filter.clone().into_inner()?);
         }
 
-        self.build_query(query)
-            .execute_query()
+        execute_query(&self.build_query(query))
             .await?
             .into_iter()
-            .map(|value| {
-                Ok((
-                    match value.get("distance") {
-                        Some(Value::Number(distance)) => distance.as_f64().unwrap_or_default(),
-                        _ => 0.0,
-                    },
-                    match value.get(self.id_field.as_str()) {
-                        Some(Value::String(id)) => id.clone(),
-                        _ => "".to_string(),
-                    },
-                ))
-            })
+            .map(|value| Ok(search_id_result(&value, &self.id_field)))
             .collect()
     }
 }
+
+fn search_distance(value: &Value) -> f64 {
+    match value.get("_distance") {
+        Some(Value::Number(distance)) => distance.as_f64().unwrap_or_default(),
+        _ => 0.0,
+    }
+}
+
+fn search_result<T: DeserializeOwned>(
+    value: Value,
+    id_field: &str,
+    index: usize,
+) -> Result<VectorSearchResult<T>, VectorStoreError> {
+    Ok(VectorSearchResult {
+        score: search_distance(&value),
+        id: match value.get(id_field) {
+            Some(Value::String(id)) => id.clone(),
+            _ => format!("unknown{index}"),
+        },
+        document: serde_json::from_value(value).map_err(VectorStoreError::JsonError)?,
+    })
+}
+
+fn search_id_result(value: &Value, id_field: &str) -> VectorSearchIdResult {
+    VectorSearchIdResult {
+        score: search_distance(value),
+        id: match value.get(id_field) {
+            Some(Value::String(id)) => id.clone(),
+            _ => "".to_string(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests;

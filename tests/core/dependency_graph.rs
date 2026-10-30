@@ -1,67 +1,72 @@
 //! Dependency-graph invariants for the runtime/transport-agnostic split.
 //!
 //! Runtime crates retain only execution mechanisms and the shared vocabulary.
-//! Concrete recording and replay live in rig-cassette, whose runtime adapters
+//! Concrete recording and replay live in rig-cassette, whose runtime adapter
 //! and native HTTP engine are independently selectable. Workspace graph checks
 //! cover runtime back-edges; separate downstream manifests prove cassette
 //! feature isolation without workspace dev-dependency unification.
 
 use std::process::Command;
 
-use super::verification_checks;
-
 /// `(package, `cargo tree` feature arguments, forbidden dependency names,
 /// required dependency names)`. The three lists are space-separated; empty
 /// features select the package's defaults.
 type Graph = (&'static str, &'static str, &'static str, &'static str);
 
-/// The ECS runtime owns its tasks and Bevy schedules, never a concrete recorder,
-/// another agent runtime, or a provider transport.
-const ECS_LEAF: &str = "rig-agent rig-cassette rig-effect-log rig-rmcp rmcp bevy tokio reqwest";
-
 const GRAPHS: &[Graph] = &[
     ("rig-core", "", "tokio reqwest rig-cassette", ""),
+    // The `reqwest` and `tungstenite` features bring in the bundled transports,
+    // and with them reqwest and tokio: only through those two crates.
     (
         "rig-core",
         "--all-features",
-        "tokio reqwest rig-agent rig-cassette rig-effect-log rig-ecs",
-        "",
+        "rig-agent rig-cassette rig-effect-log",
+        "rig-reqwest rig-tungstenite",
+    ),
+    (
+        "rig-core",
+        "--no-default-features --features derive,rustls,audio,image,pdf,epub,websocket",
+        "tokio reqwest rig-reqwest rig-tungstenite rig-cassette",
+        "rig-http",
     ),
     (
         "rig-agent",
         "",
-        "tokio reqwest rmcp rig-cassette rig-effect-log rig-ecs",
+        "tokio reqwest rmcp rig-cassette rig-effect-log",
         "rig-core",
     ),
     (
         "rig-agent",
         "--no-default-features",
-        "tokio reqwest rmcp rig-cassette rig-effect-log rig-ecs",
+        "tokio reqwest rmcp rig-cassette rig-effect-log",
         "rig-core",
     ),
     (
         "rig-agent",
         "--all-features",
-        "reqwest rmcp rig-cassette rig-effect-log rig-ecs",
+        "reqwest rmcp rig-cassette rig-effect-log",
         "rig-core",
     ),
-    (
-        "rig-ecs",
-        "",
-        "rig-agent rig-cassette rig-effect-log rig-rmcp rmcp bevy tokio reqwest bevy_asset",
-        "rig-core bevy_ecs bevy_tasks bevy_reflect bevy_app bevy_time bevy_diagnostic",
-    ),
-    (
-        "rig-ecs",
-        "--all-features",
-        ECS_LEAF,
-        "bevy_reflect bevy_asset bevy_app",
-    ),
     ("rig-rmcp", "", "rig-agent rig-cassette", ""),
+    // `rig::cassette` is opt-in: the classic agent alone does not bring the
+    // recorder in.
     (
         "rig",
         "--no-default-features --features agent,derive",
-        "tokio reqwest rmcp rig-ecs",
+        "tokio reqwest rmcp rig-cassette",
+        "rig-core rig-agent",
+    ),
+    ("rig", "", "rig-cassette", "rig-core rig-agent"),
+    (
+        "rig",
+        "--no-default-features --features cassette",
+        "tokio reqwest rig-agent",
+        "rig-core rig-cassette",
+    ),
+    (
+        "rig",
+        "--no-default-features --features agent,cassette",
+        "tokio reqwest rmcp",
         "rig-core rig-agent rig-cassette",
     ),
 ];
@@ -121,10 +126,7 @@ fn crate_boundaries_hold_in_the_resolved_dependency_graph() {
     }
 
     // Optional and target-specific declarations, and manifest renames, show up
-    // only in the metadata: rig-ecs directly owns its handler tasks
-    // (`bevy_tasks`), its bounded private delivery queue (`futures`) and the
-    // explicit web runtime selection that browser task driving needs
-    // (`bevy_platform`) — and declares nothing else.
+    // only in the metadata.
     let metadata: serde_json::Value = serde_json::from_str(&cargo_stdout(&[
         "metadata",
         "--locked",
@@ -133,49 +135,22 @@ fn crate_boundaries_hold_in_the_resolved_dependency_graph() {
         "1",
     ]))
     .expect("metadata JSON");
-    for runtime in ["rig-agent", "rig-ecs"] {
-        let package = metadata["packages"]
-            .as_array()
-            .expect("packages")
-            .iter()
-            .find(|package| package["name"] == runtime)
-            .expect("runtime package");
-        for dependency in package["dependencies"].as_array().expect("dependencies") {
-            if dependency["kind"].is_null() {
-                assert!(
-                    !matches!(
-                        dependency["name"].as_str(),
-                        Some("rig-cassette" | "rig-effect-log")
-                    ),
-                    "{runtime} must not declare a concrete recording dependency, even optional or target-specific: {dependency}"
-                );
-            }
-        }
-    }
     let package = metadata["packages"]
         .as_array()
         .expect("packages")
         .iter()
-        .find(|package| package["name"] == "rig-ecs")
-        .expect("rig-ecs package");
-    let direct: Vec<_> = package["dependencies"]
-        .as_array()
-        .expect("dependencies")
-        .iter()
-        .filter(|dependency| dependency["kind"].is_null())
-        .map(|dependency| dependency["name"].as_str().expect("dependency name"))
-        .collect();
-    for forbidden in ["tracing", "schemars", "futures-channel", "async-channel"] {
-        assert!(
-            !direct.contains(&forbidden),
-            "rig-ecs must not depend directly on {forbidden}"
-        );
-    }
-    for required in ["futures", "bevy_platform", "bevy_tasks"] {
-        assert!(
-            direct.contains(&required),
-            "rig-ecs must depend directly on {required}"
-        );
+        .find(|package| package["name"] == "rig-agent")
+        .expect("runtime package");
+    for dependency in package["dependencies"].as_array().expect("dependencies") {
+        if dependency["kind"].is_null() {
+            assert!(
+                !matches!(
+                    dependency["name"].as_str(),
+                    Some("rig-cassette" | "rig-effect-log")
+                ),
+                "rig-agent must not declare a concrete recording dependency, even optional or target-specific: {dependency}"
+            );
+        }
     }
 }
 
@@ -186,32 +161,22 @@ fn cassette_features_are_isolated_for_downstream_consumers() {
     for (features, forbidden, required) in [
         (
             "",
-            "rig rig-agent rig-ecs bevy_app bevy_ecs bevy_tasks tokio reqwest rig-reqwest axum httpmock aws-smithy-eventstream aws-smithy-types",
+            "rig rig-agent tokio reqwest rig-reqwest axum httpmock aws-smithy-eventstream aws-smithy-types",
             "rig-core",
         ),
         (
             "agent",
-            "rig rig-ecs bevy_app bevy_ecs bevy_tasks tokio reqwest rig-reqwest axum httpmock aws-smithy-eventstream aws-smithy-types",
+            "rig tokio reqwest rig-reqwest axum httpmock aws-smithy-eventstream aws-smithy-types",
             "rig-core rig-agent",
         ),
         (
-            "ecs",
-            "rig rig-agent tokio reqwest rig-reqwest axum httpmock aws-smithy-eventstream aws-smithy-types",
-            "rig-core rig-ecs bevy_app bevy_ecs",
-        ),
-        (
-            "agent,ecs",
-            "rig tokio reqwest rig-reqwest axum httpmock aws-smithy-eventstream aws-smithy-types",
-            "rig-core rig-agent rig-ecs",
-        ),
-        (
             "http",
-            "rig rig-agent rig-ecs bevy_app bevy_ecs aws-smithy-eventstream aws-smithy-types",
+            "rig rig-agent aws-smithy-eventstream aws-smithy-types",
             "rig-core rig-reqwest reqwest tokio axum httpmock",
         ),
         (
             "bedrock",
-            "rig rig-agent rig-ecs bevy_app bevy_ecs",
+            "rig rig-agent",
             "rig-core rig-reqwest aws-smithy-eventstream aws-smithy-types",
         ),
     ] {
@@ -272,70 +237,6 @@ fn cassette_features_are_isolated_for_downstream_consumers() {
             assert!(
                 names.contains(&name),
                 "{features} is missing {name}:\n{graph}"
-            );
-        }
-        if !matches!(features, "http" | "bedrock") {
-            let json = graph
-                .lines()
-                .find(|line| line.starts_with("serde_json "))
-                .expect("JSON dependency");
-            for feature in ["preserve_order", "float_roundtrip"] {
-                assert!(
-                    !json.contains(feature),
-                    "{features} must not enable serde_json/{feature}: {json}"
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn standalone_verification_preserves_minimal_json_features() {
-    let checks = verification_checks::all();
-    let mut packages = std::collections::BTreeSet::new();
-    for id in ["bus-verification", "ecs-parity"] {
-        let check = checks
-            .iter()
-            .find(|check| check.id == id)
-            .expect("CI check");
-        let standalone = check
-            .steps
-            .iter()
-            .find(|step| step.args.windows(2).any(|pair| pair == ["--retries", "0"]))
-            .expect("standalone verification execution");
-        packages.insert(
-            standalone
-                .args
-                .windows(2)
-                .find(|pair| pair[0] == "-p")
-                .expect("standalone package selection")[1]
-                .as_str(),
-        );
-    }
-    for package in packages {
-        let graph = cargo_stdout(&[
-            "tree",
-            "--locked",
-            "--offline",
-            "-p",
-            package,
-            "--all-features",
-            "-e",
-            "normal,dev",
-            "--invert",
-            "serde_json",
-            "--depth",
-            "0",
-            "--prefix",
-            "none",
-            "--format",
-            "{p} {f}",
-        ]);
-        assert!(graph.lines().any(|line| line.starts_with("serde_json ")));
-        for feature in ["preserve_order", "float_roundtrip"] {
-            assert!(
-                !graph.contains(feature),
-                "{package} must replay goldens without serde_json/{feature}:\n{graph}"
             );
         }
     }

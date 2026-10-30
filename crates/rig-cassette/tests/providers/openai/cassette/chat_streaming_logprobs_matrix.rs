@@ -1,50 +1,22 @@
-//! Exhaustive matrix for streamed Chat Completions log probabilities.
+//! OpenAI Chat Completions log probabilities across 24 retained fixtures.
 //!
-//! Before this fix, `StreamingChoice` did not model `logprobs`, so serde
-//! discarded every per-token object before the shared compatible adapter saw
-//! it. The blocking provider-native reply retained the same field on
-//! `Choice`; raw streaming therefore carried strictly less provider-native
-//! information.
-//!
-//! The complete input space exercised here is a 2 × 2 × 2 × 3 cross-product:
-//!
-//! | dimension | values |
-//! |---|---|
-//! | transport | blocking control, raw streaming regression |
-//! | model | `gpt-4o-mini`, `gpt-4.1-mini` |
-//! | termination | natural `stop`, one-token `length` |
-//! | top candidates | `top_logprobs` absent, `0`, `2` |
-//!
-//! That is 24 recorded cells. Each one re-derives the exact expected
-//! log-probability object from its fixture and compares it with the serialized
-//! native response. Streaming cells recursively concatenate token arrays in
-//! wire order. The two model families are deliberate: this is shared Chat
-//! Completions metadata rather than a one-model quirk.
-//!
-//! Coverage ledger: the pre-pruning Cartesian product is 24 and no cell was
-//! pruned or replaced by a unit test. Each explicit test below maps to
-//! `crates/rig-cassette/fixtures/cassettes/openai/chat_streaming_logprobs_matrix/<test-name>.yaml`.
-//! Synthetic `logprobs` values (`null`, `{}`, and a non-object) stay in the
-//! shared deserializer's unit tests because a live model cannot be instructed
-//! to emit them. The two inexpensive mini models are stable Chat Completions
-//! controls; every recorded cell asserts the request, provider-native blocking
-//! response or raw-stream terminal, finish reason, and complete probability
-//! payload.
-//!
-//! | recorded cells | exact fixture set |
-//! |---|---|
-//! | all 24 | `crates/rig-cassette/fixtures/cassettes/openai/chat_streaming_logprobs_matrix/{blocking,streaming}_{gpt_4o_mini,gpt_4_1_mini}_{stop,length}_top_{absent,zero,two}.yaml` |
+//! Every declaration preserves its original model, prompt, termination and
+//! top-candidate premise, comparing the current raw document with recorded
+//! probability objects and finish reasons. Streaming token arrays remain in
+//! wire order.
 
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use futures::StreamExt as _;
-use rig::completion::CompletionModel;
-use rig::providers::openai;
-use rig::streaming::StreamEvent;
 use serde_json::{Value, json};
 
-use super::super::support::{OpenAiCassette, with_openai_chat_stream_logprobs_cassette_result};
+use rig::providers::openai::extension::{ChatOptions, OpenAiOptions};
+
+use super::super::support::{
+    OpenAiCassette, openai_options, with_openai_chat_stream_logprobs_cassette_result,
+};
+use rig::completion::CompletionRequest;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Transport {
@@ -87,16 +59,14 @@ struct Observation {
 
 type SharedObservation = Arc<Mutex<Option<Observation>>>;
 
-fn params(cell: Cell) -> Value {
-    let mut params = json!({ "logprobs": true });
-    if let Some(top) = match cell.top {
-        Top::Absent => None,
-        Top::Zero => Some(0),
-        Top::Two => Some(2),
-    } {
-        params["top_logprobs"] = json!(top);
-    }
-    params
+fn options(cell: Cell) -> rig::completion::ProviderOptions {
+    let chat = ChatOptions::new().logprobs(true);
+    let chat = match cell.top {
+        Top::Absent => chat,
+        Top::Zero => chat.top_logprobs(0),
+        Top::Two => chat.top_logprobs(2),
+    };
+    openai_options(OpenAiOptions::new().chat(chat))
 }
 
 fn prompt(cell: Cell) -> &'static str {
@@ -130,19 +100,15 @@ fn model_name(model: ModelVariant) -> &'static str {
 
 async fn run_cell(client: OpenAiCassette, cell: Cell, observed: SharedObservation) -> Result<()> {
     let model = client.openai.chat(model_name(cell.model));
-    let request = model
-        .completion_request(prompt(cell))
-        .additional_params(params(cell))
-        .max_tokens(max_tokens(cell))
-        .build();
+    let request = CompletionRequest::new(prompt(cell))
+        .provider_options(options(cell))
+        .max_tokens(max_tokens(cell));
 
     let observation = match cell.transport {
         Transport::Blocking => {
-            // The provider-native chat-completions reply rides serialized on
-            // `CompletionResponse::raw`; decode it to read the same fields the
-            // old raw surface exposed directly.
-            let response = model.completion(request).await?;
-            let raw: openai::completion::CompletionResponse = serde_json::from_value(response.raw)?;
+            let response = model.call(request).await?;
+            let raw: rig::providers::openai::completion::CompletionResponse =
+                serde_json::from_value(response.raw)?;
             let choice = raw
                 .choices
                 .first()
@@ -153,24 +119,24 @@ async fn run_cell(client: OpenAiCassette, cell: Cell, observed: SharedObservatio
             }
         }
         Transport::Streaming => {
-            let mut stream = model.stream(request).await?;
-            let mut terminal = None;
+            let mut stream = model.stream(request)?;
             while let Some(item) = stream.next().await {
-                if let StreamEvent::Final(record) = item? {
-                    terminal = Some(record);
-                }
+                item?;
             }
-            let terminal = terminal.context("stream should carry a terminal record")?;
-            // The provider-native chat-completions terminal rides serialized
-            // on `StreamFinal::raw`; decode it to prove the shape, then read
-            // the serialized form the way the old raw surface did.
-            let terminal = serde_json::from_value::<
-                openai::wire::StreamingCompletionResponse<openai::completion::Usage>,
-            >(terminal.raw)?;
-            let serialized = serde_json::to_value(terminal)?;
+            let terminal = stream
+                .finish()
+                .await
+                .context("stream should carry a terminal record")?;
+            // The current stream owns a whole native document at finish.
+            let raw: rig::providers::openai::completion::CompletionResponse =
+                serde_json::from_value(terminal.raw)?;
+            let choice = raw
+                .choices
+                .first()
+                .context("streamed whole response should carry a choice")?;
             Observation {
-                logprobs: serialized["logprobs"].clone(),
-                finish_reason: serialized["finish_reason"].clone(),
+                logprobs: choice.logprobs.clone().unwrap_or(Value::Null),
+                finish_reason: json!(choice.finish_reason),
             }
         }
     };

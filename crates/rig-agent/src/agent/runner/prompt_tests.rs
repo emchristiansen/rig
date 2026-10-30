@@ -1,14 +1,13 @@
 use crate::agent::ResponseIdentity;
 use crate::agent::typed::{TypedPromptResponse, deserialize_structured_output};
 use crate::run::response::{CompletionCall, MemoryAppend, PromptResponse};
-use crate::run::transcript::TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER;
-use crate::run::transcript::{assistant_text_from_choice, is_empty_assistant_turn};
+use crate::run::transcript::is_empty_assistant_turn;
 use crate::{
     agent::{
         AgentBuilder,
         hook::{
             AgentHook, DispatchAction, DispatchEvent, HookContext, InvalidToolCallAction,
-            InvalidToolCallContext, OutcomeAction, OutcomeEvent,
+            InvalidToolCallContext, ModelTurnAction, ModelTurnFinished,
         },
     },
     completion::{
@@ -17,22 +16,15 @@ use crate::{
     },
     test_utils::{
         AppendFailingMemory, CountingMemory, FailingMemory, MockAddTool, MockCompletionModel,
-        MockContextProbeTool, MockOperationArgs, MockSubtractTool, MockToolError, MockTurn,
-        SessionId,
+        MockContextProbeTool, MockSubtractTool, MockTurn, SessionId,
     },
-    tool::{Tool, ToolContext},
+    tool::ToolContext,
 };
-use rig_core::completion::message::turn_delivered_no_answer;
 use rig_core::error::ProviderError;
-use rig_core::message::ProviderCallId;
-use rig_core::message::{Text, ToolCall, ToolChoice, ToolFunction, UserContent};
+use rig_core::message::{ToolChoice, UserContent};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicU32, Ordering},
-};
 
 /// rig#2322 — the **blocking** surface enforces the same truncation
 /// contract as the streamed one.
@@ -84,192 +76,6 @@ async fn blocking_prompt_rejects_a_reasoning_only_truncated_turn() {
     assert!(format!("{err:?}").contains("Length"));
 }
 
-/// rig#2322 — and the blocking surface keeps a truncated turn that *did*
-/// answer, with the reason reaching `completion_calls`.
-///
-/// This is the half that proves the blocking plumbing carries the reason
-/// rather than merely erroring: the value has to survive into the returned
-/// `PromptResponse`.
-#[tokio::test]
-async fn blocking_prompt_keeps_partial_output_and_records_the_reason() {
-    let agent = AgentBuilder::new(MockCompletionModel::from_turns([MockTurn::text(
-        "a partial ans",
-    )
-    .with_finish_reason(FinishReason::Length)]))
-    .build();
-
-    let response = agent
-        .prompt("write a long essay")
-        .await
-        .expect("a truncated turn that produced text must still succeed");
-
-    assert_eq!(response.output, "a partial ans");
-    assert_eq!(
-        response
-            .completion_calls
-            .last()
-            .and_then(|call| call.finish_reason.clone()),
-        Some(FinishReason::Length),
-        "the terminal reason must reach the caller on the blocking surface too"
-    );
-}
-
-/// rig#2322 follow-up — every `AssistantContent` variant's answer
-/// classification, pinned one variant at a time.
-///
-/// A unit test rather than a cassette because this is a pure
-/// classification decision over a rig-owned enum: no provider traffic is
-/// involved, and the failure it guards against (a new variant silently
-/// inheriting the wrong bucket) is invisible at the wire level.
-///
-/// The predicate originally used a `_ => false` catch-all, which made
-/// image-only turns read as "no answer" — so a truncated image-generation
-/// turn would have errored despite delivering an image. The match is now
-/// exhaustive; this test pins each arm so a reclassification is deliberate.
-#[test]
-fn answer_classification_covers_every_assistant_content_variant() {
-    let image = AssistantContent::image_base64(
-        "iVBORw0KGgo=",
-        Some(rig_core::message::ImageMediaType::PNG),
-        Some(rig_core::message::ImageDetail::default()),
-    );
-    let reasoning = AssistantContent::Reasoning(rig_core::message::Reasoning::new("thinking"));
-    let tool_call = AssistantContent::ToolCall(ToolCall::from_wire(
-        "call_1".to_string(),
-        ToolFunction::new("add".to_string(), json!({})),
-    ));
-
-    // Delivered an answer.
-    assert!(!turn_delivered_no_answer(&[AssistantContent::text("hi")]));
-    assert!(!turn_delivered_no_answer(std::slice::from_ref(&tool_call)));
-    assert!(
-        !turn_delivered_no_answer(std::slice::from_ref(&image)),
-        "an image IS the answer for an image-generation turn; classifying it \
-             as 'no answer' makes a truncated image turn error despite delivering one"
-    );
-
-    // Delivered nothing.
-    assert!(turn_delivered_no_answer(&[]));
-    assert!(turn_delivered_no_answer(&[AssistantContent::text("")]));
-    assert!(
-        turn_delivered_no_answer(std::slice::from_ref(&reasoning)),
-        "reasoning is scratch work, not an answer"
-    );
-
-    // Mixed: one real item is enough.
-    assert!(!turn_delivered_no_answer(&[
-        reasoning.clone(),
-        AssistantContent::text("answer")
-    ]));
-    assert!(
-        !turn_delivered_no_answer(&[reasoning.clone(), image]),
-        "a thinking image model that produced an image has answered"
-    );
-    assert!(turn_delivered_no_answer(&[
-        reasoning,
-        AssistantContent::text("")
-    ]));
-}
-
-/// rig#2322 follow-up — the two predicates diverge on exactly the shapes
-/// that are **worth recording yet answer nothing**, and that is intentional.
-///
-/// `is_empty_assistant_turn` governs the history push ("does this belong in
-/// the transcript"); `turn_delivered_no_answer` governs the truncation
-/// guard ("did this answer the question"). Two shapes disagree, and for the
-/// same reason: reasoning-only, and an empty text block carrying
-/// `additional_params`. Both are worth recording; neither delivers text.
-///
-/// An earlier version of this test claimed the divergence was reasoning-only
-/// and checked just three agreeing shapes — none of them annotated — so the
-/// second case went unnoticed. The agreeing set is now enumerated
-/// explicitly alongside it.
-#[test]
-fn the_two_turn_predicates_diverge_on_recordable_but_answerless_turns() {
-    let reasoning_only = vec![AssistantContent::Reasoning(
-        rig_core::message::Reasoning::new("t"),
-    )];
-    let annotated_empty_text = vec![AssistantContent::Text(Text {
-        text: String::new(),
-        additional_params: rig_core::message::AdditionalParams::try_from_value(
-            json!({"citations": ["ref"]}),
-        )
-        .expect("citation params should be a JSON object"),
-    })];
-
-    // Divergent: recordable, but no answer was delivered.
-    for choice in [&reasoning_only, &annotated_empty_text] {
-        assert!(
-            !is_empty_assistant_turn(choice),
-            "should be recorded in history: {choice:?}"
-        );
-        assert!(
-            turn_delivered_no_answer(choice),
-            "should count as no answer — the caller receives no text: {choice:?}"
-        );
-    }
-
-    // Agreeing: everything else.
-    for choice in [
-        vec![],
-        vec![AssistantContent::text("")],
-        vec![AssistantContent::text("real")],
-        vec![AssistantContent::image_base64(
-            "iVBORw0KGgo=",
-            Some(rig_core::message::ImageMediaType::PNG),
-            Some(rig_core::message::ImageDetail::default()),
-        )],
-        vec![AssistantContent::ToolCall(ToolCall::from_wire(
-            "call_1".to_string(),
-            ToolFunction::new("add".to_string(), json!({})),
-        ))],
-    ] {
-        assert_eq!(
-            is_empty_assistant_turn(&choice),
-            turn_delivered_no_answer(&choice),
-            "unexpected divergence on {choice:?}"
-        );
-    }
-}
-
-/// rig#2322 follow-up — metadata-only text is **not** an answer, stated as
-/// its own decision rather than left implied by the predicate's code.
-///
-/// A text block with `additional_params` and no text carries provider
-/// metadata (citations, encrypted reasoning references) that is worth
-/// keeping in history, but `assistant_text_from_choice` concatenates
-/// `text.text` alone — so the caller receives `""`. Nothing was answered,
-/// and a turn truncated in that state is a failed turn.
-///
-/// If this is ever reclassified, the run-level consequence is the point to
-/// weigh: it decides whether a truncated annotation-only turn errors or
-/// silently returns an empty string.
-#[test]
-fn metadata_only_text_is_not_an_answer() {
-    let annotated_empty = AssistantContent::Text(Text {
-        text: String::new(),
-        additional_params: rig_core::message::AdditionalParams::try_from_value(
-            json!({"citations": ["ref"]}),
-        )
-        .expect("citation params should be a JSON object"),
-    });
-
-    assert!(turn_delivered_no_answer(std::slice::from_ref(
-        &annotated_empty
-    )));
-    assert_eq!(
-        assistant_text_from_choice(std::slice::from_ref(&annotated_empty)),
-        "",
-        "the caller receives no text, which is why this is not an answer"
-    );
-
-    // The annotation does not suppress a real answer beside it.
-    assert!(!turn_delivered_no_answer(&[
-        annotated_empty,
-        AssistantContent::text("real"),
-    ]));
-}
-
 #[derive(Serialize)]
 struct SerializeOnly {
     value: &'static str,
@@ -313,45 +119,20 @@ fn deserialize_structured_output_tolerates_fences_and_prose() {
 struct PanicOnUnknownToolHook;
 
 impl AgentHook for PanicOnUnknownToolHook {
-    async fn on_outcome(&self, _ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
-        if event.completion().is_some() {
-            panic!("unknown tool response should fail before response hooks run")
-        }
-        OutcomeAction::proceed()
+    // The rejected attempt's completion outcome still fires, observe-only;
+    // the accepted-turn hook must not.
+    async fn on_model_turn_finished(
+        &self,
+        _ctx: &HookContext,
+        _event: ModelTurnFinished<'_>,
+    ) -> ModelTurnAction {
+        panic!("unknown tool response should fail before response hooks run")
     }
     async fn on_dispatch(&self, _ctx: &HookContext, event: DispatchEvent<'_>) -> DispatchAction {
         if event.tool_name().is_some() {
             panic!("unknown tool call should fail before tool hooks run")
         }
         DispatchAction::proceed()
-    }
-}
-
-#[derive(Clone)]
-struct PanicOnToolCallHook;
-
-impl AgentHook for PanicOnToolCallHook {
-    async fn on_dispatch(&self, _ctx: &HookContext, event: DispatchEvent<'_>) -> DispatchAction {
-        if event.tool_name().is_some() {
-            panic!("recovered invalid turn should not invoke normal tool hooks")
-        }
-        DispatchAction::proceed()
-    }
-}
-
-#[derive(Clone)]
-struct SkipDefaultApiAndPanicOnToolCallHook;
-
-impl AgentHook for SkipDefaultApiAndPanicOnToolCallHook {
-    async fn on_invalid_tool_call(
-        &self,
-        ctx: &HookContext,
-        event: &InvalidToolCallContext,
-    ) -> Option<InvalidToolCallAction> {
-        SkipDefaultApiHook.on_invalid_tool_call(ctx, event).await
-    }
-    async fn on_dispatch(&self, ctx: &HookContext, event: DispatchEvent<'_>) -> DispatchAction {
-        PanicOnToolCallHook.on_dispatch(ctx, event).await
     }
 }
 
@@ -366,19 +147,6 @@ impl AgentHook for RepairDefaultApiHook {
     ) -> Option<InvalidToolCallAction> {
         assert_eq!(event.tool_name, "default_api");
         Some(InvalidToolCallAction::repair("add"))
-    }
-}
-
-#[derive(Clone)]
-struct RepairToSubtractHook;
-
-impl AgentHook for RepairToSubtractHook {
-    async fn on_invalid_tool_call(
-        &self,
-        _ctx: &HookContext,
-        _event: &InvalidToolCallContext,
-    ) -> Option<InvalidToolCallAction> {
-        Some(InvalidToolCallAction::repair("subtract"))
     }
 }
 
@@ -398,95 +166,21 @@ impl AgentHook for RetryDefaultApiHook {
     }
 }
 
-#[derive(Clone)]
-struct SkipDefaultApiHook;
-
-impl AgentHook for SkipDefaultApiHook {
-    async fn on_invalid_tool_call(
-        &self,
-        _ctx: &HookContext,
-        _event: &InvalidToolCallContext,
-    ) -> Option<InvalidToolCallAction> {
-        Some(InvalidToolCallAction::skip("default_api is not available"))
-    }
-}
-
-#[derive(Clone, Default)]
-struct RecordingInvalidToolCallHook {
-    contexts: Arc<Mutex<Vec<InvalidToolCallContext>>>,
-}
-
-impl RecordingInvalidToolCallHook {
-    fn observed(&self) -> Vec<InvalidToolCallContext> {
-        self.contexts
-            .lock()
-            .expect("invalid tool context records mutex was poisoned")
-            .clone()
-    }
-}
-
-impl AgentHook for RecordingInvalidToolCallHook {
-    async fn on_invalid_tool_call(
-        &self,
-        _ctx: &HookContext,
-        event: &InvalidToolCallContext,
-    ) -> Option<InvalidToolCallAction> {
-        self.contexts
-            .lock()
-            .expect("invalid tool context records mutex was poisoned")
-            .push(event.clone());
-        None
-    }
-}
-
-#[derive(Clone)]
-struct CountingAddTool {
-    calls: Arc<AtomicU32>,
-}
-
-impl Tool for CountingAddTool {
-    const NAME: &'static str = "add";
-    type Error = MockToolError;
-    type Args = MockOperationArgs;
-    type Output = i32;
-
-    fn description(&self) -> String {
-        MockAddTool.description()
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        MockAddTool.parameters()
-    }
-
-    async fn call(
-        &self,
-        _context: &mut crate::tool::ToolContext,
-        _args: Self::Args,
-    ) -> Result<Self::Output, Self::Error> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(0)
-    }
-}
-
 fn usage(input_tokens: u64, output_tokens: u64) -> Usage {
-    Usage {
-        input_tokens: Some(input_tokens),
-        output_tokens: Some(output_tokens),
-        total_tokens: Some(input_tokens + output_tokens),
-        ..Usage::default()
-    }
+    Usage::new()
+        .input_tokens(input_tokens)
+        .output_tokens(output_tokens)
+        .total_tokens(input_tokens + output_tokens)
 }
 
 #[test]
 fn typed_prompt_response_serializes_with_serialize_only_output() {
     let response = TypedPromptResponse::new(
         SerializeOnly { value: "ok" },
-        Usage {
-            input_tokens: Some(1),
-            output_tokens: Some(2),
-            total_tokens: Some(3),
-            ..Usage::default()
-        },
+        Usage::new()
+            .input_tokens(1)
+            .output_tokens(2)
+            .total_tokens(3),
     );
 
     let json = serde_json::to_string(&response).expect("serialize typed prompt response");
@@ -594,31 +288,30 @@ fn empty_turn_classification_survives_a_serde_round_trip() {
         assert!(is_empty_assistant_turn(&migrated));
     }
 
-    // The old uncanonicalized-`Some({})` hazard is unrepresentable:
-    // `AdditionalParams` has no empty value, so the only way to spell
-    // "no extras" in memory is `None` and live/restored classification
-    // agree by construction.
-    let canonical_absent = vec![AssistantContent::Text(rig_core::message::Text {
-        text: String::new(),
-        additional_params: rig_core::message::AdditionalParams::try_from_value(serde_json::json!(
-            {}
-        ))
-        .expect("object params"),
-    })];
+    // Text with no provider item is empty, live and restored alike.
+    let canonical_absent = vec![AssistantContent::Text(rig_core::message::Text::new(""))];
     assert!(is_empty_assistant_turn(&canonical_absent));
     let restored: Vec<AssistantContent> =
         serde_json::from_value(serde_json::to_value(&canonical_absent).expect("serialize"))
             .expect("deserialize");
     assert!(is_empty_assistant_turn(&restored));
 
-    let annotated: Vec<AssistantContent> = serde_json::from_value(serde_json::json!([
-        {"type": "text", "text": "", "additional_params": {"signature": "sig"}}
-    ]))
-    .expect("deserialize annotated");
+    // An empty block holding a current provider item carries data; one whose
+    // item no longer matches it (an edit) replays as nothing, so it is empty.
+    let annotated =
+        vec![AssistantContent::text("").with_native(serde_json::json!({"signature": "sig"}))];
+    let restored: Vec<AssistantContent> =
+        serde_json::from_value(serde_json::to_value(&annotated).expect("serialize"))
+            .expect("deserialize annotated");
     assert!(
-        !is_empty_assistant_turn(&annotated),
-        "an annotated empty block carries data: {annotated:?}"
+        !is_empty_assistant_turn(&restored),
+        "an annotated empty block carries data: {restored:?}"
     );
+    let stale: Vec<AssistantContent> = serde_json::from_value(serde_json::json!([
+        {"type": "text", "text": "", "native": {"item": {"signature": "sig"}, "fingerprint": "0000000000000000"}}
+    ]))
+    .expect("deserialize stale");
+    assert!(is_empty_assistant_turn(&stale), "{stale:?}");
 }
 
 #[test]
@@ -636,36 +329,43 @@ fn the_type_key_is_the_tag_and_the_untagged_shape_does_not_load() {
         panic!("expected one text block, got {tagged:?}");
     };
     assert_eq!(text.text, "ok");
-    assert_eq!(text.additional_params, None, "the tag is not data");
+    assert_eq!(text.native, None, "the tag is not data");
 
     serde_json::from_value::<Vec<AssistantContent>>(serde_json::json!([{"text": "ok"}]))
         .expect_err("the untagged shape must not deserialize");
 }
 
 #[test]
-fn prompt_response_roundtrip_preserves_explicit_content() {
-    // An explicitly-set `content` (e.g. the streaming surface's structured
-    // final turn) must survive a serialize/deserialize round-trip intact —
-    // `content` and `output` are independent fields.
-    let response = PromptResponse::new("visible text", Usage::default())
-        .with_content(vec![AssistantContent::text("structured")]);
+fn prompt_response_roundtrip_preserves_structured_content() {
+    let response = PromptResponse::from_content(
+        vec![
+            AssistantContent::Reasoning(rig_core::message::Reasoning::new("thinking")),
+            AssistantContent::text("visible "),
+            AssistantContent::text("text"),
+        ],
+        Usage::default(),
+    );
+    assert_eq!(response.output(), "visible text");
 
     let value = serde_json::to_value(&response).expect("serialize prompt response");
     assert!(
         value.get("content").is_some(),
         "content is part of the serialized shape"
     );
+    assert!(
+        value.get("output").is_none(),
+        "output is derived from content, not stored"
+    );
 
     let round: PromptResponse = serde_json::from_value(value).expect("deserialize prompt response");
     assert_eq!(round.output(), "visible text");
-    // The stored content is "structured" — distinct from `output` — so the
-    // round trip demonstrably carried `content` itself rather than anything
-    // derived from `output`. (Compare the text directly to sidestep the
-    // `Text::additional_params` serde round-trip asymmetry.)
-    let Some(AssistantContent::Text(text)) = round.content().first() else {
-        panic!("expected text content, got {:?}", round.content().first());
-    };
-    assert_eq!(text.text, "structured");
+    // Compare parts directly to sidestep the `Text::additional_params` serde
+    // round-trip asymmetry.
+    assert!(matches!(
+        round.content(),
+        [AssistantContent::Reasoning(_), AssistantContent::Text(a), AssistantContent::Text(b)]
+            if a.text == "visible " && b.text == "text"
+    ));
 }
 
 #[test]
@@ -702,33 +402,14 @@ fn prompt_response_serialize_and_deserialize_agree_on_wire_shape() {
 }
 
 #[tokio::test]
-async fn prompt_response_records_completion_call_without_reported_usage() {
-    let turn = MockTurn::text("ok");
-    let raw = turn.raw().expect("a scripted turn has a document");
-    let model = MockCompletionModel::new([turn]);
-    let agent = AgentBuilder::new(model).build();
-
-    let response = agent.prompt("say ok").await.expect("prompt should succeed");
-
-    assert_eq!(response.output, "ok");
-    assert_eq!(response.usage, Usage::default());
-    assert_eq!(
-        response.completion_calls(),
-        &[CompletionCall::new(0, Usage::default(), raw)]
-    );
-}
-
-#[tokio::test]
 async fn typed_prompt_response_preserves_completion_calls() {
-    let call_usage = Usage {
-        input_tokens: Some(4),
-        output_tokens: Some(6),
-        total_tokens: Some(10),
-        ..Usage::default()
-    };
+    let call_usage = Usage::new()
+        .input_tokens(4)
+        .output_tokens(6)
+        .total_tokens(10);
     let turn = MockTurn::text(r#"{"value":"ok"}"#).with_usage(call_usage);
     let raw = turn.raw().expect("a scripted turn has a document");
-    let model = MockCompletionModel::new([turn]);
+    let model = MockCompletionModel::from_turns([turn]);
     let agent = AgentBuilder::new(model).build();
 
     let response = agent
@@ -747,6 +428,30 @@ async fn typed_prompt_response_preserves_completion_calls() {
         response.completion_calls(),
         &[CompletionCall::new(0, call_usage, raw)]
     );
+    assert_eq!(
+        response.messages.len(),
+        2,
+        "the accepted attempt's prompt and answer: {:?}",
+        response.messages
+    );
+}
+
+#[tokio::test]
+async fn typed_prompt_deserialization_error_keeps_the_model_output() {
+    let model = MockCompletionModel::from_turns([MockTurn::text("the answer is ok")]);
+    let agent = AgentBuilder::new(model).build();
+
+    let error = agent
+        .prompt_typed::<TypedAnswer>("return typed json")
+        .await
+        .expect_err("prose is not a TypedAnswer");
+
+    match error {
+        StructuredOutputError::Deserialization { output, .. } => {
+            assert_eq!(output, "the answer is ok");
+        }
+        other => panic!("expected a deserialization error, got {other:?}"),
+    }
 }
 
 fn validate_follow_up_tool_history(request: &CompletionRequest) {
@@ -766,19 +471,15 @@ fn validate_follow_up_tool_history(request: &CompletionRequest) {
             )
     ));
 
-    // The wire issued "tool_call_1" (adopted as rig's durable id) and the
-    // provider-specific correlator was overridden to "call_1"; the result
-    // answers the durable id and echoes the provider correlator.
+    // The provider's correlator was overridden to "call_1"; the call carries
+    // that one id and the result answers it.
     assert!(matches!(
         history.get(1),
-        Some(Message::Assistant { content, .. })
+        Some(Message::Assistant(rig_core::message::AssistantMessage { content, .. }))
             if matches!(
                 content.first(),
                 Some(AssistantContent::ToolCall(tool_call))
-                    if tool_call.id.explicit() == Some("tool_call_1")
-                        && tool_call.provider.as_ref().is_some_and(
-                            |provider| provider.call_id == "call_1"
-                        )
+                    if tool_call.id.provider().map(|provider| provider.as_str()) == Some("call_1")
             )
     ));
 
@@ -788,10 +489,7 @@ fn validate_follow_up_tool_history(request: &CompletionRequest) {
             if matches!(
                 content.first(),
                 Some(UserContent::ToolResult(tool_result))
-                    if tool_result.call.explicit() == Some("tool_call_1")
-                        && tool_result.provider.as_ref().is_some_and(
-                            |provider| provider.call_id == "call_1"
-                        )
+                    if tool_result.call.provider().map(|provider| provider.as_str()) == Some("call_1")
             )
     ));
 }
@@ -800,7 +498,7 @@ fn history_contains_tool_call(history: &[Message], tool_name: &str) -> bool {
     history.iter().any(|message| {
         matches!(
             message,
-            Message::Assistant { content, .. }
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. })
                 if content.iter().any(|item| matches!(
                     item,
                     AssistantContent::ToolCall(tool_call)
@@ -810,55 +508,9 @@ fn history_contains_tool_call(history: &[Message], tool_name: &str) -> bool {
     })
 }
 
-/// The invalid-call retry transcript pairs 1:1 by construction: every tool
-/// call in the assistant turn carries a unique non-empty id (minted at the
-/// provider boundary when the wire issued none), and the retry results
-/// answer exactly those ids.
-fn assert_retry_transcript_ids_pair(assistant: &Message, results: &Message) {
-    use std::collections::BTreeSet;
-
-    let Message::Assistant { content, .. } = assistant else {
-        panic!("expected the assistant tool-call turn, got {assistant:?}");
-    };
-    let call_ids: Vec<&rig_core::message::ToolCallId> = content
-        .iter()
-        .filter_map(|item| match item {
-            AssistantContent::ToolCall(tool_call) => Some(&tool_call.id),
-            _ => None,
-        })
-        .collect();
-    let Message::User { content } = results else {
-        panic!("expected the user retry-result turn, got {results:?}");
-    };
-    let result_ids: Vec<&rig_core::message::ToolCallId> = content
-        .iter()
-        .filter_map(|item| match item {
-            UserContent::ToolResult(result) => Some(&result.call),
-            _ => None,
-        })
-        .collect();
-    let unique_calls: BTreeSet<&rig_core::message::ToolCallId> = call_ids.iter().copied().collect();
-    assert_eq!(
-        unique_calls.len(),
-        call_ids.len(),
-        "tool-call ids must be unique: {call_ids:?}"
-    );
-    let unique_results: BTreeSet<&rig_core::message::ToolCallId> =
-        result_ids.iter().copied().collect();
-    assert_eq!(
-        unique_results.len(),
-        result_ids.len(),
-        "retry-result ids must be unique: {result_ids:?}"
-    );
-    assert_eq!(
-        unique_calls, unique_results,
-        "retry results must answer exactly the turn's tool calls"
-    );
-}
-
 #[tokio::test]
 async fn unknown_tool_call_fails_before_non_streaming_second_request() {
-    let model = MockCompletionModel::new([
+    let model = MockCompletionModel::from_turns([
         MockTurn::tool_call("tool_call_1", "default_api", json!({"x": 1, "y": 2})),
         MockTurn::text("should not be requested"),
     ]);
@@ -889,37 +541,12 @@ async fn unknown_tool_call_fails_before_non_streaming_second_request() {
     assert_eq!(recorded.request_count(), 1);
 }
 
-/// The motivating use-case: a `ToolContext` set on the prompt request is
-/// threaded all the way to the tool the agent loop executes.
-#[tokio::test]
-async fn tool_context_reaches_tool_through_agent_loop() {
-    let model = MockCompletionModel::new([
-        MockTurn::tool_call("tool_call_1", "context_probe", json!({})),
-        MockTurn::text("done"),
-    ]);
-    let probe = MockContextProbeTool::default();
-    let agent = AgentBuilder::new(model).tool(probe.clone()).build();
-
-    let mut context = ToolContext::new();
-    context.insert(SessionId("abc-123".to_string())).unwrap();
-
-    let out = agent
-        .prompt("use the tool")
-        .tool_context(context)
-        .max_turns(3)
-        .await
-        .expect("run succeeds");
-
-    assert_eq!(out.output, "done");
-    assert_eq!(probe.observed().as_deref(), Some("session:abc-123"));
-}
-
 /// Context values persist for the whole run, across *multiple* tool-call rounds
 /// (the headline value prop). The model calls the probe in two consecutive
 /// rounds; both must observe the same injected value, not just the first.
 #[tokio::test]
 async fn tool_context_persists_across_multiple_rounds() {
-    let model = MockCompletionModel::new([
+    let model = MockCompletionModel::from_turns([
         MockTurn::tool_call("c1", "context_probe", json!({})),
         MockTurn::tool_call("c2", "context_probe", json!({})),
         MockTurn::text("done"),
@@ -937,83 +564,16 @@ async fn tool_context_persists_across_multiple_rounds() {
         .await
         .expect("run succeeds");
 
-    assert_eq!(out.output, "done");
+    assert_eq!(out.output(), "done");
     assert_eq!(
         probe.observations(),
         vec!["session:abc-123".to_string(), "session:abc-123".to_string()],
     );
 }
 
-/// Without a context, the same tool runs with an empty one (no panic, no
-/// stale value) — the backward-compatible default path.
-#[tokio::test]
-async fn tool_runs_with_empty_context_when_none_supplied() {
-    let model = MockCompletionModel::new([
-        MockTurn::tool_call("tool_call_1", "context_probe", json!({})),
-        MockTurn::text("done"),
-    ]);
-    let probe = MockContextProbeTool::default();
-    let agent = AgentBuilder::new(model).tool(probe.clone()).build();
-
-    let out = agent
-        .prompt("use the tool")
-        .max_turns(3)
-        .await
-        .expect("run succeeds");
-
-    assert_eq!(out.output, "done");
-    // The single call path receives an empty context and observes no session.
-    assert_eq!(probe.observed().as_deref(), Some("no-session"));
-}
-
-/// Direct typed calls use the same context contract as dispatched calls.
-#[tokio::test]
-async fn probe_direct_call_uses_context() {
-    let probe = MockContextProbeTool::default();
-    let out = probe
-        .call(&mut ToolContext::new(), json!({}))
-        .await
-        .expect("call succeeds");
-    assert_eq!(out, "no-session");
-    assert_eq!(probe.observed().as_deref(), Some("no-session"));
-}
-
-#[tokio::test]
-async fn invalid_tool_call_context_uses_completed_tool_call_provider_id() {
-    let invalid_hook = RecordingInvalidToolCallHook::default();
-    let model = MockCompletionModel::new([
-        MockTurn::tool_call("tool_call_1", "default_api", json!({"x": 1, "y": 2}))
-            .with_call_id("provider_call_1"),
-        MockTurn::text("should not be requested"),
-    ]);
-    let recorded = model.clone();
-    let agent = AgentBuilder::new(model).tool(MockAddTool).build();
-
-    let err = agent
-        .prompt("use the tool")
-        .add_hook(invalid_hook.clone())
-        .max_turns(3)
-        .await
-        .expect_err("invalid tool should fail");
-
-    assert!(matches!(err, PromptError::UnknownToolCall { .. }));
-    assert_eq!(recorded.request_count(), 1);
-    let contexts = invalid_hook.observed();
-    assert_eq!(contexts.len(), 1);
-    let context = &contexts[0];
-    assert_eq!(context.tool_name, "default_api");
-    assert_eq!(
-        context.tool_call_id.as_ref().and_then(|id| id.explicit()),
-        Some("tool_call_1")
-    );
-    // No stream block was observed for this buffered model response.
-    assert_eq!(context.block_id, None);
-    assert!(!context.is_streaming);
-}
-
 #[tokio::test]
 async fn disallowed_specific_tool_call_fails_before_non_streaming_second_request() {
-    let model = MockCompletionModel::new([
+    let model = MockCompletionModel::from_turns([
         MockTurn::tool_call("tool_call_1", "subtract", json!({"x": 3, "y": 1})),
         MockTurn::text("should not be requested"),
     ]);
@@ -1022,7 +582,7 @@ async fn disallowed_specific_tool_call_fails_before_non_streaming_second_request
         .tool(MockAddTool)
         .tool(MockSubtractTool)
         .tool_choice(ToolChoice::Specific {
-            function_names: vec!["add".to_string()],
+            function_names: vec![rig_core::message::ToolName::new("add").expect("tool name")],
         })
         .build();
 
@@ -1055,7 +615,7 @@ async fn disallowed_specific_tool_call_fails_before_non_streaming_second_request
 
 #[tokio::test]
 async fn tool_choice_none_rejects_non_streaming_tool_call() {
-    let model = MockCompletionModel::new([
+    let model = MockCompletionModel::from_turns([
         MockTurn::tool_call("tool_call_1", "add", json!({"x": 1, "y": 2})),
         MockTurn::text("should not be requested"),
     ]);
@@ -1090,488 +650,8 @@ async fn tool_choice_none_rejects_non_streaming_tool_call() {
 }
 
 #[tokio::test]
-async fn invalid_tool_call_hook_can_repair_non_streaming_tool_name() {
-    let model = MockCompletionModel::new([
-        MockTurn::tool_call("tool_call_1", "default_api", json!({"x": 2, "y": 3})),
-        MockTurn::text("done"),
-    ]);
-    let agent = AgentBuilder::new(model).tool(MockAddTool).build();
-
-    let response = agent
-        .prompt("add")
-        .add_hook(RepairDefaultApiHook)
-        .max_turns(3)
-        .await
-        .expect("repaired tool call should execute");
-
-    assert_eq!(response.output, "done");
-    let messages = response.messages.expect("messages should be present");
-    assert!(history_contains_tool_call(&messages, "add"));
-    assert!(!history_contains_tool_call(&messages, "default_api"));
-    assert!(messages.iter().any(|message| {
-        matches!(
-            message,
-            Message::User { content }
-                if content.iter().any(|content| {
-                    matches!(
-                        content,
-                        UserContent::ToolResult(result)
-                            if result.content.iter().any(|content| {
-                                matches!(
-                                    content,
-                                    rig_core::message::ToolResultContent::Json { value }
-                                        if value == &serde_json::json!(5)
-                                )
-                            })
-                    )
-                })
-        )
-    }));
-}
-
-#[tokio::test]
-async fn invalid_tool_call_hook_retry_adds_feedback_and_retries_non_streaming() {
-    let model = MockCompletionModel::new([
-        MockTurn::tool_call("tool_call_1", "default_api", json!({"x": 2, "y": 3})),
-        MockTurn::text("retried"),
-    ]);
-    let recorded = model.clone();
-    let agent = AgentBuilder::new(model).tool(MockAddTool).build();
-
-    let response = agent
-        .prompt("add")
-        .add_hook(RetryDefaultApiHook)
-        .max_invalid_tool_call_retries(1)
-        .max_turns(3)
-        .await
-        .expect("retry should recover");
-
-    assert_eq!(response.output, "retried");
-    assert_eq!(recorded.request_count(), 2);
-    let messages = response.messages.expect("messages should be present");
-    assert!(messages.iter().any(|message| {
-        matches!(
-            message,
-            Message::User { content }
-                if content.iter().any(|content| {
-                    matches!(
-                        content,
-                        UserContent::ToolResult(result)
-                            if result.content.iter().any(|content| {
-                                matches!(
-                                    content,
-                                    rig_core::message::ToolResultContent::Text(text)
-                                        if text.text.contains("Use one of these tools instead")
-                                )
-                            })
-                    )
-                })
-        )
-    }));
-}
-
-#[tokio::test]
-async fn invalid_tool_call_hook_retries_mixed_non_streaming_turn_without_executing_valid_call() {
-    let add_calls = Arc::new(AtomicU32::new(0));
-    let valid_tool_call = ToolCall::from_wire(
-        "tool_call_1",
-        ToolFunction::new("add".to_string(), json!({"x": 2, "y": 3})),
-    )
-    .with_provider(ProviderCallId::new("call_1").expect("non-empty provider id"));
-    let invalid_tool_call = ToolCall::from_wire(
-        "tool_call_2",
-        ToolFunction::new("default_api".to_string(), json!({"x": 4, "y": 5})),
-    )
-    .with_provider(ProviderCallId::new("call_2").expect("non-empty provider id"));
-    let model = MockCompletionModel::new([
-        MockTurn::from_contents([
-            AssistantContent::ToolCall(valid_tool_call),
-            AssistantContent::ToolCall(invalid_tool_call),
-        ]),
-        MockTurn::text("retried"),
-    ]);
-    let recorded = model.clone();
-    let agent = AgentBuilder::new(model)
-        .tool(CountingAddTool {
-            calls: add_calls.clone(),
-        })
-        .build();
-
-    let response = agent
-        .prompt("add")
-        .add_hook(RetryDefaultApiHook)
-        .max_invalid_tool_call_retries(1)
-        .max_turns(3)
-        .await
-        .expect("retry should recover");
-
-    assert_eq!(response.output, "retried");
-    assert_eq!(add_calls.load(Ordering::SeqCst), 0);
-    let requests = recorded.requests();
-    assert_eq!(requests.len(), 2);
-    let retry_history = requests[1].chat_history.clone();
-    assert_eq!(retry_history.len(), 3);
-    assert!(matches!(
-        retry_history.get(1),
-        Some(Message::Assistant { content, .. })
-            if content.iter().any(|item| matches!(
-                item,
-                AssistantContent::ToolCall(tool_call)
-                    if tool_call.id.explicit() == Some("tool_call_1")
-                        && tool_call.function.name == "add"
-            ))
-                && content.iter().any(|item| matches!(
-                    item,
-                    AssistantContent::ToolCall(tool_call)
-                        if tool_call.id.explicit() == Some("tool_call_2")
-                            && tool_call.function.name == "default_api"
-                ))
-    ));
-    assert!(matches!(
-        retry_history.get(2),
-        Some(Message::User { content })
-            if content.iter().filter(|item| matches!(item, UserContent::ToolResult(_))).count() == 2
-                && content.iter().any(|item| matches!(
-                    item,
-                    UserContent::ToolResult(result)
-                        if result.call.explicit() == Some("tool_call_1")
-                            && result.provider.as_ref().is_some_and(
-                                |provider| provider.call_id == "call_1"
-                            )
-                            && result.content.iter().any(|content| matches!(
-                                content,
-                                rig_core::message::ToolResultContent::Text(text)
-                                    if text.text == TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER
-                            ))
-                ))
-                && content.iter().any(|item| matches!(
-                    item,
-                    UserContent::ToolResult(result)
-                        if result.call.explicit() == Some("tool_call_2")
-                            && result.provider.as_ref().is_some_and(
-                                |provider| provider.call_id == "call_2"
-                            )
-                            && result.content.iter().any(|content| matches!(
-                                content,
-                                rig_core::message::ToolResultContent::Text(text)
-                                    if text.text.contains("Use one of these tools instead")
-                            ))
-        ))
-    ));
-    assert_retry_transcript_ids_pair(
-        retry_history.get(1).expect("assistant tool-call turn"),
-        retry_history.get(2).expect("retry-result turn"),
-    );
-}
-
-#[tokio::test]
-async fn invalid_tool_call_hook_skips_mixed_non_streaming_turn_without_executing_valid_call() {
-    let add_calls = Arc::new(AtomicU32::new(0));
-    let valid_tool_call = ToolCall::from_wire(
-        "tool_call_1",
-        ToolFunction::new("add".to_string(), json!({"x": 2, "y": 3})),
-    )
-    .with_provider(ProviderCallId::new("call_1").expect("non-empty provider id"));
-    let invalid_tool_call = ToolCall::from_wire(
-        "tool_call_2",
-        ToolFunction::new("default_api".to_string(), json!({"x": 4, "y": 5})),
-    )
-    .with_provider(ProviderCallId::new("call_2").expect("non-empty provider id"));
-    let model = MockCompletionModel::new([
-        MockTurn::from_contents([
-            AssistantContent::ToolCall(valid_tool_call),
-            AssistantContent::ToolCall(invalid_tool_call),
-        ]),
-        MockTurn::text("skipped"),
-    ]);
-    let agent = AgentBuilder::new(model)
-        .tool(CountingAddTool {
-            calls: add_calls.clone(),
-        })
-        .build();
-
-    let response = agent
-        .prompt("add")
-        .add_hook(SkipDefaultApiAndPanicOnToolCallHook)
-        .max_turns(3)
-        .await
-        .expect("skip should recover without executing peer tools");
-
-    assert_eq!(response.output, "skipped");
-    assert_eq!(add_calls.load(Ordering::SeqCst), 0);
-    let messages = response.messages.expect("messages should be present");
-    assert!(history_contains_tool_call(&messages, "add"));
-    assert!(history_contains_tool_call(&messages, "default_api"));
-    assert!(matches!(
-        messages.get(2),
-        Some(Message::User { content })
-            if content.iter().filter(|item| matches!(item, UserContent::ToolResult(_))).count() == 2
-                && content.iter().any(|item| matches!(
-                    item,
-                    UserContent::ToolResult(result)
-                        if result.call.explicit() == Some("tool_call_1")
-                            && result.provider.as_ref().is_some_and(
-                                |provider| provider.call_id == "call_1"
-                            )
-                            && result.content.iter().any(|content| matches!(
-                                content,
-                                rig_core::message::ToolResultContent::Text(text)
-                                    if text.text == TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER
-                            ))
-                ))
-                && content.iter().any(|item| matches!(
-                    item,
-                    UserContent::ToolResult(result)
-                        if result.call.explicit() == Some("tool_call_2")
-                            && result.provider.as_ref().is_some_and(
-                                |provider| provider.call_id == "call_2"
-                            )
-                            && result.content.iter().any(|content| matches!(
-                                content,
-                                rig_core::message::ToolResultContent::Text(text)
-                                    if text.text == "default_api is not available"
-                            ))
-                ))
-    ));
-    assert_retry_transcript_ids_pair(
-        messages.get(1).expect("assistant tool-call turn"),
-        messages.get(2).expect("skip-result turn"),
-    );
-}
-
-#[tokio::test]
-async fn invalid_tool_call_hook_retry_budget_exhaustion_fails() {
-    let model = MockCompletionModel::new([
-        MockTurn::tool_call("tool_call_1", "default_api", json!({"x": 2, "y": 3})),
-        MockTurn::text("should not be requested"),
-    ]);
-    let recorded = model.clone();
-    let agent = AgentBuilder::new(model).tool(MockAddTool).build();
-
-    let err = agent
-        .prompt("add")
-        .add_hook(RetryDefaultApiHook)
-        .max_invalid_tool_call_retries(0)
-        .max_turns(3)
-        .await
-        .expect_err("retry without budget should fail");
-
-    match err {
-        PromptError::UnknownToolCall {
-            tool_name,
-            chat_history,
-            ..
-        } => {
-            assert_eq!(tool_name, "default_api");
-            assert!(history_contains_tool_call(&chat_history, "default_api"));
-        }
-        other => panic!("expected UnknownToolCall, got {other:?}"),
-    }
-    assert_eq!(recorded.request_count(), 1);
-}
-
-#[tokio::test]
-async fn invalid_tool_call_hook_can_skip_structured_non_streaming_call() {
-    let model = MockCompletionModel::new([
-        MockTurn::tool_call("tool_call_1", "default_api", json!({"x": 2, "y": 3})),
-        MockTurn::text("skipped"),
-    ]);
-    let agent = AgentBuilder::new(model).tool(MockAddTool).build();
-
-    let response = agent
-        .prompt("add")
-        .add_hook(SkipDefaultApiHook)
-        .max_turns(3)
-        .await
-        .expect("skip should continue with synthetic tool result");
-
-    assert_eq!(response.output, "skipped");
-    let messages = response.messages.expect("messages should be present");
-    assert!(history_contains_tool_call(&messages, "default_api"));
-    assert!(messages.iter().any(|message| {
-        matches!(
-            message,
-            Message::User { content }
-                if content.iter().any(|content| {
-                    matches!(
-                        content,
-                        UserContent::ToolResult(result)
-                            if result.content.iter().any(|content| {
-                                matches!(
-                                    content,
-                                    rig_core::message::ToolResultContent::Text(text)
-                                        if text.text == "default_api is not available"
-                                )
-                            })
-                    )
-                })
-        )
-    }));
-}
-
-#[tokio::test]
-async fn skip_under_specific_tool_choice_returns_synthetic_feedback() {
-    let model = MockCompletionModel::new([
-        MockTurn::tool_call("tool_call_1", "default_api", json!({"x": 2, "y": 3})),
-        MockTurn::text("skipped"),
-    ]);
-    let agent = AgentBuilder::new(model)
-        .tool(MockAddTool)
-        .tool_choice(ToolChoice::Specific {
-            function_names: vec!["add".to_string()],
-        })
-        .build();
-
-    let response = agent
-        .prompt("add")
-        .add_hook(SkipDefaultApiHook)
-        .max_turns(3)
-        .await
-        .expect("skip should produce synthetic feedback under Specific");
-
-    assert_eq!(response.output, "skipped");
-    let messages = response.messages.expect("messages should be present");
-    assert!(history_contains_tool_call(&messages, "default_api"));
-    assert!(messages.iter().any(|message| {
-        matches!(
-            message,
-            Message::User { content }
-                if content.iter().any(|content| {
-                    matches!(
-                        content,
-                        UserContent::ToolResult(result)
-                            if result.call.explicit() == Some("tool_call_1")
-                                && result.content.iter().any(|content| {
-                                    matches!(
-                                        content,
-                                        rig_core::message::ToolResultContent::Text(text)
-                                            if text.text == "default_api is not available"
-                                    )
-                                })
-                    )
-                })
-        )
-    }));
-}
-
-#[tokio::test]
-async fn repair_to_disallowed_specific_tool_fails() {
-    let model = MockCompletionModel::new([
-        MockTurn::tool_call("tool_call_1", "default_api", json!({"x": 2, "y": 3})),
-        MockTurn::text("should not be requested"),
-    ]);
-    let recorded = model.clone();
-    let agent = AgentBuilder::new(model)
-        .tool(MockAddTool)
-        .tool(MockSubtractTool)
-        .tool_choice(ToolChoice::Specific {
-            function_names: vec!["add".to_string()],
-        })
-        .build();
-
-    let err = agent
-        .prompt("add")
-        .add_hook(RepairToSubtractHook)
-        .max_turns(3)
-        .await
-        .expect_err("repair to a disallowed tool should fail");
-
-    match err {
-        PromptError::UnknownToolCall { tool_name, .. } => {
-            assert_eq!(tool_name, "subtract");
-        }
-        other => panic!("expected UnknownToolCall, got {other:?}"),
-    }
-    assert_eq!(recorded.request_count(), 1);
-}
-
-#[tokio::test]
-async fn repair_under_tool_choice_none_fails() {
-    let model = MockCompletionModel::new([
-        MockTurn::tool_call("tool_call_1", "default_api", json!({"x": 2, "y": 3})),
-        MockTurn::text("should not be requested"),
-    ]);
-    let recorded = model.clone();
-    let agent = AgentBuilder::new(model)
-        .tool(MockAddTool)
-        .tool_choice(ToolChoice::None)
-        .build();
-
-    let err = agent
-        .prompt("do not use tools")
-        .add_hook(RepairDefaultApiHook)
-        .max_turns(3)
-        .await
-        .expect_err("ToolChoice::None should reject repaired tool calls");
-
-    match err {
-        PromptError::UnknownToolCall { tool_name, .. } => {
-            assert_eq!(tool_name, "add");
-        }
-        other => panic!("expected UnknownToolCall, got {other:?}"),
-    }
-    assert_eq!(recorded.request_count(), 1);
-}
-
-#[tokio::test]
-async fn skip_under_tool_choice_none_fails() {
-    let model = MockCompletionModel::new([
-        MockTurn::tool_call("tool_call_1", "default_api", json!({"x": 2, "y": 3})),
-        MockTurn::text("should not be requested"),
-    ]);
-    let recorded = model.clone();
-    let agent = AgentBuilder::new(model)
-        .tool(MockAddTool)
-        .tool_choice(ToolChoice::None)
-        .build();
-
-    let err = agent
-        .prompt("do not use tools")
-        .add_hook(SkipDefaultApiHook)
-        .max_turns(3)
-        .await
-        .expect_err("ToolChoice::None should reject skipped tool calls");
-
-    match err {
-        PromptError::UnknownToolCall { tool_name, .. } => {
-            assert_eq!(tool_name, "default_api");
-        }
-        other => panic!("expected UnknownToolCall, got {other:?}"),
-    }
-    assert_eq!(recorded.request_count(), 1);
-}
-
-#[tokio::test]
-async fn typed_prompt_default_invalid_tool_call_fails_fast() {
-    let model = MockCompletionModel::new([
-        MockTurn::tool_call("tool_call_1", "default_api", json!({"x": 2, "y": 3})),
-        MockTurn::text(r#"{"value":"should not be requested"}"#),
-    ]);
-    let recorded = model.clone();
-    let agent = AgentBuilder::new(model).tool(MockAddTool).build();
-
-    let err = agent
-        .prompt_typed::<TypedAnswer>("return typed json")
-        .add_hook(PanicOnUnknownToolHook)
-        .max_turns(3)
-        .await
-        .expect_err("typed prompt should preserve fail-fast default");
-
-    match err {
-        StructuredOutputError::PromptError(err) => match err {
-            PromptError::UnknownToolCall { tool_name, .. } => {
-                assert_eq!(tool_name, "default_api");
-            }
-            other => panic!("expected UnknownToolCall, got {other:?}"),
-        },
-        other => panic!("expected prompt error, got {other:?}"),
-    }
-    assert_eq!(recorded.request_count(), 1);
-}
-
-#[tokio::test]
 async fn typed_prompt_invalid_tool_call_hook_can_repair_tool_name() {
-    let model = MockCompletionModel::new([
+    let model = MockCompletionModel::from_turns([
         MockTurn::tool_call("tool_call_1", "default_api", json!({"x": 2, "y": 3})),
         MockTurn::text(r#"{"value":"repaired"}"#),
     ]);
@@ -1594,7 +674,7 @@ async fn typed_prompt_invalid_tool_call_hook_can_repair_tool_name() {
 
 #[tokio::test]
 async fn typed_prompt_invalid_tool_call_hook_can_retry_and_parse_response() {
-    let model = MockCompletionModel::new([
+    let model = MockCompletionModel::from_turns([
         MockTurn::tool_call("tool_call_1", "default_api", json!({"x": 2, "y": 3})),
         MockTurn::text(r#"{"value":"retried"}"#),
     ]);
@@ -1619,42 +699,13 @@ async fn typed_prompt_invalid_tool_call_hook_can_retry_and_parse_response() {
 }
 
 #[tokio::test]
-async fn typed_prompt_invalid_tool_call_retry_budget_exhaustion_fails() {
-    let model = MockCompletionModel::new([
-        MockTurn::tool_call("tool_call_1", "default_api", json!({"x": 2, "y": 3})),
-        MockTurn::text(r#"{"value":"should not be requested"}"#),
-    ]);
-    let recorded = model.clone();
-    let agent = AgentBuilder::new(model).tool(MockAddTool).build();
-
-    let err = agent
-        .prompt_typed::<TypedAnswer>("return typed json")
-        .add_hook(RetryDefaultApiHook)
-        .max_invalid_tool_call_retries(0)
-        .max_turns(3)
-        .await
-        .expect_err("typed prompt should fail when retry budget is exhausted");
-
-    match err {
-        StructuredOutputError::PromptError(err) => match err {
-            PromptError::UnknownToolCall { tool_name, .. } => {
-                assert_eq!(tool_name, "default_api");
-            }
-            other => panic!("expected UnknownToolCall, got {other:?}"),
-        },
-        other => panic!("expected prompt error, got {other:?}"),
-    }
-    assert_eq!(recorded.request_count(), 1);
-}
-
-#[tokio::test]
 async fn invalid_specific_tool_choice_fails_before_non_streaming_provider_request() {
     let model = MockCompletionModel::text("should not be requested");
     let recorded = model.clone();
     let agent = AgentBuilder::new(model)
         .tool(MockAddTool)
         .tool_choice(ToolChoice::Specific {
-            function_names: vec!["missing".to_string()],
+            function_names: vec![rig_core::message::ToolName::new("missing").expect("tool name")],
         })
         .build();
 
@@ -1664,7 +715,7 @@ async fn invalid_specific_tool_choice_fails_before_non_streaming_provider_reques
         .expect_err("invalid ToolChoice::Specific should fail before provider request");
 
     match err {
-        PromptError::CompletionError(ProviderError::Request(err)) => {
+        PromptError::Provider(ProviderError::Request(err)) => {
             let msg = err.to_string();
             assert!(msg.contains("missing"), "got: {msg}");
             assert!(msg.contains("add"), "got: {msg}");
@@ -1675,50 +726,22 @@ async fn invalid_specific_tool_choice_fails_before_non_streaming_provider_reques
 }
 
 #[tokio::test]
-async fn allowed_specific_tool_call_executes_normally() {
-    let model = MockCompletionModel::new([
-        MockTurn::tool_call("tool_call_1", "add", json!({"x": 1, "y": 2})),
-        MockTurn::text("done"),
-    ]);
-    let recorded = model.clone();
-    let agent = AgentBuilder::new(model)
-        .tool(MockAddTool)
-        .tool_choice(ToolChoice::Specific {
-            function_names: vec!["add".to_string()],
-        })
-        .build();
-
-    let response = agent
-        .prompt("use the allowed tool")
-        .max_turns(3)
-        .await
-        .expect("allowed specific tool should execute");
-
-    assert_eq!(response.output, "done");
-    assert_eq!(recorded.request_count(), 2);
-}
-
-#[tokio::test]
 async fn prompt_request_stops_cleanly_on_empty_terminal_turn() {
-    let first_call_usage = Usage {
-        input_tokens: Some(1),
-        output_tokens: Some(1),
-        total_tokens: Some(2),
-        ..Usage::default()
-    };
-    let second_call_usage = Usage {
-        input_tokens: Some(1),
-        output_tokens: Some(1),
-        total_tokens: Some(2),
-        ..Usage::default()
-    };
+    let first_call_usage = Usage::new()
+        .input_tokens(1)
+        .output_tokens(1)
+        .total_tokens(2);
+    let second_call_usage = Usage::new()
+        .input_tokens(1)
+        .output_tokens(1)
+        .total_tokens(2);
     let first_turn = MockTurn::tool_call("tool_call_1", "add", json!({"x": 1, "y": 2}))
         .with_call_id("call_1")
         .with_usage(first_call_usage);
     let second_turn = MockTurn::text("").with_usage(second_call_usage);
     let first_raw = first_turn.raw().expect("a scripted turn has a document");
     let second_raw = second_turn.raw().expect("a scripted turn has a document");
-    let model = MockCompletionModel::new([first_turn, second_turn]);
+    let model = MockCompletionModel::from_turns([first_turn, second_turn]);
     let agent = AgentBuilder::new(model.clone()).tool(MockAddTool).build();
 
     let response = agent
@@ -1727,15 +750,13 @@ async fn prompt_request_stops_cleanly_on_empty_terminal_turn() {
         .await
         .expect("empty terminal turn should not error");
 
-    assert!(response.output.is_empty());
+    assert!(response.output().is_empty());
     assert_eq!(
         response.usage,
-        Usage {
-            input_tokens: Some(2),
-            output_tokens: Some(2),
-            total_tokens: Some(4),
-            ..Usage::default()
-        }
+        Usage::new()
+            .input_tokens(2)
+            .output_tokens(2)
+            .total_tokens(4)
     );
     assert_eq!(
         response.completion_calls(),
@@ -1745,9 +766,7 @@ async fn prompt_request_stops_cleanly_on_empty_terminal_turn() {
         ]
     );
 
-    let history = response
-        .messages
-        .expect("extended response should include history");
+    let history = response.messages;
     assert_eq!(history.len(), 3);
     assert!(matches!(
         history.first(),
@@ -1759,13 +778,13 @@ async fn prompt_request_stops_cleanly_on_empty_terminal_turn() {
     ));
     assert!(history.iter().any(|message| matches!(
         message,
-        Message::Assistant { content, .. }
+        Message::Assistant(rig_core::message::AssistantMessage { content, .. })
             if matches!(
                 content.first(),
                 Some(AssistantContent::ToolCall(tool_call))
-                    if tool_call.id.explicit() == Some("tool_call_1")
-                        && tool_call.provider.as_ref().is_some_and(
-                            |provider| provider.call_id == "call_1"
+                    if tool_call.id.provider().map(|provider| provider.as_str()) == Some("call_1")
+                        && tool_call.id.provider().as_ref().is_some_and(
+                            |provider| provider.as_str() == "call_1"
                         )
             )
     )));
@@ -1775,15 +794,15 @@ async fn prompt_request_stops_cleanly_on_empty_terminal_turn() {
             if matches!(
                 content.first(),
                 Some(UserContent::ToolResult(tool_result))
-                    if tool_result.call.explicit() == Some("tool_call_1")
-                        && tool_result.provider.as_ref().is_some_and(
-                            |provider| provider.call_id == "call_1"
+                    if tool_result.call.provider().map(|provider| provider.as_str()) == Some("call_1")
+                        && tool_result.call.provider().as_ref().is_some_and(
+                            |provider| provider.as_str() == "call_1"
                         )
             )
     )));
     assert!(!history.iter().any(|message| matches!(
         message,
-        Message::Assistant { content, .. }
+        Message::Assistant(rig_core::message::AssistantMessage { content, .. })
             if content.iter().any(|item| matches!(
                 item,
                 AssistantContent::Text(text) if text.text.is_empty()
@@ -1794,222 +813,9 @@ async fn prompt_request_stops_cleanly_on_empty_terminal_turn() {
     validate_follow_up_tool_history(&requests[1]);
 }
 
-#[tokio::test]
-async fn prompt_request_concatenates_text_blocks_without_inserted_newlines() {
-    let model = MockCompletionModel::new([MockTurn::from_contents([
-        AssistantContent::Text(Text::new("According to the document, ")),
-        AssistantContent::Text(Text::new("the grass is green")),
-        AssistantContent::Text(Text::new(" and the sky is blue.")),
-    ])]);
-    let agent = AgentBuilder::new(model).build();
-
-    let response = agent
-        .prompt("answer with cited spans")
-        .await
-        .expect("prompt should succeed");
-
-    assert_eq!(
-        response.output,
-        "According to the document, the grass is green and the sky is blue."
-    );
-}
-
-#[tokio::test]
-async fn prompt_request_preserves_metadata_only_text_turn_in_history() {
-    let metadata = rig_core::message::AdditionalParams::try_from_value(json!({
-        "citations": [{
-            "type": "web_search_result_location",
-            "cited_text": "Claude Shannon was born in 1916.",
-            "url": "https://example.com/shannon",
-            "title": null,
-            "encrypted_index": "encrypted-reference"
-        }]
-    }))
-    .expect("object params")
-    .expect("params carry data");
-    let model = MockCompletionModel::new([MockTurn::from_content(AssistantContent::Text(Text {
-        text: String::new(),
-        additional_params: Some(metadata.clone()),
-    }))]);
-    let agent = AgentBuilder::new(model).build();
-
-    let response = agent
-        .prompt("answer with cited metadata")
-        .await
-        .expect("metadata-only text turn should succeed");
-
-    assert!(response.output.is_empty());
-    let history = response
-        .messages
-        .expect("extended response should include history");
-    assert!(history.iter().any(|message| matches!(
-        message,
-        Message::Assistant { content, .. }
-            if matches!(
-                content.first(),
-                Some(AssistantContent::Text(text))
-                    if text.text.is_empty()
-                        && text.additional_params.as_ref() == Some(&metadata)
-            )
-    )));
-}
-
 // ----- Conversation memory integration tests -----
 
-use rig_core::memory::{ConversationMemory, InMemoryConversationMemory};
-
-#[tokio::test]
-async fn memory_loads_into_request_history() {
-    let memory = InMemoryConversationMemory::new();
-    memory
-        .append(
-            &"thread-1".into(),
-            vec![Message::user("hello"), Message::assistant("hi there")],
-        )
-        .await
-        .unwrap();
-
-    let model = MockCompletionModel::text("ack");
-    let recorded = model.clone();
-
-    let agent = AgentBuilder::new(model).memory(memory).build();
-    let _ = agent
-        .prompt("ping")
-        .conversation("thread-1")
-        .await
-        .expect("prompt should succeed");
-
-    let received = recorded.requests()[0].chat_history.clone();
-    assert_eq!(
-        received.len(),
-        3,
-        "loaded memory (2) + current prompt should appear in request: {received:?}"
-    );
-}
-
-#[tokio::test]
-async fn memory_appends_full_turn_after_success() {
-    let memory = InMemoryConversationMemory::new();
-    let model = MockCompletionModel::text("ack");
-    let agent = AgentBuilder::new(model).memory(memory.clone()).build();
-
-    let response = agent
-        .prompt("hello")
-        .conversation("t1")
-        .await
-        .expect("prompt should succeed");
-
-    let stored = memory.load(&"t1".into()).await.unwrap();
-    assert_eq!(stored.len(), 2, "user prompt + assistant response saved");
-    assert_eq!(
-        response.memory_append,
-        Some(MemoryAppend::Acknowledged),
-        "the response acknowledges the append"
-    );
-    assert_eq!(
-        response.messages.as_deref(),
-        Some(stored.as_slice()),
-        "what was appended is the response's transcript"
-    );
-}
-
-#[tokio::test]
-async fn explicit_with_history_overrides_memory() {
-    let memory = CountingMemory::default();
-    memory
-        .inner()
-        .append(&"t1".into(), vec![Message::user("from-memory")])
-        .await
-        .unwrap();
-
-    let model = MockCompletionModel::text("ack");
-    let recorded = model.clone();
-
-    let agent = AgentBuilder::new(model).memory(memory.clone()).build();
-    let response = agent
-        .prompt("hello")
-        .conversation("t1")
-        .history(vec![Message::user("from-caller")])
-        .await
-        .expect("prompt should succeed");
-
-    assert_eq!(memory.load_count(), 0, "load skipped");
-    let appends = memory.append_count();
-    assert_eq!(appends, 0, "append skipped");
-    assert_eq!(
-        response.memory_append, None,
-        "explicit history bypasses memory: nothing to acknowledge"
-    );
-
-    let received = recorded.requests()[0].chat_history.clone();
-    assert_eq!(received.len(), 2, "caller history (1) + current prompt");
-    assert!(matches!(
-        received.first(),
-        Some(Message::User { content })
-            if matches!(content.first(), Some(UserContent::Text(t)) if t.text == "from-caller")
-    ));
-}
-
-#[tokio::test]
-async fn memory_unchanged_on_provider_error() {
-    let memory = InMemoryConversationMemory::new();
-    let model = MockCompletionModel::new([MockTurn::error("boom")]);
-
-    let agent = AgentBuilder::new(model).memory(memory.clone()).build();
-    let result = agent.prompt("hello").conversation("t1").await;
-    assert!(result.is_err());
-
-    let stored = memory.load(&"t1".into()).await.unwrap();
-    assert!(stored.is_empty(), "no append on error");
-}
-
-#[tokio::test]
-async fn multi_step_tool_run_appends_committed_turn_exactly_once() {
-    // A tool round-trip is two model calls (tool call -> final text) but one
-    // run: the committed turn must be appended to memory exactly once, not
-    // once per model call.
-    let memory = CountingMemory::default();
-    let model = MockCompletionModel::new([
-        MockTurn::tool_call("call-1", "add", json!({"x": 2, "y": 3})),
-        MockTurn::text("sum is 5"),
-    ]);
-
-    let agent = AgentBuilder::new(model)
-        .memory(memory.clone())
-        .tool(MockAddTool)
-        .default_max_turns(2)
-        .build();
-
-    let _ = agent
-        .prompt("add 2 and 3")
-        .conversation("t1")
-        .await
-        .expect("multi-step run should succeed");
-
-    assert_eq!(
-        memory.append_count(),
-        1,
-        "one append for the whole run, not one per model call"
-    );
-
-    let stored = memory.load(&"t1".into()).await.unwrap();
-    // user prompt + assistant tool call + tool result + final assistant text.
-    assert_eq!(
-        stored.len(),
-        4,
-        "the full committed turn is persisted once: {stored:?}"
-    );
-    assert!(
-        matches!(
-            stored.last(),
-            Some(Message::Assistant { content, .. })
-                if content
-                    .iter()
-                    .any(|item| matches!(item, AssistantContent::Text(t) if t.text == "sum is 5"))
-        ),
-        "final assistant text is persisted: {stored:?}"
-    );
-}
+use rig_core::memory::ConversationMemory;
 
 #[tokio::test]
 async fn append_persists_only_newly_committed_messages() {
@@ -2057,152 +863,6 @@ async fn append_persists_only_newly_committed_messages() {
 }
 
 #[tokio::test]
-async fn hook_stopped_run_does_not_append() {
-    // A run stopped by a hook before it completes must not append.
-    struct StopOnCompletion;
-    impl AgentHook for StopOnCompletion {
-        async fn on_completion_call(
-            &self,
-            _ctx: &HookContext,
-            _event: crate::agent::CompletionCallEvent<'_>,
-        ) -> crate::agent::CompletionCallAction {
-            crate::agent::CompletionCallAction::stop("stop")
-        }
-    }
-
-    let memory = CountingMemory::default();
-    let model = MockCompletionModel::text("unreached");
-    let agent = AgentBuilder::new(model)
-        .memory(memory.clone())
-        .add_hook(StopOnCompletion)
-        .build();
-
-    let result = agent.prompt("hello").conversation("t1").await;
-    assert!(result.is_err(), "a stop hook terminates the run");
-
-    assert_eq!(memory.append_count(), 0, "stopped runs do not append");
-    let stored = memory.load(&"t1".into()).await.unwrap();
-    assert!(stored.is_empty(), "nothing persisted on stop: {stored:?}");
-}
-
-#[tokio::test]
-async fn committed_transcript_roles_form_a_valid_sequence() {
-    // The committed history of a tool round-trip must be a well-formed
-    // role sequence: it starts with a user message, never commits two
-    // consecutive assistant messages, and pairs each assistant tool call
-    // with a following user tool-result message.
-    let memory = CountingMemory::default();
-    let model = MockCompletionModel::new([
-        MockTurn::tool_call("call-1", "add", json!({"x": 1, "y": 1})),
-        MockTurn::text("done"),
-    ]);
-
-    let agent = AgentBuilder::new(model)
-        .memory(memory.clone())
-        .tool(MockAddTool)
-        .default_max_turns(2)
-        .build();
-
-    let _ = agent
-        .prompt("go")
-        .conversation("t1")
-        .await
-        .expect("run should succeed");
-
-    let stored = memory.load(&"t1".into()).await.unwrap();
-
-    assert!(
-        matches!(stored.first(), Some(Message::User { .. })),
-        "committed transcript begins with a user message: {stored:?}"
-    );
-    assert!(
-        !stored
-            .windows(2)
-            .any(|pair| matches!(pair, [Message::Assistant { .. }, Message::Assistant { .. }])),
-        "no two assistant messages are committed back to back: {stored:?}"
-    );
-    // Each assistant turn carrying a tool call is followed by a user
-    // tool-result message.
-    for (index, message) in stored.iter().enumerate() {
-        let has_tool_call = matches!(
-            message,
-            Message::Assistant { content, .. }
-                if content.iter().any(|item| matches!(item, AssistantContent::ToolCall(_)))
-        );
-        if has_tool_call {
-            assert!(
-                matches!(stored.get(index + 1), Some(Message::User { content })
-                    if content
-                        .iter()
-                        .any(|item| matches!(item, UserContent::ToolResult(_)))),
-                "assistant tool call at {index} is followed by a user tool result: {stored:?}"
-            );
-        }
-    }
-}
-
-#[tokio::test]
-async fn missing_conversation_id_behaves_as_no_memory() {
-    let memory = CountingMemory::default();
-    let model = MockCompletionModel::text("ack");
-    let agent = AgentBuilder::new(model).memory(memory.clone()).build();
-
-    let _ = agent.prompt("hello").await.expect("prompt should succeed");
-
-    assert_eq!(memory.load_count(), 0);
-    assert_eq!(memory.append_count(), 0);
-}
-
-#[tokio::test]
-async fn default_conversation_id_is_used_when_none_per_request() {
-    let memory = InMemoryConversationMemory::new();
-    let model = MockCompletionModel::text("ack");
-    let agent = AgentBuilder::new(model)
-        .memory(memory.clone())
-        .conversation("default-thread")
-        .build();
-
-    let _ = agent.prompt("hello").await.expect("prompt should succeed");
-    let stored = memory.load(&"default-thread".into()).await.unwrap();
-    assert_eq!(stored.len(), 2);
-}
-
-#[tokio::test]
-async fn with_filter_truncates_loaded_history() {
-    let memory = InMemoryConversationMemory::new()
-        .with_filter(|msgs: Vec<Message>| msgs.into_iter().rev().take(2).rev().collect());
-    memory
-        .append(
-            &"t1".into(),
-            vec![
-                Message::user("1"),
-                Message::assistant("2"),
-                Message::user("3"),
-                Message::assistant("4"),
-            ],
-        )
-        .await
-        .unwrap();
-
-    let model = MockCompletionModel::text("ack");
-    let recorded = model.clone();
-    let agent = AgentBuilder::new(model).memory(memory).build();
-
-    let _ = agent
-        .prompt("ping")
-        .conversation("t1")
-        .await
-        .expect("prompt should succeed");
-
-    let received = recorded.requests()[0].chat_history.clone();
-    assert_eq!(
-        received.len(),
-        3,
-        "window-truncated history (2) + current prompt"
-    );
-}
-
-#[tokio::test]
 async fn without_memory_disables_for_request() {
     let memory = CountingMemory::default();
     let model = MockCompletionModel::text("ack");
@@ -2231,11 +891,11 @@ async fn memory_load_error_surfaces_as_prompt_error() {
     let result = agent.prompt("hello").conversation("t1").await;
 
     match result {
-        Err(PromptError::MemoryError(err)) => {
+        Err(PromptError::Memory(err)) => {
             let msg = err.to_string();
             assert!(msg.contains("load boom"), "got: {msg}");
         }
-        other => panic!("expected PromptError::MemoryError, got {other:?}"),
+        other => panic!("expected PromptError::Memory, got {other:?}"),
     }
 }
 
@@ -2254,10 +914,10 @@ async fn memory_append_error_does_not_drop_response() {
         .await
         .expect("append failure must not block successful completion");
 
-    assert_eq!(response.output, "ack");
+    assert_eq!(response.output(), "ack");
     assert_eq!(
-        response.messages.as_ref().map(Vec::len),
-        Some(2),
+        response.messages.len(),
+        2,
         "the transcript the run tried to persist"
     );
     let report = response
@@ -2290,7 +950,7 @@ fn completion_call_without_identity_fields_deserializes() {
 fn completion_call_identity_round_trips() {
     let call = CompletionCall::new(0, crate::completion::Usage::default(), json!({}))
         .with_identity(ResponseIdentity {
-            message_id: Some("msg_1".into()),
+            message_id: None,
             response_id: Some("resp_1".into()),
             provider_request_id: Some("req_1".into()),
         });
@@ -2299,82 +959,290 @@ fn completion_call_identity_round_trips() {
     assert_eq!(restored, call);
 }
 
-/// The agent driver validates the request it builds the way the builder's
-/// own `send`/`stream` do: an empty user content block is a local, named
-/// error and never reaches the provider.
+/// A turn the provider failed with nothing to show never ends a run as a
+/// success (an empty answer would pass for one).
 #[tokio::test]
-async fn an_empty_content_block_is_rejected_before_the_provider() {
-    let model = MockCompletionModel::text("unreachable");
-    let recorded = model.clone();
+async fn a_failed_turn_without_an_answer_fails_the_run() {
+    let model = MockCompletionModel::from_turns([MockTurn::from_contents(Vec::new())
+        .with_finish_reason(rig_core::completion::FinishReason::Other(
+            "MALFORMED_FUNCTION_CALL".to_owned(),
+        ))]);
     let agent = AgentBuilder::new(model).build();
-
     let error = agent
-        .prompt(Message::User {
-            content: Vec::new(),
-        })
+        .prompt("hello")
         .await
-        .expect_err("an empty content block is refused");
-
+        .expect_err("a failed, answerless turn fails the run");
     assert!(
-        error.to_string().contains("content"),
-        "the error names the empty content: {error}"
-    );
-    assert!(
-        recorded.requests().is_empty(),
-        "the provider was never asked"
+        error.to_string().contains("MALFORMED_FUNCTION_CALL"),
+        "the run names why the provider failed the turn: {error}"
     );
 }
 
-/// The model-turn hook reads the reconciled finish reason: a wire that
-/// reports `stop` on a turn that carried a tool call (Venice's Mistral
-/// dialect did) reaches the hook as `ToolCalls`, the same value the
-/// response and the record carry (`FinishReason::reconcile_with_output`).
-#[derive(Clone, Default)]
-struct FinishReasonHook(Arc<Mutex<Vec<Option<FinishReason>>>>);
+fn unknown_finish(turn: MockTurn) -> MockTurn {
+    turn.with_finish_reason(FinishReason::Other("weird".to_owned()))
+}
 
-impl AgentHook for FinishReasonHook {
-    async fn on_model_turn_finished(
-        &self,
-        _: &HookContext,
-        event: crate::agent::hook::ModelTurnFinished<'_>,
-    ) -> crate::agent::hook::ModelTurnAction {
-        self.0
-            .lock()
-            .expect("finish reasons")
-            .push(event.finish_reason.cloned());
-        crate::agent::hook::ModelTurnAction::continue_run()
+fn replays_assistant_text(request: &CompletionRequest, text: &str) -> bool {
+    request.chat_history.iter().any(|message| {
+        matches!(
+            message,
+            Message::Assistant(turn) if turn.content.iter().any(|block| matches!(
+                block,
+                AssistantContent::Text(t) if t.text == text
+            ))
+        )
+    })
+}
+
+/// By default a text answer that ends in an unknown finish reason fails the
+/// run, naming the reason, as replay would leave the turn out.
+#[tokio::test]
+async fn an_answer_with_an_unknown_finish_reason_fails_the_run_by_default() {
+    let model = MockCompletionModel::from_turns([unknown_finish(MockTurn::text("answer"))]);
+    let agent = AgentBuilder::new(model).build();
+    let error = agent
+        .prompt("hello")
+        .await
+        .expect_err("a failed turn is no answer");
+    assert!(error.to_string().contains("weird"), "{error}");
+}
+
+/// Accepted, the answer succeeds and the next run replays it.
+#[tokio::test]
+async fn an_accepted_unknown_finish_reason_answers_and_replays() {
+    let model = MockCompletionModel::from_turns([
+        unknown_finish(MockTurn::text("answer")),
+        MockTurn::text("again"),
+    ]);
+    let agent = AgentBuilder::new(model.clone())
+        .accept_unknown_finish_reasons(true)
+        .build();
+    let first = agent
+        .prompt("hello")
+        .await
+        .expect("the accepted turn answers");
+    assert_eq!(first.output(), "answer");
+    agent
+        .prompt("and now")
+        .history(first.messages)
+        .await
+        .expect("the follow-up answers");
+    let requests = model.requests();
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.accept_unknown_finish_reasons)
+    );
+    assert!(replays_assistant_text(&requests[1], "answer"));
+}
+
+/// A run can accept unknown reasons where its agent does not.
+#[tokio::test]
+async fn a_run_accepts_unknown_finish_reasons_on_its_own() {
+    let model = MockCompletionModel::from_turns([unknown_finish(MockTurn::text("answer"))]);
+    let agent = AgentBuilder::new(model).build();
+    let answer = agent
+        .prompt("hello")
+        .accept_unknown_finish_reasons(true)
+        .await
+        .expect("the run accepts the reason");
+    assert_eq!(answer.output(), "answer");
+}
+
+/// A host driving the run itself from the agent's spec keeps the setting:
+/// the prepared request accepts the reason and the run answers.
+#[tokio::test]
+async fn a_sans_io_run_from_the_agent_spec_accepts_unknown_finish_reasons() {
+    use crate::run::{AgentRun, AgentRunStep, ModelTurn, prepare_request};
+
+    let model = MockCompletionModel::from_turns([unknown_finish(MockTurn::text("answer"))]);
+    let agent = AgentBuilder::new(model.clone())
+        .accept_unknown_finish_reasons(true)
+        .build();
+    let spec = agent.run_spec();
+    assert!(spec.accept_unknown_finish_reasons);
+    let mut run = AgentRun::from_spec(&spec, "hello", None);
+    let output = loop {
+        match run.next_step().expect("a step") {
+            AgentRunStep::CallModel {
+                prompt, history, ..
+            } => {
+                let prepared =
+                    prepare_request(&spec, &Default::default(), &history, Vec::new(), None, None)
+                        .expect("prepared");
+                let policy = prepared.policy.clone();
+                let request = prepared.apply(CompletionRequest::new(prompt));
+                assert!(request.accept_unknown_finish_reasons);
+                let response = model.call(request).await.expect("the reply folds");
+                run.model_response(ModelTurn::new(
+                    response.head(),
+                    response.choice,
+                    response.usage,
+                    policy,
+                    response.raw,
+                ))
+                .expect("the accepted turn is no failure");
+            }
+            AgentRunStep::CallTools { .. } => panic!("no tools were called"),
+            AgentRunStep::Done(response) => break response.output().to_owned(),
+        }
+    };
+    assert_eq!(output, "answer");
+}
+
+/// The tool calls of a turn with an unknown finish reason run only when the
+/// agent accepts the reason.
+#[tokio::test]
+async fn calls_with_an_unknown_finish_reason_run_only_when_accepted() {
+    for accept in [false, true] {
+        let model = MockCompletionModel::from_turns([
+            unknown_finish(MockTurn::tool_call(
+                "call_1",
+                "add",
+                json!({"x": 1, "y": 2}),
+            )),
+            MockTurn::text("3"),
+        ]);
+        let agent = AgentBuilder::new(model.clone())
+            .tool(MockAddTool)
+            .accept_unknown_finish_reasons(accept)
+            .build();
+        let outcome = agent.prompt("add").max_turns(3).await;
+        if accept {
+            assert_eq!(outcome.expect("the call runs").output(), "3");
+            assert_eq!(model.request_count(), 2);
+        } else {
+            let error = outcome.expect_err("the failed turn runs no call");
+            assert!(
+                error.to_string().contains("none of its tool calls ran"),
+                "{error}"
+            );
+            assert_eq!(model.request_count(), 1);
+        }
     }
 }
 
+/// Patches every turn's tool choice and answers invalid calls with a Skip,
+/// recording the tool choice each invalid-call context reports.
+#[derive(Clone)]
+pub(crate) struct PatchChoiceThenSkip {
+    choice: ToolChoice,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<Option<ToolChoice>>>>,
+}
+
+impl PatchChoiceThenSkip {
+    pub(crate) fn new(choice: ToolChoice) -> Self {
+        Self {
+            choice,
+            seen: std::sync::Arc::default(),
+        }
+    }
+
+    pub(crate) fn seen(&self) -> Vec<Option<ToolChoice>> {
+        self.seen
+            .lock()
+            .map(|seen| seen.clone())
+            .unwrap_or_default()
+    }
+}
+
+impl AgentHook for PatchChoiceThenSkip {
+    async fn on_completion_call(
+        &self,
+        _ctx: &HookContext,
+        _event: crate::agent::CompletionCallEvent<'_>,
+    ) -> crate::agent::CompletionCallAction {
+        crate::agent::CompletionCallAction::patch(
+            crate::agent::RequestPatch::new().tool_choice(self.choice.clone()),
+        )
+    }
+
+    async fn on_invalid_tool_call(
+        &self,
+        _ctx: &HookContext,
+        event: &InvalidToolCallContext,
+    ) -> Option<InvalidToolCallAction> {
+        if let Ok(mut seen) = self.seen.lock() {
+            seen.push(event.tool_choice.clone());
+        }
+        Some(InvalidToolCallAction::skip("skipped"))
+    }
+}
+
+/// A turn patched to `ToolChoice::None` forbids every tool call, so a Skip is
+/// rejected exactly as it is under an agent-level `ToolChoice::None`
+/// (`tool_choice_none_rejects_non_streaming_tool_call`).
 #[tokio::test]
-async fn the_model_turn_hook_reads_the_reconciled_finish_reason() {
-    let hook = FinishReasonHook::default();
-    let agent = AgentBuilder::new(MockCompletionModel::from_turns([
-        MockTurn::tool_call("call_1", "add", json!({"x": 1, "y": 2}))
-            .with_finish_reason(FinishReason::Stop),
-        MockTurn::text("3").with_finish_reason(FinishReason::Stop),
-    ]))
-    .tool(MockAddTool)
-    .add_hook(hook.clone())
-    .build();
-    let response = agent
-        .prompt("add 1 and 2")
-        .max_turns(2)
-        .await
-        .expect("the run answers");
-    assert_eq!(response.output, "3");
-    let reasons = hook.0.lock().expect("finish reasons").clone();
-    assert_eq!(
-        reasons,
-        [Some(FinishReason::ToolCalls), Some(FinishReason::Stop)],
-        "the tool turn reads as ToolCalls whatever the wire said"
+async fn a_turn_patched_to_tool_choice_none_rejects_a_skip() -> anyhow::Result<()> {
+    let model = MockCompletionModel::from_turns([
+        MockTurn::tool_call("tool_call_1", "add", json!({"x": 1, "y": 2})),
+        MockTurn::text("the skip was accepted"),
+    ]);
+    let recorded = model.clone();
+    let agent = AgentBuilder::new(model).tool(MockAddTool).build();
+
+    let result = agent
+        .prompt("do not use tools")
+        .add_hook(PatchChoiceThenSkip::new(ToolChoice::None))
+        .max_turns(3)
+        .await;
+
+    anyhow::ensure!(
+        matches!(result, Err(PromptError::UnknownToolCall { ref tool_name, .. }) if tool_name == "add"),
+        "a Skip under a turn patched to ToolChoice::None must fail with UnknownToolCall, got {result:?}"
     );
-    assert_eq!(
-        response
-            .completion_calls
-            .first()
-            .and_then(|call| call.finish_reason.clone()),
-        Some(FinishReason::ToolCalls),
-        "the record agrees with the hook"
+    anyhow::ensure!(recorded.request_count() == 1);
+    Ok(())
+}
+
+/// An agent-level `ToolChoice::None` patched to `Auto` for the turn permits
+/// tools, so a Skip of an unknown call is valid and the run continues.
+#[tokio::test]
+async fn a_turn_patched_away_from_tool_choice_none_accepts_a_skip() -> anyhow::Result<()> {
+    let model = MockCompletionModel::from_turns([
+        MockTurn::tool_call("tool_call_1", "default_api", json!({"x": 1, "y": 2})),
+        MockTurn::text("done"),
+    ]);
+    let agent = AgentBuilder::new(model)
+        .tool(MockAddTool)
+        .tool_choice(ToolChoice::None)
+        .build();
+
+    let result = agent
+        .prompt("use tools")
+        .add_hook(PatchChoiceThenSkip::new(ToolChoice::Auto))
+        .max_turns(3)
+        .await;
+
+    anyhow::ensure!(
+        matches!(result, Ok(ref answer) if answer.output() == "done"),
+        "a Skip under a turn patched to ToolChoice::Auto must be accepted, got {result:?}"
     );
+    Ok(())
+}
+
+/// The invalid-call context reports the tool choice the turn was sent with,
+/// not the run-level default it was patched from.
+#[tokio::test]
+async fn invalid_tool_call_context_reports_the_patched_tool_choice() -> anyhow::Result<()> {
+    let model = MockCompletionModel::from_turns([
+        MockTurn::tool_call("tool_call_1", "default_api", json!({"x": 1, "y": 2})),
+        MockTurn::text("done"),
+    ]);
+    let agent = AgentBuilder::new(model).tool(MockAddTool).build();
+    let hook = PatchChoiceThenSkip::new(ToolChoice::Required);
+
+    let result = agent
+        .prompt("use tools")
+        .add_hook(hook.clone())
+        .max_turns(3)
+        .await;
+
+    anyhow::ensure!(result.is_ok(), "run should succeed, got {result:?}");
+    let seen = hook.seen();
+    anyhow::ensure!(
+        seen == vec![Some(ToolChoice::Required)],
+        "invalid-call context must report the patched ToolChoice::Required, got {seen:?}"
+    );
+    Ok(())
 }

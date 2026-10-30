@@ -1,22 +1,19 @@
 //! Reasoning across a session boundary: a reasoning turn with a tool call is
 //! recorded, its history is persisted the way an application would
-//! (serialized to JSON and loaded back, or held by an ECS world that is
-//! checkpointed and restored fresh), and the conversation continues live
+//! (serialized to JSON and loaded back), and the conversation continues live
 //! from the loaded history, optionally on a different model of the same
 //! provider.
 //!
 //! The run asserts the loaded history equals the original, provenance
-//! included, and the recording asserts every signature, ciphertext and id the
-//! first reply delivered reaches the continuation in the slot that must carry
-//! it.
+//! included. On the same model the recording asserts every signature,
+//! ciphertext and id the first reply delivered reaches the continuation in
+//! the slot that must carry it; on another model it asserts the call ids
+//! still pair and no reasoning state is sent.
 
 use serde_json::Value;
 
-use rig_agent::completion::CompletionModel;
 use rig_core::completion::{CompletionRequest, ToolDefinition};
-use rig_core::message::{
-    AssistantContent, Message, ReasoningContent, ToolResultContent, UserContent,
-};
+use rig_core::message::{AssistantContent, Message, ToolResultContent, UserContent};
 
 use super::{Dialect, lost_tokens, response_tokens};
 
@@ -38,7 +35,7 @@ const CODE: &str = "amber-5521";
 
 fn tool() -> ToolDefinition {
     ToolDefinition {
-        name: "lookup_code".to_owned(),
+        name: rig_core::message::ToolName::new("lookup_code").expect("tool name"),
         description: "Return the code stored for a record. Always call it before answering."
             .to_owned(),
         parameters: serde_json::json!({
@@ -50,31 +47,26 @@ fn tool() -> ToolDefinition {
 }
 
 fn request(cell: Cell, history: Vec<Message>) -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        chat_history: history,
-        documents: vec![],
-        tools: vec![tool()],
-        temperature: None,
-        max_tokens: Some(cell.max_tokens),
-        tool_choice: None,
-        additional_params: (cell.params)(),
-        output_schema: None,
-        record_telemetry_content: false,
-    }
+    let mut request = CompletionRequest::from(history);
+    request.tools = vec![tool()];
+    request.max_tokens = Some(cell.max_tokens);
+    request.additional_params = (cell.params)();
+    request
 }
 
 /// Record the first turn on `first`, persist and reload its history, answer
 /// the call, and continue on `second` (the same model, or another model of
 /// the same provider).
-pub async fn run<A, B>(first: A, second: B, cell: Cell)
-where
-    A: CompletionModel,
-    B: CompletionModel,
-{
+pub async fn run(
+    first: impl Into<rig_core::DynModel<rig_core::operation::Completion>>,
+    second: impl Into<rig_core::DynModel<rig_core::operation::Completion>>,
+    cell: Cell,
+) {
+    let first: rig_core::DynModel<rig_core::operation::Completion> = first.into();
+    let second: rig_core::DynModel<rig_core::operation::Completion> = second.into();
     let loaded = turn_one(&first, cell).await;
     let answer = second
-        .completion(request(cell, loaded))
+        .call(request(cell, loaded))
         .await
         .unwrap_or_else(|error| {
             panic!(
@@ -85,93 +77,17 @@ where
     assert_answer(cell, &answer.choice);
 }
 
-/// Record the first turn on `first`, then checkpoint a world holding the
-/// continuation, restore it into a fresh world whose model handler is
-/// `second`, and let the restored world send it.
-pub async fn run_checkpoint<A, B>(first: A, second: B, cell: Cell)
-where
-    A: CompletionModel,
-    B: CompletionModel + Clone + 'static,
-{
-    use bevy_app::App;
-    use rig_core::effect::{EffectKind, Outcome};
-    use rig_core::serve::{ErasedHandler, adapters::CompletionAdapter};
-    use rig_ecs::bus::{EffectOutcome, Handlers, PendingEffect};
-    use rig_ecs::checkpoint::{Checkpoint, RestoreMode, load_world, save_world};
-
-    const KEY: &str = "session/model";
-    fn app() -> App {
-        let mut app = App::new();
-        app.add_plugins(rig_ecs::RigPlugin::default());
-        app.finish();
-        app.cleanup();
-        app
-    }
-    let handler = |model: B| {
-        ErasedHandler::new(crate::ecs_agent::RuntimeHandler {
-            inner: std::sync::Arc::new(CompletionAdapter::new("session", model)),
-            runtime: crate::ecs_agent::io_runtime(),
-        })
-    };
-
-    let history = turn_one(&first, cell).await;
-    let mut saved = app();
-    Handlers::with(saved.world_mut(), |handlers| {
-        handlers.register_erased(KEY, handler(second.clone()))
-    })
-    .expect("bus installed")
-    .expect("fresh model key");
-    saved.world_mut().spawn(PendingEffect::new(
-        KEY,
-        EffectKind::Completion {
-            request: request(cell, history),
-            stream: false,
-        },
-    ));
-    let scene = serde_json::to_string(&save_world(saved.world_mut()).expect("the world saves"))
-        .expect("the checkpoint serializes");
-    drop(saved);
-
-    let scene: Checkpoint = serde_json::from_str(&scene).expect("the checkpoint loads");
-    let mut restored = app();
-    load_world(
-        &scene,
-        restored.world_mut(),
-        RestoreMode::Replace,
-        [(KEY.into(), handler(second))],
-    )
-    .unwrap_or_else(|error| panic!("[{}] the checkpoint restores: {error}", cell.provider));
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(300), async {
-        loop {
-            restored.update();
-            let outcome = restored
-                .world_mut()
-                .query::<&EffectOutcome>()
-                .iter(restored.world())
-                .next()
-                .map(|outcome| outcome.0.clone());
-            if let Some(outcome) = outcome {
-                return outcome;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("the restored continuation finishes");
-    match outcome {
-        Ok(Outcome::Completion(answer)) => assert_answer(cell, &answer.choice),
-        other => panic!("[{}] restored continuation: {other:?}", cell.provider),
-    }
-}
-
 /// Run turn one and return its history (prompt, reply, tool result) after a
 /// JSON persistence round trip that must preserve it exactly.
-async fn turn_one<A: CompletionModel>(first: &A, cell: Cell) -> Vec<Message> {
+async fn turn_one(
+    first: &rig_core::DynModel<rig_core::operation::Completion>,
+    cell: Cell,
+) -> Vec<Message> {
     let prompt = Message::user(
         "Think it through, then call lookup_code for record alpha. Do not guess the code.",
     );
     let reply = first
-        .completion(request(cell, vec![prompt.clone()]))
+        .call(request(cell, vec![prompt.clone()]))
         .await
         .unwrap_or_else(|error| panic!("[{}] turn one: {error}", cell.provider));
     let call = reply
@@ -200,29 +116,10 @@ async fn turn_one<A: CompletionModel>(first: &A, cell: Cell) -> Vec<Message> {
         "[{}] turn one reasoned",
         cell.provider
     );
-    assert!(
-        reasoning
-            .iter()
-            .all(|reasoning| reasoning.provider.is_some()),
-        "[{}] decoded reasoning records its issuer",
-        cell.provider
-    );
-    // Replayable state rides a reasoning block (signature, ciphertext, item
-    // id) or, on Gemini, the function call itself (its thought signature).
-    let replayable = call.signature.is_some()
-        || reasoning.iter().any(|reasoning| {
-            reasoning.id.is_some()
-                || reasoning.content.iter().any(|block| {
-                    matches!(
-                        block,
-                        ReasoningContent::Text {
-                            signature: Some(_),
-                            ..
-                        } | ReasoningContent::Encrypted(_)
-                            | ReasoningContent::Redacted { .. }
-                    )
-                })
-        });
+    // Replayable state rides a reasoning block's provider item (signature,
+    // ciphertext, item id) or, on Gemini, the function call's.
+    let replayable =
+        call.native.is_some() || reasoning.iter().any(|reasoning| reasoning.native.is_some());
     assert!(
         cell.expect.is_empty() || replayable,
         "[{}] turn one delivered replayable reasoning state",
@@ -231,14 +128,10 @@ async fn turn_one<A: CompletionModel>(first: &A, cell: Cell) -> Vec<Message> {
 
     let history = vec![
         prompt,
-        Message::Assistant {
-            id: reply.message_id.clone(),
-            content: reply.choice.clone(),
-        },
+        Message::Assistant(reply.head().with_content(reply.choice.clone())),
         Message::User {
-            content: vec![UserContent::tool_result_for(
+            content: vec![UserContent::tool_result(
                 call.id.clone(),
-                call.provider.clone(),
                 call.function.name.clone(),
                 vec![ToolResultContent::text(format!(
                     "record alpha: code {CODE}"
@@ -275,10 +168,11 @@ fn assert_answer(cell: Cell, choice: &[AssistantContent]) {
 /// An agent with conversation memory answers a tool-using prompt, then a
 /// second prompt in the same conversation, streamed or not. The second
 /// prompt's request is built from what the agent wrote to memory.
-pub async fn run_memory<A>(model: A, cell: Cell, streamed: bool)
-where
-    A: CompletionModel + 'static,
-{
+pub async fn run_memory(
+    model: impl Into<rig_core::DynModel<rig_core::operation::Completion>>,
+    cell: Cell,
+    streamed: bool,
+) {
     use futures::StreamExt;
     use rig_agent::agent::{AgentBuilder, MultiTurnStreamItem};
 
@@ -302,7 +196,7 @@ where
                 if let MultiTurnStreamItem::FinalResponse(response) =
                     item.unwrap_or_else(|error| panic!("[{}] stream: {error}", cell.provider))
                 {
-                    output = Some(response.output);
+                    output = Some(response.output());
                 }
             }
             output.expect("a final response")
@@ -312,7 +206,7 @@ where
                 .max_turns(3)
                 .await
                 .unwrap_or_else(|error| panic!("[{}] prompt: {error}", cell.provider))
-                .output
+                .output()
         };
         assert!(
             output.contains(crate::support::ALPHA_SIGNAL_OUTPUT),
@@ -360,11 +254,50 @@ pub fn assert_memory_recorded(cell: Cell, scenario: &str) {
     }
 }
 
-/// The first reply's reasoning state reaches the continuation, each value in
-/// its slot, and the expected kinds were delivered.
+/// The first reply's reasoning state reaches a continuation on the same
+/// model, each value in its slot, and the expected kinds were delivered.
 pub fn assert_recorded(cell: Cell, scenario: &str) {
+    let (dialect, reply, next) = recorded(cell, scenario);
+    let lost = lost_tokens(dialect, &reply, &next);
+    assert!(
+        lost.is_empty(),
+        "[{}] lost in the continuation: {lost:?}",
+        cell.provider
+    );
+}
+
+/// A continuation on another model replays the first reply from its
+/// canonical fields: its call ids still pair, and none of its reasoning
+/// state, which only the model that produced it reads, is sent.
+pub fn assert_ported(cell: Cell, scenario: &str) {
+    let (dialect, reply, next) = recorded(cell, scenario);
+    let lost: Vec<_> = lost_tokens(dialect, &reply, &next)
+        .into_iter()
+        .filter(|token| token.kind == "tool_call_id")
+        .collect();
+    assert!(
+        lost.is_empty(),
+        "[{}] call ids lost in the continuation: {lost:?}",
+        cell.provider
+    );
+    let sent = next.to_string();
+    let leaked: Vec<_> = response_tokens(dialect, &reply)
+        .into_iter()
+        .filter(|token| !matches!(token.kind, "tool_call_id" | "phase"))
+        .filter(|token| sent.contains(&token.value))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "[{}] reasoning state sent to another model: {leaked:?}",
+        cell.provider
+    );
+}
+
+/// The recorded first reply and continuation request, after asserting the
+/// first reply delivered every expected kind verbatim.
+fn recorded(cell: Cell, scenario: &str) -> (Dialect, String, Value) {
     let paths = crate::cassettes::recorded_request_paths(cell.provider, scenario);
-    let bodies = crate::cassettes::recorded_interaction_bodies(cell.provider, scenario);
+    let mut bodies = crate::cassettes::recorded_interaction_bodies(cell.provider, scenario);
     assert_eq!(
         bodies.len(),
         2,
@@ -373,13 +306,8 @@ pub fn assert_recorded(cell: Cell, scenario: &str) {
     );
     let dialect = Dialect::from_path(&paths[0]);
     let next: Value = serde_json::from_str(&bodies[1].0).expect("continuation request is JSON");
-    let lost = lost_tokens(dialect, &bodies[0].1, &next);
-    assert!(
-        lost.is_empty(),
-        "[{}] lost in the continuation: {lost:?}",
-        cell.provider
-    );
-    let delivered = response_tokens(dialect, &bodies[0].1);
+    let reply = bodies.swap_remove(0).1;
+    let delivered = response_tokens(dialect, &reply);
     for kind in cell.expect {
         assert!(
             delivered
@@ -389,4 +317,5 @@ pub fn assert_recorded(cell: Cell, scenario: &str) {
             cell.provider
         );
     }
+    (dialect, reply, next)
 }

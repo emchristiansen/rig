@@ -3,46 +3,15 @@
 //! become ignorable unknown events.
 //!
 //! ```
-//! use rig_core::providers::internal::wire::{classify_untyped_line, WireEvent};
+//! use rig_core::providers::internal::wire::classify_untyped_line;
+//! use rig_core::wire::WireEvent;
 //! let event = classify_untyped_line::<serde_json::Value>(b"{}");
 //! assert!(matches!(event, WireEvent::Known(_)));
 //! ```
 
 use crate::error::CorruptFrame;
 
-/// One classified wire frame.
-#[derive(Debug)]
-pub enum WireEvent<T> {
-    /// The frame carries a discriminator this client models and its payload
-    /// decoded fully.
-    Known(T),
-    /// Valid JSON not recognized by this classifier.
-    /// Drivers log structural metadata only and skip interpretation.
-    Unknown {
-        /// The unmodeled discriminator value.
-        event_type: String,
-        /// Full payload for raw passthrough, never warning logs. Debug is redacted.
-        value: crate::streaming::UnknownPayload,
-    },
-    /// Invalid JSON or a recognized frame that failed typed decoding, with
-    /// what was kept of the frame. Must not be demoted to `Unknown`.
-    Corrupt(CorruptFrame),
-}
-
-impl<T> WireEvent<T> {
-    /// Map the `Known` payload, preserving the classification.
-    ///
-    /// This is how an adapter layers a pure event-shape mapping on top of a
-    /// classifier without restating the triage: `Unknown` and `Corrupt` pass
-    /// through untouched, so policy stays with the driver.
-    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> WireEvent<U> {
-        match self {
-            Self::Known(event) => WireEvent::Known(f(event)),
-            Self::Unknown { event_type, value } => WireEvent::Unknown { event_type, value },
-            Self::Corrupt(error) => WireEvent::Corrupt(error),
-        }
-    }
-}
+use crate::wire::WireEvent;
 
 /// Classify JSON by its top-level `tag` string.
 /// Unknown strings and non-object JSON produce `Unknown`. Known, missing, or
@@ -261,6 +230,54 @@ pub fn classify_or<T>(
         },
         event => event,
     }
+}
+
+/// The `{ "message": ... }` error envelope some APIs answer with HTTP 200.
+#[derive(serde::Deserialize)]
+struct MessageEnvelope {
+    #[allow(dead_code)]
+    message: String,
+}
+
+/// Classify a whole reply recognized by its `reply_marker` key, or the
+/// `{ "message": ... }` error envelope its API can send with HTTP 200 instead.
+/// The envelope yields its body verbatim as `Err`, so the decoder reports it
+/// and the driver adds the HTTP status. When neither shape decodes, the
+/// reply's diagnostic stands.
+pub fn classify_reply_or_message_envelope<T>(
+    data: &str,
+    reply_marker: &str,
+) -> WireEvent<Result<T, String>>
+where
+    T: serde::de::DeserializeOwned,
+{
+    classify_or(
+        data,
+        |data| classify_marker_keyed_frame::<T>(data, &[reply_marker, "message"]).map(Ok),
+        |data| {
+            classify_marker_keyed_frame::<MessageEnvelope>(data, &["message"])
+                .map(|_| Err(data.to_owned()))
+        },
+    )
+}
+
+/// Fall back to `then` only for a frame without the discriminator `tag`.
+/// A present tag whose known decode failed remains corrupt, preserving
+/// the first classifier's received-frame evidence.
+pub fn classify_or_untagged<T>(
+    data: &str,
+    tag: &str,
+    first: impl Fn(&str) -> WireEvent<T>,
+    then: impl Fn(&str) -> WireEvent<T>,
+) -> WireEvent<T> {
+    classify_or(data, first, |data| {
+        match scan_discriminators(data, &[tag], false) {
+            Ok(DiscriminatorScan::Object(found)) if found.iter().any(|key| key.present) => {
+                unknown_with_value(data, tag.to_owned())
+            }
+            _ => then(data),
+        }
+    })
 }
 
 /// Discriminator presence and first string values collected in one JSON scan.

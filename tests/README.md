@@ -17,18 +17,13 @@ Provider test targets have two owners:
 - `tests/core.rs` contains provider-agnostic core behavior tests and the guards
   that scan the source tree, which need the repository root.
 - `test-support/service-tests/integrations.rs` runs the vector-store suites from `tests/integrations/` as the unpublished `rig-service-tests` package. `tests/integrations.rs` retains the root Bedrock integrations.
-- The [ECS consumer harness](https://github.com/gold-silver-copper/rigcoder/tree/main/crates/rigcoder-verify)
-  is owned by rigcoder. Run `cargo run --locked -p rigcoder-verify -- verify`
-  there for its maintenance/repair cases, replay and supported resume checks.
-  Rig retains its runtime and provider conformance suites.
 
 Cassette suites require a checkout of this repository: `rig-cassette` excludes
 its fixtures and integration tests from the published package. The unpublished
 `rig-cassette-minimal` runner at
-`crates/rig-cassette/tests/minimal/Cargo.toml` executes the same `verify` and
-`world_replay` sources, plus the shared effect-log/classic-replay regressions.
-It selects only cassette's `agent,ecs` features: no native HTTP engine,
-`serde_json/preserve_order` or `serde_json/float_roundtrip`.
+`crates/rig-cassette/tests/minimal/Cargo.toml` executes the same `verify`
+source, plus the shared effect-log/classic-replay regressions. It selects only
+cassette's `agent` feature, without the native HTTP engine.
 
 ```sh
 RIG_PROVIDER_TEST_MODE=replay cargo nextest run --locked -p rig-cassette-minimal --all-features --retries 0
@@ -39,10 +34,10 @@ replaces, the unified verification runs through `rig-cassette`.
 The default/all-features cassette library still owns the unified library
 regressions; `core-all` also retains the migrated classic replay cases.
 Minimal verification runs with zero retries; unified verification and both
-standalone/default-member parity configurations retain their existing two.
-The standalone parity lane explicitly includes the `rig-test-support` ECS
-helper regressions. Source ownership includes the library tests shared by
-the minimal runner, not only its two verification entrypoints.
+standalone/default-member effect-corpus configurations retain their existing
+two. The standalone effect-corpus lane explicitly includes the
+`rig-test-support` corpus regressions. Source ownership includes the library
+tests shared by the minimal runner, not only its verification entrypoint.
 
 ## Testing Doctrine
 
@@ -84,6 +79,7 @@ actually ran the intended tests; a successful command running zero tests is not
 verification.
 
 ```bash
+cargo nextest run --locked --profile local -p rig-core --lib <test-name-filter>
 cargo test --locked -p rig-core --lib <test-name-filter>
 cargo test --locked -p rig --test <provider> <test-name-filter>
 cargo clippy --locked -p rig-core --all-features --tests -- -D warnings
@@ -167,7 +163,19 @@ The other commands:
   on whole tokens, and searches for every exported `*_API_KEY`, `*_TOKEN` and
   `*_SECRET` value literally.
 - `cassette goldens [--test TARGET]...` regenerates effect goldens from
-  replay and reverts churn that only touches `header.deliveries`.
+  replay: each selected target runs with `RIG_REGENERATE_GOLDEN=1`, so each
+  golden holds what its producer logs over its replayed cassette.
+- `cassette audit [--base REF]` checks every effect golden: a block on a
+  stream's end must be what the block's deltas carried, and an end whose
+  deltas assembled text, or that closes an open reasoning part, must carry
+  its block. It then classifies each change from `REF` (default `HEAD`) as
+  an inserted close or reasoning start, a block added to an end, or a count
+  shift that follows the inserted events, and fails on any other change or
+  any mismatch. A deleted golden that no test names, or that the cassette
+  prune lists, is retired, and a fixture the prune lists is no cassette
+  change.
+- `cassette prune [--check]` deletes the cassette tests, fixtures and
+  goldens the kept tests already cover (see "Cassette prune" below).
 - `cassette cleanup [ledger.jsonl]` runs the cleanup pass on its own.
 
 The recorder refuses to write a fixture, and panics, in two cases:
@@ -222,6 +230,154 @@ why the bytes are not obtainable live. Scripted fault families need no marker:
 they borrow frames from another scenario's fixture and never open a recording
 session of their own.
 
+#### Stale objects slow macOS test processes
+
+On macOS, incremental builds leave each relinked test binary's object files
+beside it in `target/debug/deps`, and nothing deletes the old ones. Every
+process that asks CoreFoundation for its main bundle lists that directory:
+reqwest does when it reads the system proxy settings, and rustls-native-certs
+does when it loads the platform trust store. With hundreds of thousands of
+stale objects the listing takes seconds per test. A fully parallel
+`-p rig-cassette` run then fails the tests that start an httpmock server,
+which loads the trust store (`no native root CA certificates found`). Delete
+the stale objects. A binary built before then loses only its backtrace line
+numbers until it is relinked:
+
+```bash
+find target/debug/deps -maxdepth 1 -name '*.rcgu.o' -delete
+```
+
+Bedrock replay gives the SDK a plain HTTP client for the loopback replay
+server, so it never loads the trust store.
+
+#### Time in cassette tests
+
+Code whose requests depend on time (a cache that expires, a TTL chosen from
+the gaps between calls) sends different bodies when time differs, and the
+request snapshots pin bodies byte for byte. Give such code the session's clock,
+`ProviderCassette::clock()`, instead of the system clock:
+
+- **Recording** reads wall time and saves every reading, in order, beside the
+  fixture as `<fixture>.clock.json`.
+- **Replay** returns the same readings in the same order. It panics when the
+  code asks for more readings than were recorded, and `finish` panics when it
+  asks for fewer: either way the code reads time differently from its
+  recording, so re-record.
+
+A test that needs a real pause calls `ProviderCassette::pause(duration)`. It
+sleeps only while recording, returns at once on replay, and refuses anything
+over `MAX_PAUSE` (60 s): no cassette test waits longer, and no replayed test
+sleeps at all.
+
+#### Request snapshots
+
+Every replay in this workspace also checks each request body against the
+request snapshot beside its fixture, `<fixture>.requests.json`, and fails
+with the differing JSON pointers when they disagree. `.cargo/config.toml`
+sets `RIG_CASSETTE_SNAPSHOTS=check` and `cargo xtask verify` forces it; the
+published engine leaves snapshots off.
+
+A snapshot holds only how the body Rig sends differs from the recorded one,
+one entry per differing interaction:
+
+```json
+{
+  "interactions": [
+    {
+      "index": 0,
+      "changes": [
+        { "path": "/messages/0/content", "recorded": [{ "text": "hi", "type": "text" }], "sent": "hi" },
+        { "path": "/messages", "splice": 2, "recorded": [], "sent": [{ "role": "user" }] }
+      ]
+    }
+  ]
+}
+```
+
+`path` is a JSON pointer into the scrubbed, key-sorted recorded body.
+`recorded` alone removes a key, `sent` alone adds one, and both replace a
+value. With `splice`, `recorded` and `sent` are the array items removed and
+inserted at that index. A multipart body is compared as its parts: headers,
+and the body as text up to 4 KiB, else its length and FNV-1a hash. A fixture
+whose requests all equal their recordings has no snapshot. Full copies of
+every request body would add about 156 MB beside 222 MB of cassettes; the
+recording already pins those bytes, so only the difference is stored.
+
+#### Shape-matched replay
+
+Replay in this workspace matches a request to a recording by its coarse
+shape, not its bytes: `.cargo/config.toml` sets `RIG_CASSETTE_MATCHING=shape`
+and `cargo xtask verify` forces it; the published engine matches exactly.
+The method, path, query and recorded headers still match exactly. The body
+key keeps:
+
+- the field structure, with every value and its type erased;
+- every array of objects in order, so the roles of `messages` and the items
+  of a Responses `input` stay in sequence;
+- the values of `model`, `role`, `name` (tool names, also inside content)
+  and `stream` (the reply mode, with the path and query);
+
+and reduces a content value (`content`, `parts`, `system`, `instructions`,
+`output`, `prompt`, `response`, `result`) to the tool names in it, so a
+string and a one-part text array agree. Tool schemas and tool arguments
+(`parameters`, `input_schema`, `arguments`, `args`, ...) are erased, an array
+of scalars collapses, and a multipart body is keyed by its field names.
+Unordered replay serves, among the unplayed interactions with the key, the
+one whose expected body (the recording with its snapshot applied) the
+request is closest to, counted in snapshot changes.
+
+So a change to how Rig writes a request that keeps its coarse shape needs no
+re-record: the request still replays, the snapshot check fails until
+`cargo xtask cassette snapshots` records the difference, and the reviewer
+reads that diff. A change of shape (a new field, another role sequence)
+misses its recording and needs one. A cell whose subject is the exact matcher
+opts out with `CassetteSpec::exact_matched()`.
+
+```bash
+cargo xtask cassette snapshots                  # rewrite every snapshot from replay
+cargo xtask cassette snapshots --test openai    # rewrite only what one target replays
+cargo xtask cassette snapshots --check          # replay and fail on any difference
+```
+
+A rewrite deletes every snapshot first, then replays with
+`RIG_CASSETTE_SNAPSHOTS=write`; with `--test` it deletes nothing. Run it after
+a change to what Rig sends or after re-recording a fixture, and review the
+snapshot diff with the change.
+
+#### Acceptance index
+
+`crates/rig-cassette/fixtures/acceptance.toml` maps every request fact Rig
+sends, per provider and encoder, to one interaction recorded live whose
+request holds it. A fact is one object of the body: its path with array
+indices collapsed, its sorted keys, and each key's scalar type or container
+kind, keeping the values of discriminators such as `role` and `type`. A
+JSON Schema's property names (`properties`, `$defs`, ...) share one path, and
+a tool call's arguments or a tool's result is not read. A body that is not
+JSON is one fact: empty, binary, text, or its multipart field names. Facts
+do not capture combinations of fields: a request that only combines objects
+already recorded needs no recording of its own. The coarse key and replay
+still exercise every whole request. What Rig sends is read offline from each
+recording with its snapshot applied, so the check reads files only. A
+recording whose request body the proxy recorder dropped is pinned to the
+facts its snapshot showed when the fixture was first indexed, until the
+fixture changes.
+
+```bash
+cargo xtask cassette acceptance           # rewrite the index
+cargo xtask cassette acceptance --check   # CI's `verify --check acceptance`
+```
+
+`--check` fails when a fact Rig sends has no live recording, naming the
+provider, the encoder, the path, the fact and the smallest cassette that
+sends it, and when the index is stale. The rules for a change to what Rig
+sends:
+
+- it keeps every request's coarse shape: refresh the snapshots, rewrite the
+  index, and record nothing;
+- it adds a fact: re-record one cassette per provider and fact that
+  `--check` lists, and only those;
+- never re-record a cassette whose shape did not change.
+
 ChatGPT record mode additionally needs `CHATGPT_ACCESS_TOKEN=... CHATGPT_ACCOUNT_ID=...`.
 
 Bedrock cassette replay does not require AWS credentials. Bedrock record mode uses the AWS
@@ -234,9 +390,8 @@ Venice's text-to-speech scenario records through the direct recorder rather than
 the httpmock proxy: the proxy exports bodies as strings, so a binary response
 (raw audio) is exported with no body at all and replays as zero bytes. Its
 transcription scenario stays on the proxy path, where the same limitation drops
-the *request's* multipart body — a cassette that recorded no body still matches
-a multipart request, and the multipart shape itself is pinned by unit tests
-beside the provider.
+the *request's* multipart body. A cassette that recorded no body still matches
+a multipart request; its request snapshot pins the parts Rig sends.
 
 Run one cassette test by passing a test-name substring after the test target;
 the filter is a substring match, so use the full module path only when the
@@ -278,7 +433,9 @@ A provider hands Rig opaque fields only it can interpret (thinking signatures,
 encrypted reasoning, redacted reasoning, reasoning item ids, tool-call ids)
 and expects them back on the next turn, in the slot that carries them: the
 signature on its own reasoning block, the ciphertext on its reasoning item,
-the call id on both the call and its result. The rule lives in
+the call id on both the call and its result. A Responses message's `phase`
+is held to the same rule: it must return on the assistant item with the
+message's id. The rule lives in
 `test-support/rig-test-support/src/history_survival.rs`, modeled per dialect,
 and is applied twice:
 
@@ -299,13 +456,12 @@ and is applied twice:
   another wire's committed reply through Rig's real decoder, continue it on
   the target wire, and assert no foreign reasoning state reached it.
 
-Reasoning records the service that issued it, and a request replays only that
-service's reasoning (Claude on Bedrock shares Anthropic's).
+An assistant turn records its origin: the wire format, provider and model
+that produced it. A request to that same model replays the turn's provider
+items verbatim, and any other request replays only its canonical fields.
 Further cell families exercise the same round trip: `stateful_chain_matrix`
 (OpenAI `previous_response_id` and file ids, Gemini `cachedContents` and
-Interactions), `session_matrix` (history persisted through serde, an ECS
-checkpoint restored into a fresh world, or agent memory, then continued),
-`adversarial_matrix` (reused call ids, reordered parallel results, long
+Interactions), `adversarial_matrix` (reused call ids, reordered parallel results, long
 ciphertext, signed empty reasoning, a history ported across three providers
 and back), `image_input_matrix` and `request_identity_matrix`. Chains create
 and delete their server-side resources in the recorded session, so a
@@ -315,6 +471,185 @@ Record a cell with the ordinary record mode and an exact test name. Set
 `RIG_LONG_TASK_ATTEMPT_DIR` to keep the exchanges of a failed attempt outside
 the tree, and `RIG_HISTORY_SURVIVAL_CENSUS` or `RIG_PORTABILITY_REPORT` to
 write the census and the forwarded-field report to a file.
+
+## Coverage Gate
+
+`cargo xtask coverage` measures what the tests cover and keeps a compact
+baseline of it in `crates/rig-cassette/coverage/`:
+
+- `lines.tsv`: line and branch coverage of every production file (the `src/`
+  trees of the facade and `crates/*`, without test modules, test helpers and
+  proc-macro crates). It comes from `cargo llvm-cov nextest` over the
+  workspace with all features under the `local` profile. A baseline keeps only
+  what every instrumented run covered (three unless `--runs` says otherwise),
+  so a branch that a race reaches in some runs is not held against a later
+  one. Only what the current platform instruments is compared, so code
+  another platform compiles out is never a loss; production code has no
+  macOS- or Linux-only region today. A count llvm-cov prints
+  wrapped (`u64::MAX` for a line, `u32::MAX` for a branch) is not coverage:
+  llvm-cov derives some counts by subtracting counters, and a panic that
+  unwinds out of a function between two increments drives one below zero.
+  A test whose panic races another ending of the test makes such counts come
+  and go, so a test ends one way only: a tripwire that must not run should
+  never answer rather than panic on a pool thread.
+- `unstable.tsv`: the regions whose coverage depends on scheduling, each
+  with its file's source hash, the trimmed source line and a one-line reason.
+  The line part leaves them out of the baseline and of every measurement, so
+  neither outcome of the race fails the gate. A row applies while the file's
+  source and its `lines.tsv` row carry the row's hash; when the file changes,
+  its ratio leaves the rows' regions off its totals. Prefer making the test
+  deterministic: a row is for a race the test cannot control, such as a pool
+  thread finishing before or after a system pass. Writing the baseline adds
+  every region its runs disagree on, with an empty reason, and moves kept
+  rows to their code's new line. `--check` fails on a row without a reason
+  or written for another baseline. When `--check` loses a region of an
+  unchanged file it prints that region's row; CI uploads its measurement. If
+  the loss is a race, adopt the row with a reason; if a change lost it, fix
+  the change.
+- `shapes.tsv`: per provider and encoder (method and path template), every
+  request fact and reply shape the cassettes record, with its count of
+  recordings and one example fixture. A request fact is the acceptance
+  index's (see "Acceptance index"). A reply shape is the status, the framing,
+  and the skeleton of the whole body or of each stream event: JSON keys and
+  types kept, values erased except discriminators such as `type` and
+  `finish_reason`, and each array collapsed to the set of its element
+  skeletons. A reply shape is also recorded by a reply bank entry of a
+  provider the `runtime` target's `decode` tests sweep (every provider but
+  Bedrock); its example is then `bank:<source>`. The entry is a verbatim
+  provider reply with its source, the bank keeps it when its fixture goes,
+  and `decode` fails on an entry it cannot decode, so it pins the decoder as
+  a cassette would. A request fact needs a cassette, since its acceptance
+  needs a live request.
+- `mutants.tsv`: a fixed sample of the `cargo mutants` mutants of the replay
+  core, each run against its crate's unit tests and conformance targets, with
+  its outcome, how many tests failed on it and the first three of them. A mutant is in the sample when
+  the hash of its position-free name is divisible by the sample size.
+
+```sh
+cargo xtask coverage --check            # lines and shapes: CI's `verify --check coverage`
+cargo xtask coverage --check --mutants  # also mutation: run it in a PR that deletes tests
+cargo xtask coverage [--only lines,shapes,mutants] [--sample N] [--jobs N]  # rewrite the baseline
+NEXTEST_TEST_THREADS=4 cargo xtask coverage --only lines --runs 5  # lines.tsv and unstable.tsv as CI's 4 cores see them
+cargo xtask coverage --per-test         # every test's lines and branches, in target/coverage/per-test.tsv
+```
+
+`--check` fails when an unchanged file loses a covered line or branch, a
+changed file's line or branch ratio falls, a mutant the baseline killed
+survives, or a request fact or reply shape loses its last recording (a
+cassette, or for a reply shape a decoded bank entry). It
+leaves each measurement in `target/coverage/`. When a change moves coverage
+on purpose, rewrite the affected baseline file and review its diff with the
+change. The lines part needs `cargo-llvm-cov`, the `llvm-tools` component,
+nextest and protoc, and builds the instrumented crates alone with
+`RUSTC_BOOTSTRAP`, since branch coverage is unstable in rustc. Mutation needs
+`cargo-mutants` and takes hours, so CI never runs it.
+
+### Cassette prune
+
+`cargo xtask cassette prune` deletes the cassette tests whose coverage the
+kept tests already give, by a fixed rule, and lists every deletion in
+`crates/rig-cassette/coverage/pruned.tsv` with the kept tests that cover what
+it covered. Review the rule at the head of that file and the list, not the
+deleted files.
+
+- The candidates are the tests of the provider targets that record, replay
+  or read a cassette, or name an effect golden. Every other test stays: the
+  crates' unit tests, the conformance targets, the `runtime` target over the
+  reply bank, and `verify`. So does every fixture or golden
+  something outside the candidates names, and every recording test of a
+  fixture that stays.
+- The elements are every line and branch of `lines.tsv` (from each test's own
+  coverage, `cargo xtask coverage --per-test`), every request fact and reply
+  shape of `shapes.tsv` but the reply shapes the reply bank holds, and every
+  fact of the acceptance index. The tests that sweep a corpus directory stay
+  but are not credited, since what they cover depends on the files that
+  exist.
+- Greedy set cover over the elements the always-kept tests do not hold: the
+  candidate covering the most is taken, then the one with smaller fixtures,
+  then the alphabetically first; then every taken test the others make
+  redundant goes, latest first.
+- A fixture goes when every test naming it goes, with its `.requests.json`
+  and `.clock.json`; the reply bank keeps its replies. A golden goes with its
+  producer. A kept producer's golden stays only when something else reads
+  it, or it is the one format pin of an effect kind; otherwise the producer
+  checks its log in the test: the log replays record by record through its
+  own replayers by effect id. Such a golden
+  is never written, `RIG_REGENERATE_GOLDEN` included.
+- The mutation baseline is measured against the fast suites only, so no
+  deletion of a cassette test or golden can lose a kill.
+
+```bash
+cargo xtask coverage --per-test      # each test's coverage, the prune's input
+cargo xtask cassette prune           # delete, write pruned.tsv, edit the tests out
+cargo xtask cassette prune --check   # fail when it would delete more or the list disagrees
+```
+
+A rewrite deletes the files, takes the tests out of their sources (with the
+doc table rows that name only them) and keeps the rows of earlier deletions.
+Delete the helpers and emptied modules the compiler then reports unused, and
+rerun until `--check` passes: a helper that named a fixture held it until it
+went. `--check` reads the same `per-test.tsv`; rows of tests no longer in the
+source are not read.
+
+A provider file another target compiles (the `runtime` target's lifecycle and
+session rows) is kept whole. A region that only a corpus sweep reaches,
+through one recording, is kept by listing that fixture or golden in
+`crates/rig-cassette/coverage/prune-keep.txt` with its reason; the gate's
+`--check` names such a region when it is lost.
+
+The parity snapshots (`fixtures/parity/<provider>.json`) follow the golden
+rule: each pins one reply per reply shape and mode, the smallest, then the
+first in path order, and every other reply is checked in the test by its
+`call` and `stream().finish()` agreeing. `RIG_REGENERATE_PARITY=1` rewrites
+the pinned entries.
+
+### Unit-test prune
+
+`cargo xtask tests prune` applies the same selection to the crates' own
+tests and lists every deletion in
+`crates/rig-cassette/coverage/pruned-tests.tsv`, with the fewest kept tests
+that cover what it covered. It keeps its own manifest because its
+candidates, elements and keep rules differ from the cassette prune's, and
+each `--check` owns its file whole.
+
+- The candidates are the tests of `rig`, `rig-core`, `rig-agent`,
+  `rig-bedrock`, `rig-vertexai`, `rig-gemini-grpc`, `rig-candle` and
+  `rig-memory` that the per-test run covered and that are a `#[test]`-style
+  function the source scan can place. The conformance rows, helper-module
+  tests, macro-generated tests and every other package's tests stay. xtask
+  and the test-support crates test code `lines.tsv` does not measure, so
+  their tests stay too.
+- A test goes only when every line and branch it covers is covered by a kept
+  test, no killed mutant of `mutants.tsv` loses its last named killer, and
+  it is not a contract test: wasm, compile-fail, public API shape (including
+  a test with nothing that can fail at run time, which checks that its paths
+  resolve), security or scrub, a serde round trip of a stored format or a
+  golden, fixture or recorded-cassette pin, or an error-message or
+  rendered-text assertion, each read from the test's name and tokens, or a
+  test another tracked `.rs` or `.md` file cites by name. Only an uncited
+  error-message or rendered-text test may still go, when an earlier kept
+  contract test holds the same assertions token for token.
+- Only tests that stay whatever either prune selects are credited, so neither
+  the cassette prune's candidates nor the corpus sweeps count. Deleting a
+  unit test then never changes what the cassette prune keeps.
+- Greedy set cover as in the cassette prune, with a table-driven test
+  preferred as a keeper, then the shorter, then the alphabetically first.
+
+```bash
+cargo xtask coverage --per-test          # each test's coverage, the prune's input
+cargo xtask tests prune                  # take the tests out, write pruned-tests.tsv
+cargo xtask tests prune --check          # fail when it would delete more or the list disagrees
+cargo xtask coverage --check --mutants   # confirm no baseline-killed mutant survives
+```
+
+A test the mutation gate shows is the one reliable killer of a mutant (the
+other named killers kill it only by chance) is kept by listing it in
+`crates/rig-cassette/coverage/prune-keep-tests.txt` with its reason.
+
+Delete the helpers the compiler then reports unused. A test renamed or
+merged into a table-driven test leaves `mutants.tsv` naming a gone killer;
+the prune then fails until the mutation baseline is rewritten for that
+package.
 
 ## Prompt Cache Testing
 
@@ -355,11 +690,11 @@ rather than another copy of the assertion logic.
 
 The assertion that carries the weight is `assert_hit_ratio`. `cached_input_tokens > 0` passes
 just as happily when 200 of 40,000 prefix tokens are cached as when 39,800 are; the ratio is
-taken against turn 1's billed prompt. **The denominator differs per provider and getting it
-backwards makes the assertion vacuous**, so it is derived in `CacheAccounting` from each
-provider's own usage mapping: Anthropic reports cache tokens *alongside* `input_tokens`, while
-OpenAI, Gemini, Cohere, DeepSeek, Mistral, OpenRouter and every `openai::Usage` reuser report
-them *inside* it.
+taken against turn 1's billed prompt. **Getting the denominator wrong makes the assertion
+vacuous**, and it is one rule on every provider: `CacheSupport::input_tokens`, turn 1's
+`input_tokens`, which counts cache reads and writes as `Usage`'s rustdoc
+(`rig_core::completion::Usage`) states. `tests/cassette_usage_census.rs` enforces that
+contract on every recorded call of every provider.
 
 Growth is asserted as a ratio, not a monotonic token count: providers cache in coarse blocks, so
 the absolute figure drifts a few tokens as block boundaries re-align (Gemini was measured going
@@ -376,6 +711,116 @@ RIG_PROVIDER_TEST_MODE=record \
 cargo test -p rig-cassette --all-features --test openai openai::cassette::prompt_caching \
   -- --exact --nocapture --test-threads=1
 ```
+
+### Layer 2b: long runs (`test-support/rig-test-support/src/cache_longrun.rs`)
+
+A probe proves a hit on turn 2 or 3. Caching can still degrade over a long run: a marker that
+stops moving forward, a prefix that drifts after turn 40, a cache key that changes, or cache
+writes that cost more than the reads save. Each provider with caching records the same 100-turn
+support chat (the handbook preamble, one `lookup_order` call per turn, about 200 calls) under
+`fixtures/cassettes/<provider>/long_run_caching/` (Gemini: `auto_caching/`), plus a 30-turn run
+with caching off as the baseline.
+
+`cache_longrun` holds everything the runs share:
+
+- The workload (`SUPPORT_PREAMBLE`, `LookupOrder`, `question`) and the turn helpers `chat` and
+  `chat_streamed`, which retry a 5xx or 429 up to three times with record-only pauses of 2, 5
+  and 10 s and count the retries.
+- One reader per wire, `CacheWire::{Gemini, Anthropic, OpenAiChat, OpenAiResponses}`. For each
+  recorded call it gives rig's `Usage` as the wire reported it (input, cached reads, cache
+  writes, output and total), the conversation the call continues, the OpenAI
+  `prompt_cache_key`, and for Gemini the cache the call reads and every `cachedContents`
+  resource created. Prompt tokens are `input_tokens` on every wire, as `Usage`'s rustdoc
+  states.
+- The figures, printed as one `CACHE_LONGRUN <provider>/<scenario> {json}` line per run so a PR
+  table is generated rather than transcribed: calls, fixture bytes, retries, prompt tokens,
+  cached reads, cache writes, cached share, hit rate (calls after the first that read anything),
+  the smallest per-call share from the first read on, cache accuracy (reads over cacheable
+  tokens, where a call's cacheable tokens are its conversation's previous prompt), where the
+  reads fell short of that, writes over prompt tokens, input dollars with and without caching
+  through `rig_core::completion::CacheCost` at the provider's rates, and the same for the first
+  30 turns alone, to set beside the baseline.
+- The checks `check` runs on every run: rig's `Usage` matches the wire on every call (input,
+  cached reads, cache writes, output and total); the input saving, counting every write, read
+  and stored token-hour, is at least the run's floor; from each conversation's first read on,
+  every call is cached above the run's floor and none reads nothing (the prefix-move
+  signature); cache writes stay under the run's cap.
+
+"Not faked" means something different per provider, and each run asserts its own form:
+
+- **Anthropic** bills a write above the input price, so a marker that stops moving forward
+  shows as the same prefix written again and again: writes stay under a share of prompt tokens.
+- **OpenAI** caches automatically and bills writes on GPT-5.6 and later: every request carries
+  the same `prompt_cache_key`, and writes stay under a share of prompt tokens.
+- **Gemini** caches are resources: a request that reads one carries none of what it holds,
+  cache plus request tail is the conversation byte for byte, every cache is deleted, every
+  replaced cache was read at least three times, and creation stays at or below 15% of prompt
+  tokens.
+
+To add a provider, give `CacheWire` a variant with its reader (the call path, the usage fields,
+the first user message), add a `with_<provider>_long_run_cassette` wrapper and register it
+with the cassette-safety scan, and record one 100-turn fixture and its baseline.
+Rates come from the provider's price page, quoted with the date. Thresholds are placeholders
+until a first recording confirms them; never loosen one to make a recording pass. Record with:
+
+```bash
+cargo xtask cassette record --cap 3 <provider>/long_run_caching/<fixture>.yaml ...
+```
+
+A 100-turn run takes six to eleven minutes to record. Replay prints the figures:
+
+```bash
+cargo test -p rig-cassette --all-features --test anthropic long_run_caching -- --nocapture --test-threads=1
+```
+
+#### Workloads beyond the support chat (`cache_longrun::workloads`)
+
+The support chat measures one shape of traffic. `cache_longrun::workloads` holds the others,
+each a deterministic function that drives one conversation (or several) and returns its
+`RunLog`. Each names its conversation with a marker in the first user message, so one fixture
+can hold several conversations and `LongRun::conversation` can pick one out.
+
+- **`mixed_delivery`**: the support chat with odd turns unary and even turns streamed. It
+  measures whether a provider serves a streamed call's prefix to the unary call after it.
+- **`tool_loop`**: account investigations. Each turn calls `order_history` for two accounts
+  in one response, then `shipping_log` with a tracking number from them, then answers: three
+  calls a turn, with tool results of about a thousand tokens each. The workload asserts the
+  parallel call and the log on every turn. Its early calls add two large results to a short
+  prompt, so their cached share is structurally low; the runs set their per-call floor from
+  the first recording (0.30).
+- **`document_session`**: a store policy of about eight thousand tokens attached on the first
+  turn, then a question about it every turn. On Anthropic the document enables citations from
+  the first request, because enabling them later changes the rendered system prompt.
+- **`mid_system_chat`**: a mid-conversation system message every few turns, alternately where
+  Anthropic takes one and where rig moves it after the next user turn. The run asserts every
+  instruction stays in `messages` and none is hoisted into `system`.
+- **`dynamic_tools_chat`** with the `ToolSchedule` hook: the advertised tools change every few
+  turns through a request patch. A turn that fails ends the run and is returned, so a run can
+  assert a refusal.
+- **`fan_out`**: several conversations sharing the preamble, turn 1 one by one and the rest
+  concurrently. Every conversation's requests differ, so the cassette is `.unordered()`, as
+  Gemini's sub-agent run is.
+
+The runs live in `<provider>/cassette/long_run_workloads.rs` (workloads on their own) and
+`long_run_features.rs` (features that can move a prefix), with fixtures under
+`<provider>/long_run_caching/`:
+
+| run | model | measures |
+|---|---|---|
+| `document_60` | claude-opus-5-5 | a large fixed input with citations, read back every turn |
+| `mid_system_every_10_60` | claude-opus-5-5 | mid-conversation system messages keep the prefix |
+| `dynamic_tools_30` | claude-opus-5-5 | a changed tool list: the thinking-block binding 400 on turn 11 |
+| `document_60_responses` | gpt-6-sol | as `document_60`, without citations |
+
+The OpenAI run is stateless (`store: false`), reasons at low effort and sends one
+`prompt_cache_key`. It runs on Responses only: the GPT-6 models take function tools on Chat
+Completions only at `reasoning_effort: "none"`, and gpt-6-astra and gpt-6.1-sol not at all.
+
+To add a workload, write it in `cache_longrun::workloads` as a deterministic function taking
+the agent, the clock, its size and a conversation marker; keep generated inputs fixed text
+(no nonce or timestamp), so a re-recording sends the bytes its cassette holds. Add a run for
+it in `long_run_workloads.rs` with its own `Limits`, rehearse it once under a scratch scenario
+name, and record it with `cargo xtask cassette record`.
 
 ### Layer 3 — live economics (`live_cache_economics`, `#[ignore]`d)
 
@@ -438,9 +883,18 @@ Practical consequences for anyone touching these fixtures:
   request bodies, request *paths* and responses, and the generated-token
   scrubber cannot reach them (it stops a token at `/`), so
   `scrub_resource_names` handles them. Never assert a literal handle.
-- `below_minimum_does_not_cache` is the cell that gives every other cell's
-  padding its meaning. If it ever starts caching, the documented 1,024-token
-  minimum is wrong and every probe's padding needs revisiting.
+- **Pad past the documented 1,024-token minimum.** Every probe's padding
+  assumes it; a prompt below it is not cached.
+
+**Automatic caching** (`gemini::caching`, fixtures under
+`gemini/auto_caching/`) is recorded as long runs: 100-turn support chats
+(about 200 calls each), a 60-call tool loop, four sub-agents and a lifecycle
+run. Their cache book reads the session's recorded clock, so each fixture has
+a `.clock.json` beside it. They run on the shared long-run checks (Layer 2b),
+which for a run with a book include Gemini's rules: no request re-sends what
+its cache holds, cache plus request tail is the conversation byte for byte,
+every created cache is deleted, every replaced cache was read at least three
+times, and cache creation stays under 15% of prompt tokens.
 
 ## Live Provider Tests
 
@@ -523,60 +977,88 @@ cargo test -p rig-service-tests --features vectorize --test integrations vectori
 ## Shared test implementation
 
 `test-support/rig-test-support` compiles neutral tools, cassette paths, cache and
-stream assertions, golden comparison, and the ECS harness once. Provider binaries
-import these modules; their cassette-safety tests remain registered in each binary.
-Generic ECS matrix drivers live under `crates/rig-cassette/tests/common/ecs_matrix`: a cell edit
-then rebuilds its provider binaries without invalidating unrelated providers.
-Their long-loop regression tests stay with those modules. Other shared helper
-regressions run in the support crate; its ECS regressions also retain the
-standalone root-parity dependency configuration.
+stream assertions and golden comparison once. Provider binaries import these
+modules; their cassette-safety tests remain registered in each binary. The
+generic corpus matrix drivers live under
+`crates/rig-cassette/tests/common/corpus_matrix`: a cell edit then rebuilds its
+provider binaries without invalidating unrelated providers. Their long-loop
+regression tests stay with those modules. Other shared helper regressions run
+in the support crate; its `corpus_` regressions also retain the standalone
+effect-corpus dependency configuration.
 
 Matrix declarations keep literal scenario names and explicit per-cell parameters.
-`golden_matrix!` runs a common agent/world cell, `resume_matrix!` preserves each
-checkpoint cut and its named oracle, and `case_matrix!` selects a family body.
+`golden_matrix!` runs a common agent cell against its named oracle, and
+`case_matrix!` selects a family body.
 A `case_matrix!` declaration without a wrapper contains only scripted rows;
 it registers tests without claiming cassette scenarios.
 Their parsers reject malformed rows and exclude ignored rows from the recording
 inventory. Keep a compiled listing when changing declarations: source discovery
 alone does not establish that a configuration registers or executes a test.
 
-## Agent/ECS regression scenarios
+## Regression scenarios
 
-Native ECS tests execute real provider adapters against the same cassettes as
-rig-agent tests. Original and native golden comparisons retain their complete
-assertions. The [comparison guide](ecs_parity/README.md) describes shared
-boundaries and family-specific limitations. Behavioral obligations live in the
-tests and their helpers; current test runs and CI establish which tests pass.
-A compiled listing is not proof of execution or an exhaustive functional superset.
-Shared-provider tests do not count as native agent migrations.
+### Runtime scenarios and the reply bank
 
-List registrations or run a native family, for example:
+The agent loop, tool lifecycle, turn endings, resume, memory and the effect
+bus behave the same on every provider. Their scenarios run
+once, in the `runtime` target of `rig-cassette`
+(`crates/rig-cassette/tests/runtime.rs` and `runtime/`), over replies from
+the reply bank instead of a provider's cassette. A bank transport serves the
+replies in order and ignores what was sent, so each reply still passes
+through its provider's real decoder while request encoding stays pinned by
+the request snapshots and the acceptance index. Streamed replies arrive one
+server-sent event per chunk, so a consumer that stops at a delta drops the
+stream before its end, as it does live.
 
-```sh
-cargo nextest list --locked -p rig --features bedrock
-RIG_PROVIDER_TEST_MODE=replay cargo test --locked -p rig-cassette --test anthropic ecs_outcome -- --nocapture
+The bank lives in `crates/rig-cassette/fixtures/bank/` and is written by
+`cargo xtask cassette bank` from the corpus, offline:
+
+- `<provider>.yaml`: one real recorded reply per provider, completion
+  encoder, reply shape (the coverage gate's) and called tools, the smallest
+  the corpus holds, with the interaction it came from. A fixture whose test
+  marks it hand-derived gives the bank nothing.
+- `scripts.tsv`: every fixture's replies as bank keys. A runtime scenario
+  names the scenario whose reply shapes it runs against
+  (`rig_test_support::bank::script`).
+- `pinned.txt` and `pinned.yaml`: a scenario whose assertions read what a
+  reply says (an answer marker, tool arguments, reasoning that must be
+  non-empty) is listed by hand in `pinned.txt` with its reason, and the bank
+  keeps that fixture's replies verbatim in `pinned.yaml`
+  (`rig_test_support::bank::recorded`).
+
+An entry or script whose fixture is deleted stays in the bank, so pruning a
+cassette does not take its replies from the runtime scenarios. `pinned.txt`
+is the only file of the bank written by hand; never edit a reply, re-record
+the cassette and rewrite the bank.
+
+```bash
+cargo xtask cassette bank           # rewrite the bank after a cassette changed
+cargo xtask cassette bank --check   # CI's `verify --check bank`
+cargo nextest run --locked --profile local -p rig-cassette --test runtime
 ```
+
+The runtime target holds the corpus matrix's cells on rig-agent (`cells`),
+its focused families (`families`, `faults`), the turn-termination cells
+(`termination`, run over every bank reply that decodes to the cell's
+ending), the agent tool sessions (`sessions`), the lifecycle matrix
+(`lifecycle`), and `decode`, which decodes every bank reply through its
+provider's decoder and checks it against the tools and ending the bank read
+off its bytes. Which families run here and which stay with their providers
+is in `crates/rig-cassette/coverage/runtime-families.md`.
 
 ### Stream-fault cells
 
-`tests/providers/{gemini,openai}/cassette/stream_faults.rs` and their
-`ecs_stream_faults.rs` twins drive the runner and the native runtime through
-the real adapter into a stream that ends badly: the committed error
-recordings for a setup failure, the committed text stream dropped by its
-consumer, and scripted faults served by `rig::test_utils`'s sequenced
-transport — a recording cut before its terminal (`test-support/rig-test-support/src/stream_faults.rs`),
-a Gemini refusal, an in-band error after content. Every scripted frame is a
+`tests/providers/{gemini,openai}/cassette/stream_faults.rs` drive the runner
+through the real adapter into a stream that ends badly: scripted faults
+served by `rig::test_utils`'s sequenced transport, a recording cut before its
+terminal (`test-support/rig-test-support/src/stream_faults.rs`), a Gemini
+refusal, an in-band error after content. Every scripted frame is a
 labelled constant with its provenance beside the cell; no cassette is
 hand-edited and no new fixture is committed. A scripted cell pins what the
 runtime does with the fault (the failure kind, the record, the committed
-history, the tools that never ran, the witness's facts); the request shape it
-would have sent is pinned by the recording's owning test, not by the cell.
-Every HTTP wire threads the witness's `AdapterContext` through its request,
-so a native cell reads the adapter's boundary facts (the request, the
-status, the provider's verdict, usage and error envelope, the closure) for
-Gemini, the OpenAI Chat Completions and Responses wires and Anthropic;
-Cohere, Ollama and the Gemini Interactions wire report the transport facts
-without a payload projection. Error classification follows the one funnel in
+history, the tools that never ran); the request shape it would have sent is
+pinned by the recording's owning test, not by the cell. Error classification
+follows the one funnel in
 `rig_core::provider_response` (see `AGENTS.md`, Error Handling).
 
 Consumed cassettes and goldens remain in Git; historical execution logs, proof

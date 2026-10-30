@@ -10,7 +10,7 @@
 use crate::{
     effect::{EffectId, EffectKind, HandlerDescriptor, HandlerKey, Outcome},
     error::ErrorReport,
-    streaming::StreamEvent,
+    streaming::{Item, StreamEvent},
     wasm_compat::{WasmCompatSend, WasmCompatSync},
 };
 
@@ -63,16 +63,25 @@ pub trait Recorder: WasmCompatSend + WasmCompatSync + 'static {
     /// Replaces the recorded request with a same-family layer patch, so it
     /// reflects the request served by the innermost handler.
     fn patch(&self, id: EffectId, kind: EffectKind);
-    /// Whether streamed events are wanted verbatim ([`Self::event`]).
+    /// Whether streamed items are wanted verbatim ([`Self::event`]).
     fn keep_events(&self) -> bool;
-    /// One streamed event of `id`.
-    fn event(&self, id: EffectId, event: &StreamEvent);
+    /// One streamed item of `id`.
+    fn event(&self, id: EffectId, item: &Item<StreamEvent>);
     /// An error item at its original position in a kept stream. Unlike the
     /// folded outcome, this includes errors after an earlier terminal item.
     fn stream_error(&self, _id: EffectId, _error: &ErrorReport) {}
+    /// A complete response item in a kept stream, including responses after an
+    /// earlier terminal item.
+    fn stream_done(&self, _id: EffectId, _response: &crate::completion::CompletionResponse) {}
+    /// Who the streamed reply of `id` is from, before its first item, when
+    /// [`keep_events`](Self::keep_events) says so.
+    fn origin(&self, id: EffectId, origin: &crate::message::Origin);
     /// Explicitly published tool output, delivered before `resolve`. A driver
     /// snapshots it without consuming the caller's published context.
     fn tool_output(&self, id: EffectId, output: crate::tool::ToolResultContext);
     /// The outcome of `id`.
     fn resolve(&self, id: EffectId, outcome: Result<Outcome, ErrorReport>);
 }
+
+#[cfg(test)]
+mod tests;

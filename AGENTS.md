@@ -16,6 +16,12 @@ signatures, module paths, and feature flags.
 - Do not make commits, comments, stage changes, push branches, or open PRs unless the user explicitly asks.
 - Do not discard user changes.
 
+## Fast Loop
+
+- Iterate with `cargo nextest run --locked --profile local -p <crate> [filter]`;
+  leave workspace-wide and facade `--all-features` runs to CI.
+- Keep incremental compilation on.
+
 ## Efficient Investigation
 
 - Reuse instructions and unchanged source already in context. Read the relevant
@@ -39,7 +45,7 @@ signatures, module paths, and feature flags.
 - Verification planner and source-tree checks: `xtask/`
 - Workspace example packages: `examples/*`; per-crate examples: `crates/<crate>/examples/`
 - Root integration test targets: `tests/*.rs`
-- Record/replay home: `crates/rig-cassette` — the engine (`src/`), the provider cassette corpus (`fixtures/cassettes/<provider>/`), the effect-log golden corpus (`fixtures/effects/`), every cassette-backed provider target (`tests/<provider>.rs` with `tests/providers/<provider>/` and the shared drivers in `tests/common/`), the cache-prefix guard, and the effect-bus verification targets `verify` and `world_replay`. Corpora and `tests/` are excluded from the published package.
+- Record/replay home: `crates/rig-cassette` — the engine (`src/`), the provider cassette corpus (`fixtures/cassettes/<provider>/`), the effect-log golden corpus (`fixtures/effects/`), every cassette-backed provider target (`tests/<provider>.rs` with `tests/providers/<provider>/` and the shared drivers in `tests/common/`), the cache-prefix guard, and the effect-bus verification target `verify`. Corpora and `tests/` are excluded from the published package.
 - Live-only provider test modules stay in the facade: `tests/providers/<provider>/`, driven by `tests/<provider>.rs`
 - External-service integration tests: `tests/integrations/`
 - Unpublished vector-store test runner: `test-support/service-tests`

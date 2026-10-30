@@ -157,9 +157,7 @@ impl AgentHook for ApprovalPolicy {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let agent = OpenAI::from_env()?
-        .bound()?
-        .agent(openai::GPT_4O)
+    let agent = AgentBuilder::new(OpenAI::from_env()?.completion(openai::GPT_4O))
         .preamble(
             "You are a banking assistant. Use the tools to carry out the user's request. \
              If a tool is denied by policy, explain the limit to the user instead of retrying.",
@@ -183,7 +181,7 @@ async fn main() -> Result<()> {
         .max_turns(10)
         .add_hook(policy)
         .await?
-        .output;
+        .output();
 
     println!("\nFinal response:\n{response}");
 

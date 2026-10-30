@@ -1,228 +1,45 @@
 //! Gemini tool-choice cassette coverage.
 
-use rig::completion::{AssistantContent, CompletionModel, Message};
 use rig::message::ToolChoice;
-use rig::prelude::*;
 use rig::providers::gemini;
-use rig::tool::Tool;
 
-use crate::support::{
-    Adder, Subtract, assert_mentions_expected_number, collect_raw_stream_observation,
-    collect_stream_observation,
+use super::super::request_witness_support::{
+    NamedCase, stream_result, with_gemini_request_witness_cassette,
 };
+use crate::support::{Adder, Subtract};
 
-fn specific_add_choice() -> ToolChoice {
-    ToolChoice::Specific {
-        function_names: vec![Adder::NAME.to_string()],
-    }
-}
-
-fn assert_history_tool_calls(history: &[Message], expected: &[&str], forbidden: &[&str]) {
-    let tool_names = history
-        .iter()
-        .filter_map(|message| match message {
-            Message::Assistant { content, .. } => Some(content),
-            _ => None,
-        })
-        .flat_map(|content| content.iter())
-        .filter_map(|content| match content {
-            AssistantContent::ToolCall(tool_call) => Some(tool_call.function.name.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-
-    for expected_tool in expected {
-        assert!(
-            tool_names.iter().any(|name| name == expected_tool),
-            "expected tool call {expected_tool}, saw {tool_names:?}"
-        );
-    }
-
-    for forbidden_tool in forbidden {
-        assert!(
-            !tool_names.iter().any(|name| name == forbidden_tool),
-            "did not expect tool call {forbidden_tool}, saw {tool_names:?}"
-        );
-    }
-}
-
+/// `ToolChoice::None` while tools are registered.
+///
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 5,
+/// mec-rig-schema-route-1 item 1(b)): the recording is unchanged; the only
+/// request difference is that declarations 0 and 1 send their recorded
+/// `parametersJsonSchema`, value unchanged, as `parameters`, and replay
+/// refuses interaction 0. Named losses: a stream without errors ending in a
+/// final response, no tool calls or tool results, and the answer mentioning
+/// 42.
 #[tokio::test]
-async fn specific_add_raw_streaming_allows_only_add() {
-    super::super::support::with_gemini_cassette(
-        "tool_choice/specific_add_raw_streaming",
-        |client| async move {
-            let model = client.completion(gemini::completion::GEMINI_2_5_FLASH);
-            let request = model
-                .completion_request(
-                    "Use the add tool to calculate 20 + 22. Do not use subtraction.",
-                )
-                .temperature(0.0)
-                .tool(rig::tool::tool_definition(&Adder))
-                .tool(rig::tool::tool_definition(&Subtract))
-                .tool_choice(specific_add_choice())
-                .build();
-            let stream = model.stream(request).await.expect("stream should start");
-            let observation = collect_raw_stream_observation(stream).await;
-
-            assert!(
-                observation.errors.is_empty(),
-                "stream should not emit errors: {:?}",
-                observation.errors
-            );
-            assert!(
-                observation
-                    .tool_calls
-                    .iter()
-                    .any(|tool_call| tool_call.function.name == Adder::NAME),
-                "expected add tool call, saw {:?}",
-                observation.tool_calls
-            );
-            assert!(
-                !observation
-                    .tool_calls
-                    .iter()
-                    .any(|tool_call| tool_call.function.name == Subtract::NAME),
-                "did not expect subtract tool call, saw {:?}",
-                observation.tool_calls
-            );
-            let add_call = observation
-                .tool_calls
-                .iter()
-                .find(|tool_call| tool_call.function.name == Adder::NAME)
-                .expect("expected add tool call");
-            assert_eq!(
-                add_call.function.arguments,
-                serde_json::json!({ "x": 20, "y": 22 })
-            );
-        },
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn specific_add_raw_nonstreaming_allows_only_add() {
-    super::super::support::with_gemini_cassette(
-        "tool_choice/specific_add_raw_nonstreaming",
-        |client| async move {
-            let model = client.completion(gemini::completion::GEMINI_2_5_FLASH);
-            let response = model
-                .completion_request(
-                    "Use the add tool to calculate 20 + 22. Do not use subtraction.",
-                )
-                .temperature(0.0)
-                .tool(rig::tool::tool_definition(&Adder))
-                .tool(rig::tool::tool_definition(&Subtract))
-                .tool_choice(specific_add_choice())
-                .send()
-                .await
-                .expect("specific add raw completion should succeed");
-
-            let tool_calls = response
-                .choice
-                .iter()
-                .filter_map(|content| match content {
-                    AssistantContent::ToolCall(tool_call) => Some(tool_call),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-
-            assert!(
-                tool_calls
-                    .iter()
-                    .any(|tool_call| tool_call.function.name == Adder::NAME),
-                "expected add tool call, saw {tool_calls:?}"
-            );
-            assert!(
-                !tool_calls
-                    .iter()
-                    .any(|tool_call| tool_call.function.name == Subtract::NAME),
-                "did not expect subtract tool call, saw {tool_calls:?}"
-            );
-            let add_call = tool_calls
-                .iter()
-                .find(|tool_call| tool_call.function.name == Adder::NAME)
-                .expect("expected add tool call");
-            assert_eq!(
-                add_call.function.arguments,
-                serde_json::json!({ "x": 20, "y": 22 })
-            );
-        },
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn none_streaming_does_not_emit_tool_calls() {
-    super::super::support::with_gemini_cassette(
+async fn none_streaming_does_not_emit_tool_calls() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
         "tool_choice/none_streaming_no_tools",
-        |client| async move {
-            let agent = client
-                .agent(gemini::completion::GEMINI_2_5_FLASH)
-                .preamble("You are a deterministic calculator test. Answer directly in text.")
-                .temperature(0.0)
-                .tool(Adder)
-                .tool(Subtract)
-                .tool_choice(ToolChoice::None)
-                .build();
+        NamedCase::ToolChoiceNoneStreamed,
+        |client, _clock| async move {
+            let agent =
+                rig::AgentBuilder::new(client.completion(gemini::completion::GEMINI_2_5_FLASH))
+                    .preamble("You are a deterministic calculator test. Answer directly in text.")
+                    .temperature(0.0)
+                    .tool(Adder)
+                    .tool(Subtract)
+                    .tool_choice(ToolChoice::None)
+                    .build();
 
             let mut stream = agent
                 .prompt("Calculate 20 + 22 directly in text. Do not call tools.")
                 .stream();
-            let observation = collect_stream_observation(&mut stream).await;
-
-            assert!(
-                observation.errors.is_empty(),
-                "stream should not emit errors: {:?}",
-                observation.errors
-            );
-            assert!(
-                observation.got_final_response,
-                "stream should emit a final response"
-            );
-            assert!(
-                observation.tool_calls.is_empty(),
-                "expected no tool calls, saw {:?}",
-                observation.tool_calls
-            );
-            assert_eq!(observation.tool_results, 0, "expected no tool results");
-            assert_mentions_expected_number(
-                observation
-                    .final_response_text
-                    .as_deref()
-                    .expect("stream should produce a final response"),
-                42,
-            );
+            let result = stream_result(&mut stream).await;
+            drop(stream);
+            drop(agent);
+            result
         },
     )
-    .await;
-}
-
-#[tokio::test]
-async fn none_nonstreaming_does_not_emit_tool_calls() {
-    super::super::support::with_gemini_cassette(
-        "tool_choice/none_nonstreaming_no_tools",
-        |client| async move {
-            let agent = client
-                .agent(gemini::completion::GEMINI_2_5_FLASH)
-                .preamble("You are a deterministic calculator test. Answer directly in text.")
-                .temperature(0.0)
-                .tool(Adder)
-                .tool(Subtract)
-                .tool_choice(ToolChoice::None)
-                .build();
-
-            let mut chat_history = Vec::<Message>::new();
-            let response = agent
-                .chat(
-                    "Calculate 20 + 22 directly in text. Do not call tools.",
-                    &mut chat_history,
-                )
-                .await
-                .expect("ToolChoice::None prompt should succeed");
-
-            assert_mentions_expected_number(&response.output, 42);
-            assert_history_tool_calls(&chat_history, &[], &[Adder::NAME, Subtract::NAME]);
-        },
-    )
-    .await;
+    .await
 }

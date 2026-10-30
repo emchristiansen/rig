@@ -3,10 +3,9 @@ use aws_sdk_s3vectors::Client;
 use aws_sdk_s3vectors::config::Credentials;
 use rig_core::Embed;
 use rig_core::embeddings::EmbeddingsBuilder;
-use rig_core::providers::openai::{self, wire::OpenAI};
+use rig_core::providers::openai::{self, OpenAI};
 use rig_core::vector_store::request::VectorSearchRequest;
 use rig_core::vector_store::{InsertDocuments, VectorStoreIndex};
-use rig_reqwest::prelude::*;
 use std::env;
 
 const BUCKET_NAME: &str = "foo_bucket";
@@ -39,11 +38,13 @@ async fn main() -> Result<(), anyhow::Error> {
     create_vector_bucket(&s3vectors_client).await?;
     create_index(&s3vectors_client).await?;
 
-    // Bind the OpenAI embeddings endpoint.
+    // The OpenAI client, from `OPENAI_API_KEY`.
     // Get your API key from https://platform.openai.com/api-keys
-    let openai_client = OpenAI::from_env()?.bound()?;
+    let openai_client = OpenAI::from_env()?;
 
-    let model = openai_client.embedding(openai::TEXT_EMBEDDING_ADA_002, None);
+    let model = openai_client
+        .embedding(openai::TEXT_EMBEDDING_ADA_002, None)
+        .erase();
 
     let documents = EmbeddingsBuilder::new(model.clone())
         .document(Word {
@@ -74,8 +75,11 @@ async fn main() -> Result<(), anyhow::Error> {
     let results = store.top_n::<Word>(req).await?;
 
     println!("#{} results for query: {}", results.len(), query);
-    for (distance, _id, doc) in results.iter() {
-        println!("Result distance {distance} for word: {doc:?}");
+    for result in &results {
+        println!(
+            "Result distance {} for word: {:?}",
+            result.score, result.document
+        );
 
         // expected output
         // Result distance 0.693218142100547 for word: glarb-glarb

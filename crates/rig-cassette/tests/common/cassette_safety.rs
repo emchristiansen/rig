@@ -5,6 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
+use rig_test_support::scenario_registry::InSourceReader;
 use syn::{Expr, ExprLit, Lit};
 
 const CASSETTE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/cassettes");
@@ -29,13 +30,13 @@ const PROVIDER_CASSETTE_SUITES: &[ProviderCassetteSuite] = &[
             "with_openai_lifecycle_cassette",
             "with_openai_prompt_caching_cassette",
             "with_openai_completions_prompt_caching_cassette",
-            "with_openai_turn_metadata_cassette",
             "with_openai_cassette_bogus_key",
             "with_openai_completions_cassette",
             "with_openai_cassette_result",
             "with_openai_completions_cassette_result",
             "with_openai_vllm_cassette",
             "with_local_reasoning_content_cassette",
+            "with_local_dual_reasoning_keys_cassette",
             "with_openai_refusal_cassette",
             "with_openai_max_tokens_cassette",
             "with_openai_image_params_cassette",
@@ -48,6 +49,8 @@ const PROVIDER_CASSETTE_SUITES: &[ProviderCassetteSuite] = &[
             "with_openai_transcription_cassette",
             "with_openai_audio_cassette",
             "with_openai_websocket_cassette",
+            "with_openai_long_run_cassette",
+            "with_openai_model_session_cassette",
         ],
     },
     ProviderCassetteSuite {
@@ -73,6 +76,9 @@ const PROVIDER_CASSETTE_SUITES: &[ProviderCassetteSuite] = &[
         source_dir: "tests/providers/anthropic/cassette",
         wrapper_names: &[
             "with_anthropic_cassette",
+            "with_anthropic_checked_cassette",
+            "with_anthropic_long_run_cassette",
+            "with_anthropic_model_session_cassette",
             "with_anthropic_lifecycle_cassette",
             "with_anthropic_turn_metadata_cassette",
             "with_anthropic_cassette_result",
@@ -136,6 +142,8 @@ const PROVIDER_CASSETTE_SUITES: &[ProviderCassetteSuite] = &[
         wrapper_names: &[
             "with_gemini_prompt_caching_cassette",
             "with_gemini_cassette",
+            "with_gemini_request_witness_cassette",
+            "with_gemini_checked_cassette",
             "with_gemini_corpus_retrieval_cassette",
             "with_gemini_corpus_delta_cassette",
             "with_gemini_corpus_breadth_cassette",
@@ -146,6 +154,7 @@ const PROVIDER_CASSETTE_SUITES: &[ProviderCassetteSuite] = &[
             "with_gemini_interactions_cassette",
             "with_gemini_stream_terminal_cassette",
             "with_gemini_thought_text_cassette",
+            "with_gemini_auto_caching_cassette",
         ],
     },
     ProviderCassetteSuite {
@@ -194,6 +203,7 @@ const PROVIDER_CASSETTE_SUITES: &[ProviderCassetteSuite] = &[
         wrapper_names: &[
             "with_openrouter_prompt_caching_cassette",
             "with_openrouter_cassette",
+            "with_openrouter_checked_cassette",
             "with_openrouter_cassette_result",
             "with_openrouter_cassette_bogus_key_result",
             "with_openrouter_openai_cassette",
@@ -213,6 +223,7 @@ const PROVIDER_CASSETTE_SUITES: &[ProviderCassetteSuite] = &[
         wrapper_names: &[
             "with_deepseek_prompt_caching_cassette",
             "with_deepseek_cassette",
+            "with_deepseek_request_mismatch",
             "with_deepseek_cassette_result",
             "with_deepseek_cassette_bogus_key_result",
             "with_deepseek_truncation_cassette_result",
@@ -265,6 +276,45 @@ const PROVIDER_CASSETTE_SUITES: &[ProviderCassetteSuite] = &[
             "with_mistralrs_completions_cassette",
             "with_mistralrs_raw_cassette",
         ],
+    },
+];
+
+/// Where another crate's in-source tests read recorded cassettes, and the
+/// readers each source tree uses.
+struct InSourceSuite {
+    source_dir: &'static str,
+    readers: &'static [InSourceReader],
+}
+
+/// rig-core's in-source tests that read cassettes without replaying them.
+/// A cassette one of them reads is used as surely as one a provider suite
+/// replays.
+const IN_SOURCE_SUITES: &[InSourceSuite] = &[
+    InSourceSuite {
+        source_dir: "../rig-core/src",
+        readers: &[InSourceReader::Included {
+            root: "/../rig-cassette/fixtures/cassettes/",
+        }],
+    },
+    // `providers::openai::wire::tests::{recorded, recorded_json}` are
+    // `pub(super)`, so only this tree calls them; each reads a path under
+    // the `openai` recordings.
+    InSourceSuite {
+        source_dir: "../rig-core/src/providers/openai/wire",
+        readers: &[
+            InSourceReader::Path {
+                name: "recorded",
+                provider: "openai",
+            },
+            InSourceReader::Path {
+                name: "recorded_json",
+                provider: "openai",
+            },
+        ],
+    },
+    InSourceSuite {
+        source_dir: "../rig-core/src/test_utils/raw_parity",
+        readers: &[InSourceReader::ParityRow],
     },
 ];
 
@@ -587,6 +637,24 @@ fn scan_dir(dir: &Path, failures: &mut Vec<String>) {
             continue;
         }
 
+        if let Some(stem) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".requests.json"))
+        {
+            // A request snapshot describes its fixture's recorded requests.
+            if !path.with_file_name(format!("{stem}.yaml")).is_file() {
+                failures.push(format!(
+                    "{} is a request snapshot with no fixture beside it; run \
+                     `cargo xtask cassette snapshots`",
+                    display_repo_path(&path)
+                ));
+            }
+            let contents = fs::read_to_string(&path).expect("snapshot should be readable as UTF-8");
+            failures.extend(crate::cassettes::artifact_safety_failures(&path, &contents));
+            continue;
+        }
+
         if path.extension().and_then(|ext| ext.to_str()) != Some("yaml") {
             continue;
         }
@@ -639,6 +707,38 @@ fn collect_expected_cassette_paths() -> (BTreeSet<PathBuf>, Vec<String>) {
                 Ok(scenarios) => {
                     for scenario in scenarios {
                         expected.insert(crate::cassettes::cassette_path(suite.provider, &scenario));
+                    }
+                }
+                Err(error) => failures.push(error),
+            }
+            // A cassette a test only reads, through a read-only reader such
+            // as `recorded_interaction_bodies`, is used as surely as one it
+            // replays.
+            match read_only_cassettes_in_file(&source_file) {
+                Ok(read) => {
+                    for (provider, scenario) in read {
+                        expected.insert(crate::cassettes::cassette_path(&provider, &scenario));
+                    }
+                }
+                Err(error) => failures.push(error),
+            }
+        }
+    }
+
+    for suite in IN_SOURCE_SUITES {
+        let source_dir = repo_path(suite.source_dir);
+        if !source_dir.exists() {
+            failures.push(format!(
+                "in-source cassette reader directory does not exist: {}",
+                display_repo_path(&source_dir)
+            ));
+            continue;
+        }
+        for source_file in collect_rust_files(&source_dir) {
+            match in_source_cassettes_in_file(&source_file, suite.readers) {
+                Ok(read) => {
+                    for (provider, scenario) in read {
+                        expected.insert(crate::cassettes::cassette_path(&provider, &scenario));
                     }
                 }
                 Err(error) => failures.push(error),
@@ -716,6 +816,23 @@ fn cassette_scenarios_in_file(
     let source = fs::read_to_string(path)
         .map_err(|error| format!("{} should be readable: {error}", display_repo_path(path)))?;
     rig_test_support::scenario_registry::cassette_scenarios(&source, wrapper_names)
+        .map_err(|error| format!("{}: {error}", display_repo_path(path)))
+}
+
+fn read_only_cassettes_in_file(path: &Path) -> Result<Vec<(String, String)>, String> {
+    let source = fs::read_to_string(path)
+        .map_err(|error| format!("{} should be readable: {error}", display_repo_path(path)))?;
+    rig_test_support::scenario_registry::read_only_cassettes(&source)
+        .map_err(|error| format!("{}: {error}", display_repo_path(path)))
+}
+
+fn in_source_cassettes_in_file(
+    path: &Path,
+    readers: &[InSourceReader],
+) -> Result<Vec<(String, String)>, String> {
+    let source = fs::read_to_string(path)
+        .map_err(|error| format!("{} should be readable: {error}", display_repo_path(path)))?;
+    rig_test_support::scenario_registry::in_source_cassettes(&source, readers)
         .map_err(|error| format!("{}: {error}", display_repo_path(path)))
 }
 
