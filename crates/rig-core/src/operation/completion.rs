@@ -492,11 +492,16 @@ pub struct CallFragment<'a> {
     pub arguments: Option<&'a str>,
 }
 
-/// Which fragments permit a same-name function-argument continuation.
+/// Which boundary policy the provider selected for a buffered call.
 enum FragmentKind<'a> {
     CanonicalFunction,
-    Function { boundary_name: Option<&'a str> },
-    NonFunction,
+    Function {
+        boundary_name: Option<&'a str>,
+        custom_input: bool,
+    },
+    NonFunction {
+        custom_input: bool,
+    },
 }
 
 /// The first index the writer hands out itself ([`Out::fresh_index`]); a
@@ -2526,28 +2531,38 @@ impl<'id> Out<'id, Completion> {
         self.fragment_inner(index, fragment, FragmentKind::CanonicalFunction, false)
     }
 
-    /// Use wire function names for boundaries while assembling the original fields.
+    /// Use wire provenance for private Chat function and custom-input boundaries.
     pub(crate) fn function_fragment(
         &mut self,
         index: Option<usize>,
         fragment: CallFragment<'_>,
         boundary_name: Option<&str>,
+        custom_input: bool,
     ) -> Result<(), ProviderError> {
         self.fragment_inner(
             index,
             fragment,
-            FragmentKind::Function { boundary_name },
+            FragmentKind::Function {
+                boundary_name,
+                custom_input,
+            },
             false,
         )
     }
 
-    /// Preserve named openings for fragments the wire classifies as non-function.
+    /// Keep named openings while distinguishing verified custom-input continuations.
     pub(crate) fn non_function_fragment(
         &mut self,
         index: Option<usize>,
         fragment: CallFragment<'_>,
+        custom_input: bool,
     ) -> Result<(), ProviderError> {
-        self.fragment_inner(index, fragment, FragmentKind::NonFunction, false)
+        self.fragment_inner(
+            index,
+            fragment,
+            FragmentKind::NonFunction { custom_input },
+            false,
+        )
     }
 
     /// Opt a preserved Responses function-call slot into pending-name
@@ -2599,13 +2614,34 @@ impl<'id> Out<'id, Completion> {
                     } if new_id.is_some_and(|new| id.wire() != new)
                         && draft.tool_slot_state != Some(ToolSlotState::PendingName) =>
                     {
+                        let custom_input = matches!(
+                            &kind,
+                            FragmentKind::Function {
+                                custom_input: true,
+                                ..
+                            } | FragmentKind::NonFunction { custom_input: true }
+                        ) && !names
+                            && !name.is_empty()
+                            && draft.item.get("type").and_then(serde_json::Value::as_str)
+                                == Some("custom")
+                            && draft.item.get("function").is_none()
+                            && draft
+                                .item
+                                .pointer("/custom/name")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|name| !name.is_empty())
+                            && draft
+                                .item
+                                .pointer("/custom/input")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|input| input.trim() != "null");
                         let function = match &kind {
                             FragmentKind::CanonicalFunction => {
                                 (draft.item.get("type").and_then(serde_json::Value::as_str)
                                     != Some("custom"))
                                 .then_some((name.as_str(), fragment.name))
                             }
-                            FragmentKind::Function { boundary_name } => draft
+                            FragmentKind::Function { boundary_name, .. } => draft
                                 .item
                                 .pointer("/function/name")
                                 .and_then(serde_json::Value::as_str)
@@ -2616,10 +2652,11 @@ impl<'id> Out<'id, Completion> {
                                         None | Some("function")
                                     )
                                 }),
-                            FragmentKind::NonFunction => None,
+                            FragmentKind::NonFunction { .. } => None,
                         }
                         .filter(|(held, _)| !held.is_empty());
                         match function {
+                            _ if custom_input => Some((false, false)),
                             Some((held, incoming)) => {
                                 let complete =
                                     !arguments.text.trim().is_empty() && arguments.complete();

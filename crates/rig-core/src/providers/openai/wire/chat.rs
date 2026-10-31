@@ -2108,14 +2108,22 @@ impl ChatDecoder {
                 name,
                 arguments: arguments.as_deref(),
             };
+            let custom_input = index.is_some()
+                && call
+                    .get("type")
+                    .is_none_or(|kind| kind.as_str() == Some("custom"))
+                && call.get("function").is_none()
+                && call.at("/custom/name").is_none()
+                && call.at("/custom/input").is_some_and(Value::is_string);
             match kind {
                 CallKind::Function => out.function_fragment(
                     Some(at),
                     fragment,
                     call.at("/function/name").and_then(Value::as_str),
+                    custom_input,
                 )?,
                 CallKind::Custom | CallKind::Unknown => {
-                    out.non_function_fragment(Some(at), fragment)?;
+                    out.non_function_fragment(Some(at), fragment, custom_input)?;
                 }
             }
         }

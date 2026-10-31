@@ -767,30 +767,269 @@ fn chat_custom_fragments_keep_the_existing_canonical_boundary() {
     }
 }
 
-/// Legacy custom folding drops the unnamed replacement while raw input survives.
+/// Nameless custom input stays on its held call in both current reply forms.
 #[test]
-fn an_unnamed_custom_replacement_keeps_the_legacy_canonical_loss() {
-    let decoded = chat_call_fragments(&[
-        json!({"index": 0, "id": "call_a", "type": "custom",
-            "custom": {"name": "get_weather", "input": "first"}}),
-        json!({"index": 0, "id": "call_b", "custom": {"input": "second"}}),
-    ]);
-    assert_eq!(
-        call_boundaries(&decoded),
-        [(0, "get_weather".to_owned(), "{}".to_owned())]
-    );
-    let response = decoded.outcome.expect("the unnamed replacement is omitted");
-    let calls: Vec<_> = response.tool_calls().collect();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].id, CallId::from_wire("call_a"));
-    assert_eq!(calls[0].function.name, "get_weather");
-    assert_eq!(calls[0].function.arguments_value(), json!({}));
-    assert!(calls[0].function.invalid_arguments.is_none());
-    assert_eq!(
-        response.raw.pointer("/choices/0/message/tool_calls"),
-        Some(&json!([{"id": "call_b", "type": "custom",
-            "custom": {"name": "get_weather", "input": "firstsecond"}}]))
-    );
+fn unnamed_custom_input_fragments_preserve_the_complete_canonical_call() {
+    for explicit_custom in [false, true] {
+        for input in ["second", ""] {
+            let mut incoming = json!({"index": 0, "id": "call_b",
+                "custom": {"input": input}});
+            if explicit_custom {
+                incoming
+                    .as_object_mut()
+                    .expect("call object")
+                    .insert("type".to_owned(), Value::from("custom"));
+            }
+            let decoded = chat_call_fragments(&[
+                json!({"index": 0, "id": "call_a", "type": "custom",
+                    "custom": {"name": "get_weather", "input": "first"}}),
+                incoming,
+            ]);
+            let input = format!("first{input}");
+            let arguments = json!({"input": input});
+            assert_eq!(
+                call_boundaries(&decoded),
+                [(0, "get_weather".to_owned(), arguments.to_string())]
+            );
+            let events = closed(&decoded);
+            assert_eq!(
+                events
+                    .events()
+                    .filter(|event| matches!(event, StreamEvent::End { .. }))
+                    .count(),
+                1
+            );
+            let response = decoded.outcome.expect("one custom call closes");
+            let calls: Vec<_> = response.tool_calls().collect();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].id, CallId::from_wire("call_b"));
+            assert_eq!(calls[0].function.name, "get_weather");
+            assert_eq!(calls[0].function.arguments_value(), arguments);
+            assert!(calls[0].function.invalid_arguments.is_none());
+            assert_eq!(
+                response.raw.pointer("/choices/0/message/tool_calls"),
+                Some(&json!([{"id": "call_b", "type": "custom",
+                    "custom": {"name": "get_weather", "input": input}}]))
+            );
+        }
+    }
+}
+
+/// Custom extras do not replace an ordinary function's boundary policy.
+#[test]
+fn custom_input_extras_do_not_select_custom_continuation_for_functions() {
+    for explicit_function in [false, true] {
+        for held in ["", r#"{"city":"#] {
+            let mut incoming = json!({"index": 0, "id": "call_b",
+                "custom": {"input": "raw-only"}});
+            if explicit_function {
+                incoming
+                    .as_object_mut()
+                    .expect("call object")
+                    .insert("type".to_owned(), Value::from("function"));
+            }
+            let remaining = if held.is_empty() {
+                r#"{"city":"Oslo"}"#
+            } else {
+                r#""Oslo"}"#
+            };
+            let decoded = chat_call_fragments(&[
+                json!({"index": 0, "id": "call_a", "type": "function",
+                    "function": {"name": "get_weather", "arguments": held}}),
+                incoming,
+                json!({"index": 0, "function": {"arguments": remaining}}),
+            ]);
+            assert_eq!(
+                call_boundaries(&decoded),
+                [(0, "get_weather".to_owned(), r#"{"city":"Oslo"}"#.to_owned())]
+            );
+            let response = decoded.outcome.expect("one ordinary function closes");
+            let calls: Vec<_> = response.tool_calls().collect();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].id, CallId::from_wire("call_b"));
+            assert_eq!(calls[0].function.name, "get_weather");
+            assert_eq!(calls[0].function.arguments_value(), json!({"city": "Oslo"}));
+            assert!(calls[0].function.invalid_arguments.is_none());
+            assert_eq!(
+                response.raw.pointer("/choices/0/message/tool_calls"),
+                Some(&json!([{"id": "call_b", "type": "function",
+                    "function": {"name": "get_weather", "arguments": r#"{"city":"Oslo"}"#},
+                    "custom": {"input": "raw-only"}}]))
+            );
+        }
+    }
+}
+
+/// An explicit non-custom kind does not inherit custom-input provenance.
+#[test]
+fn explicit_non_custom_kinds_keep_their_custom_extra_boundaries() {
+    for kind in [
+        Value::from("function"),
+        Value::from("provider.future"),
+        Value::Null,
+    ] {
+        let decoded = chat_call_fragments(&[
+            json!({"index": 0, "id": "call_a", "type": "custom",
+                "custom": {"name": "get_weather", "input": "first"}}),
+            json!({"index": 0, "id": "call_b", "type": kind,
+                "custom": {"input": "second"}}),
+        ]);
+        assert_eq!(
+            call_boundaries(&decoded),
+            [(0, "get_weather".to_owned(), "{}".to_owned())]
+        );
+        let response = decoded.outcome.expect("the existing boundary closes");
+        let calls: Vec<_> = response.tool_calls().collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, CallId::from_wire("call_a"));
+        assert_eq!(calls[0].function.arguments_value(), json!({}));
+        let raw_kind = if kind.is_null() {
+            Value::from("custom")
+        } else {
+            kind
+        };
+        assert_eq!(
+            response.raw.pointer("/choices/0/message/tool_calls"),
+            Some(&json!([{"id": "call_b", "type": raw_kind,
+                "custom": {"name": "get_weather", "input": "firstsecond"}}]))
+        );
+    }
+}
+
+/// Only an actual string input supplies the private continuation provenance.
+#[test]
+fn missing_or_non_string_custom_input_keeps_the_existing_boundary() {
+    for input in [
+        None,
+        Some(Value::Null),
+        Some(json!(7)),
+        Some(json!({"nested": "second"})),
+    ] {
+        let mut incoming = json!({"index": 0, "id": "call_b", "custom": {}});
+        if let Some(input) = &input {
+            incoming
+                .get_mut("custom")
+                .expect("custom object")
+                .as_object_mut()
+                .expect("custom fields")
+                .insert("input".to_owned(), input.clone());
+        }
+        let decoded = chat_call_fragments(&[
+            json!({"index": 0, "id": "call_a", "type": "custom",
+                "custom": {"name": "get_weather", "input": "first"}}),
+            incoming,
+        ]);
+        assert_eq!(
+            call_boundaries(&decoded),
+            [(0, "get_weather".to_owned(), "{}".to_owned())]
+        );
+        let response = decoded.outcome.expect("the existing boundary closes");
+        let calls: Vec<_> = response.tool_calls().collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, CallId::from_wire("call_a"));
+        assert_eq!(calls[0].function.arguments_value(), json!({}));
+        let input = match input {
+            Some(value) if !value.is_null() => value,
+            _ => Value::from("first"),
+        };
+        assert_eq!(
+            response.raw.pointer("/choices/0/message/tool_calls"),
+            Some(&json!([{"id": "call_b", "type": "custom",
+                "custom": {"name": "get_weather", "input": input}}]))
+        );
+    }
+}
+
+/// Function-shaped held extras retain their existing boundary and name source.
+#[test]
+fn held_function_extras_do_not_select_custom_continuation() {
+    for function in [Value::Null, json!({"name": "other"})] {
+        let expected_name = if function.is_null() {
+            "get_weather"
+        } else {
+            "other"
+        };
+        let decoded = chat_call_fragments(&[
+            json!({"index": 0, "id": "call_a", "type": "custom",
+                "custom": {"name": "get_weather", "input": "first"},
+                "function": function}),
+            json!({"index": 0, "id": "call_b", "custom": {"input": "second"}}),
+        ]);
+        assert_eq!(
+            call_boundaries(&decoded),
+            [(0, expected_name.to_owned(), "{}".to_owned())]
+        );
+        let response = decoded.outcome.expect("the existing boundary closes");
+        let calls: Vec<_> = response.tool_calls().collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, CallId::from_wire("call_a"));
+        assert_eq!(calls[0].function.name, expected_name);
+        assert_eq!(calls[0].function.arguments_value(), json!({}));
+        assert_eq!(
+            response.raw.pointer("/choices/0/message/tool_calls"),
+            Some(&json!([{"id": "call_b", "type": "custom",
+                "custom": {"name": "get_weather", "input": "firstsecond"},
+                "function": function}]))
+        );
+    }
+}
+
+/// Explicit empty or malformed names retain the existing name-merging behavior.
+#[test]
+fn present_custom_names_do_not_select_name_absent_continuation() {
+    for name in [Value::from(""), Value::Null, json!(7)] {
+        let decoded = chat_call_fragments(&[
+            json!({"index": 0, "id": "call_a", "type": "custom",
+                "custom": {"name": "get_weather", "input": "first"}}),
+            json!({"index": 0, "id": "call_b",
+                "custom": {"name": name, "input": "second"}}),
+        ]);
+        assert_eq!(
+            call_boundaries(&decoded),
+            [(0, "get_weather".to_owned(), "{}".to_owned())]
+        );
+        let response = decoded.outcome.expect("the existing boundary closes");
+        let calls: Vec<_> = response.tool_calls().collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, CallId::from_wire("call_a"));
+        assert_eq!(calls[0].function.arguments_value(), json!({}));
+        let name = if name.is_null() {
+            Value::from("get_weather")
+        } else {
+            name
+        };
+        assert_eq!(
+            response.raw.pointer("/choices/0/message/tool_calls"),
+            Some(&json!([{"id": "call_b", "type": "custom",
+                "custom": {"name": name, "input": "firstsecond"}}]))
+        );
+    }
+}
+
+/// The existing null-text normalization is outside this continuation change.
+#[test]
+fn null_text_custom_input_keeps_the_existing_boundary() {
+    for first in ["null", " \nnull\t "] {
+        let decoded = chat_call_fragments(&[
+            json!({"index": 0, "id": "call_a", "type": "custom",
+                "custom": {"name": "get_weather", "input": first}}),
+            json!({"index": 0, "id": "call_b", "custom": {"input": "second"}}),
+        ]);
+        assert_eq!(
+            call_boundaries(&decoded),
+            [(0, "get_weather".to_owned(), "{}".to_owned())]
+        );
+        let response = decoded.outcome.expect("the existing boundary closes");
+        let calls: Vec<_> = response.tool_calls().collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, CallId::from_wire("call_a"));
+        assert_eq!(calls[0].function.arguments_value(), json!({}));
+        assert_eq!(
+            response.raw.pointer("/choices/0/message/tool_calls"),
+            Some(&json!([{"id": "call_b", "type": "custom",
+                "custom": {"name": "get_weather", "input": format!("{first}second")}}]))
+        );
+    }
 }
 
 fn text(value: &str) -> CarriedText {
