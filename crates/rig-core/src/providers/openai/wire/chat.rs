@@ -2113,7 +2113,7 @@ impl ChatDecoder {
                     .get("type")
                     .is_none_or(|kind| kind.as_str() == Some("custom"))
                 && call.get("function").is_none()
-                && call.at("/custom/name").is_none()
+                && call.pointer("/custom/name").is_none()
                 && call.at("/custom/input").is_some_and(Value::is_string);
             match kind {
                 CallKind::Function => out.function_fragment(
