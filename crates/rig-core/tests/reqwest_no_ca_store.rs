@@ -52,14 +52,17 @@ async fn the_shared_transport_reports_a_missing_ca_store_on_send() {
 
     // A stream opens (nothing is sent until it is polled) and the same
     // failure is its first item.
-    let mut stream = model
-        .stream(request)
-        .expect("a stream opens before sending");
-    let first = stream
-        .next()
-        .await
-        .expect("the build failure is the first item");
-    let report = first.expect_err("the first item is the failure");
+    let mut stream = match model.stream(request) {
+        Ok(stream) => stream,
+        Err(error) => panic!("a stream opens before sending: {error:?}"),
+    };
+    let Some(first) = stream.next().await else {
+        panic!("the build failure is the first item");
+    };
+    let report = match first {
+        Err(report) => report,
+        Ok(item) => panic!("the first item is the failure: {item:?}"),
+    };
     assert_eq!(report.kind(), ErrorKind::Http, "{report:?}");
     assert!(
         report.to_string().contains("CA certificates"),
