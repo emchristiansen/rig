@@ -6,8 +6,8 @@ use rig::providers::chatgpt;
 use rig::streaming::{Item, StreamEvent};
 use serde_json::json;
 
-use super::super::support::{recorded_include, with_chatgpt_cassette};
-use crate::cassettes::cassette_path;
+use super::super::support::{recorded_include, with_chatgpt_current_outbound};
+use crate::cassettes::{cassette_path, recorded_interaction_bodies};
 use crate::support::zero_arg_tool_definition;
 use rig::completion::CompletionRequest;
 
@@ -32,10 +32,13 @@ fn assert_terminal_response_has_no_output(scenario: &str) {
     );
 }
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn nonstreaming_tool_call_completed_response_without_output() {
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "streaming_tools/tool_call_completed_response_without_output",
+        recorded_interaction_bodies("chatgpt", "streaming_tools/tool_call_completed_response_without_output"),
         |client| async move {
             let model = client.completion(chatgpt::GPT_5_4);
             let request = CompletionRequest::new(
@@ -82,10 +85,13 @@ async fn nonstreaming_tool_call_completed_response_without_output() {
     .await;
 }
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn stream_tool_call_completed_response_without_output() {
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "streaming_tools/tool_call_completed_response_without_output",
+        recorded_interaction_bodies("chatgpt", "streaming_tools/tool_call_completed_response_without_output"),
         |client| async move {
             let model = client.completion(chatgpt::GPT_5_4);
             let request = CompletionRequest::new(

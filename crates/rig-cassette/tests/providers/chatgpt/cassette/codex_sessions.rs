@@ -19,7 +19,8 @@ use rig::message::{AssistantContent, UserContent};
 use rig::providers::chatgpt;
 use rig::tool::Tool;
 
-use super::super::support::{recorded_include, with_chatgpt_cassette};
+use super::super::support::{recorded_include, with_chatgpt_current_outbound};
+use crate::cassettes::recorded_interaction_bodies;
 use crate::reasoning::{self, WeatherTool};
 use crate::support::{
     ALPHA_SIGNAL_OUTPUT, Adder, AlphaSignal, BETA_SIGNAL_OUTPUT, BetaSignal,
@@ -94,10 +95,16 @@ fn result_index_for_call(results: &[ToolEvent], call: &ToolEvent) -> usize {
         .message_index
 }
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn sequential_tool_calls_nonstreaming() {
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "codex_sessions/sequential_tool_calls_nonstreaming",
+        recorded_interaction_bodies(
+            "chatgpt",
+            "codex_sessions/sequential_tool_calls_nonstreaming",
+        ),
         |client| async move {
             let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
                 .preamble(SEQUENTIAL_TOOLS_PREAMBLE)
@@ -160,10 +167,13 @@ async fn sequential_tool_calls_nonstreaming() {
     .await;
 }
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn sequential_tool_calls_streaming() {
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "codex_sessions/sequential_tool_calls_streaming",
+        recorded_interaction_bodies("chatgpt", "codex_sessions/sequential_tool_calls_streaming"),
         |client| async move {
             let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
                 .preamble(SEQUENTIAL_TOOLS_PREAMBLE)
@@ -207,10 +217,16 @@ async fn sequential_tool_calls_streaming() {
     .await;
 }
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn parallel_tool_calls_single_turn_nonstreaming() {
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "codex_sessions/parallel_tool_calls_single_turn_nonstreaming",
+        recorded_interaction_bodies(
+            "chatgpt",
+            "codex_sessions/parallel_tool_calls_single_turn_nonstreaming",
+        ),
         |client| async move {
             let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
                 .preamble(TWO_TOOL_STREAM_PREAMBLE)
@@ -268,10 +284,16 @@ async fn parallel_tool_calls_single_turn_nonstreaming() {
     .await;
 }
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn parallel_tool_calls_single_turn_streaming() {
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "codex_sessions/parallel_tool_calls_single_turn_streaming",
+        recorded_interaction_bodies(
+            "chatgpt",
+            "codex_sessions/parallel_tool_calls_single_turn_streaming",
+        ),
         |client| async move {
             let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
                 .preamble(TWO_TOOL_STREAM_PREAMBLE)
@@ -293,10 +315,13 @@ async fn parallel_tool_calls_single_turn_streaming() {
     .await;
 }
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn long_history_replay_nonstreaming() {
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "codex_sessions/long_history_replay_nonstreaming",
+        recorded_interaction_bodies("chatgpt", "codex_sessions/long_history_replay_nonstreaming"),
         |client| async move {
             let model = client.completion(chatgpt::GPT_5_4);
             let preamble = "You are a concise assistant with perfect recall of this conversation.";
@@ -380,10 +405,16 @@ async fn long_history_replay_nonstreaming() {
     .await;
 }
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn reasoning_session_two_tool_calls_streaming() {
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "codex_sessions/reasoning_session_two_tool_calls_streaming",
+        recorded_interaction_bodies(
+            "chatgpt",
+            "codex_sessions/reasoning_session_two_tool_calls_streaming",
+        ),
         |client| async move {
             let call_count = Arc::new(AtomicUsize::new(0));
             let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
@@ -504,12 +535,18 @@ async fn a_caller_set_output_token_cap_is_refused_by_name() {
     );
 }
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn streamed_phase_round_trips_on_follow_up() {
     const PROMPT: &str = "Remember the codeword ALPHA-17. Reply exactly: ACK-1";
     let mut first = None;
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "codex_sessions/streamed_phase_round_trips_on_follow_up",
+        recorded_interaction_bodies(
+            "chatgpt",
+            "codex_sessions/streamed_phase_round_trips_on_follow_up",
+        ),
         |client| {
             let first = &mut first;
             async move {
@@ -613,10 +650,16 @@ async fn streamed_phase_round_trips_on_follow_up() {
     );
 }
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn usage_accumulates_across_streaming_multi_turn() {
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "codex_sessions/usage_accumulates_across_streaming_multi_turn",
+        recorded_interaction_bodies(
+            "chatgpt",
+            "codex_sessions/usage_accumulates_across_streaming_multi_turn",
+        ),
         |client| async move {
             let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
                 .preamble(ORDERED_TOOL_STREAM_PREAMBLE)

@@ -12,7 +12,8 @@ use rig::message::{AssistantContent, ToolChoice};
 use rig::providers::chatgpt;
 use rig::tool::Tool;
 
-use super::super::support::{recorded_include, with_chatgpt_cassette};
+use super::super::support::{recorded_include, with_chatgpt_current_outbound};
+use crate::cassettes::recorded_interaction_bodies;
 use crate::support::{Adder, AlphaSignal, Subtract, TOOLS_PREAMBLE};
 use rig::completion::CompletionRequest;
 
@@ -27,10 +28,13 @@ fn tool_call_names(choice: &[AssistantContent]) -> Vec<String> {
         .collect()
 }
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn required_forces_a_tool_call() {
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "codex_tool_choice/required_forces_a_tool_call",
+        recorded_interaction_bodies("chatgpt", "codex_tool_choice/required_forces_a_tool_call"),
         |client| async move {
             let model = client.completion(chatgpt::GPT_5_4);
             let request = CompletionRequest::new("Please greet me.")
@@ -59,10 +63,13 @@ async fn required_forces_a_tool_call() {
     .await;
 }
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn none_suppresses_tool_calls() {
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "codex_tool_choice/none_suppresses_tool_calls",
+        recorded_interaction_bodies("chatgpt", "codex_tool_choice/none_suppresses_tool_calls"),
         |client| async move {
             let model = client.completion(chatgpt::GPT_5_4);
             let request = CompletionRequest::new("What is 2 plus 3? Reply with just the number.")
@@ -91,10 +98,16 @@ async fn none_suppresses_tool_calls() {
     .await;
 }
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn specific_single_function_targets_named_tool() {
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "codex_tool_choice/specific_single_function_targets_named_tool",
+        recorded_interaction_bodies(
+            "chatgpt",
+            "codex_tool_choice/specific_single_function_targets_named_tool",
+        ),
         |client| async move {
             let model = client.completion(chatgpt::GPT_5_4);
             let request = CompletionRequest::new("Compute 9 minus 4 using a tool.")
@@ -151,10 +164,16 @@ async fn specific_single_function_targets_named_tool() {
     .await;
 }
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn specific_multiple_functions_use_allowed_tools() {
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "codex_tool_choice/specific_multiple_functions_use_allowed_tools",
+        recorded_interaction_bodies(
+            "chatgpt",
+            "codex_tool_choice/specific_multiple_functions_use_allowed_tools",
+        ),
         |client| async move {
             let model = client.completion(chatgpt::GPT_5_4);
             let request = CompletionRequest::new("What is 2 plus 3? Use exactly one tool.")

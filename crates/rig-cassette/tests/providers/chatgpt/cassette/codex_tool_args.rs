@@ -15,7 +15,8 @@ use rig::tool::Tool;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::super::support::{recorded_include, with_chatgpt_cassette};
+use super::super::support::{recorded_include, with_chatgpt_current_outbound};
+use crate::cassettes::recorded_interaction_bodies;
 use crate::support::{
     REQUIRED_ZERO_ARG_TOOL_PROMPT, assert_stream_contains_zero_arg_tool_call_named,
     collect_raw_stream_observation, zero_arg_tool_definition,
@@ -153,10 +154,16 @@ fn assert_expected_plan_trip_arguments(arguments: &serde_json::Value) {
     );
 }
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn zero_argument_tool_call_streaming() {
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "codex_tool_args/zero_argument_tool_call_streaming",
+        recorded_interaction_bodies(
+            "chatgpt",
+            "codex_tool_args/zero_argument_tool_call_streaming",
+        ),
         |client| async move {
             let model = client.completion(chatgpt::GPT_5_4);
             let request = CompletionRequest::new(REQUIRED_ZERO_ARG_TOOL_PROMPT)
@@ -174,10 +181,16 @@ async fn zero_argument_tool_call_streaming() {
     .await;
 }
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn zero_argument_tool_call_nonstreaming() {
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "codex_tool_args/zero_argument_tool_call_nonstreaming",
+        recorded_interaction_bodies(
+            "chatgpt",
+            "codex_tool_args/zero_argument_tool_call_nonstreaming",
+        ),
         |client| async move {
             let model = client.completion(chatgpt::GPT_5_4);
             let request = CompletionRequest::new(REQUIRED_ZERO_ARG_TOOL_PROMPT)
@@ -209,10 +222,16 @@ async fn zero_argument_tool_call_nonstreaming() {
     .await;
 }
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn nested_arguments_roundtrip_nonstreaming() {
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "codex_tool_args/nested_arguments_roundtrip_nonstreaming",
+        recorded_interaction_bodies(
+            "chatgpt",
+            "codex_tool_args/nested_arguments_roundtrip_nonstreaming",
+        ),
         |client| async move {
             let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
                 .preamble(NESTED_ARGS_PREAMBLE)
@@ -254,10 +273,13 @@ async fn nested_arguments_roundtrip_nonstreaming() {
     .await;
 }
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn nested_arguments_streaming() {
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "codex_tool_args/nested_arguments_streaming",
+        recorded_interaction_bodies("chatgpt", "codex_tool_args/nested_arguments_streaming"),
         |client| async move {
             let model = client.completion(chatgpt::GPT_5_4);
             let request = CompletionRequest::new(NESTED_ARGS_PROMPT)
@@ -288,10 +310,13 @@ async fn nested_arguments_streaming() {
     .await;
 }
 
+/// Checks current outbound shape and response handling from the original SSE.
+/// This does not establish classic replay of the recorded request.
 #[tokio::test]
 async fn unicode_arguments_streaming() {
-    with_chatgpt_cassette(
+    with_chatgpt_current_outbound(
         "codex_tool_args/unicode_arguments_streaming",
+        recorded_interaction_bodies("chatgpt", "codex_tool_args/unicode_arguments_streaming"),
         |client| async move {
             let model = client.completion(chatgpt::GPT_5_4);
             let request = CompletionRequest::new(

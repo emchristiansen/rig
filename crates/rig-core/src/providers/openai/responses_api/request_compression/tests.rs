@@ -65,6 +65,54 @@ fn a_zstd_wire_sends_the_plain_body_compressed_and_names_the_encoding() {
     );
 }
 
+#[test]
+fn standard_codex_compression_keeps_routing_order_and_instruction_input() {
+    let request = CompletionRequest::new("hello")
+        .preamble("caller base")
+        .additional_params(serde_json::json!({"service_tier": "priority"}));
+    let plain = chatgpt()
+        .encode(request.clone(), Mode::Streaming)
+        .expect("plain request encodes");
+    let compressed = chatgpt()
+        .with_request_compression(RequestCompression::Zstd)
+        .encode(request, Mode::Streaming)
+        .expect("compressed request encodes");
+    assert_eq!(
+        compressed.request.headers()[http::header::CONTENT_ENCODING],
+        "zstd"
+    );
+    let Body::Bytes(plain) = plain.request.body() else {
+        panic!("the plain request has a byte body");
+    };
+    let Body::Bytes(compressed) = compressed.request.body() else {
+        panic!("the compressed request has a byte body");
+    };
+    let decoded = zstd::stream::decode_all(compressed.as_slice()).expect("a zstd frame");
+    assert_eq!(decoded.as_slice(), plain.as_slice());
+    assert!(decoded.starts_with(br#"{"model":"gpt-5.4","stream":true,"service_tier":"priority","#));
+    let body: serde_json::Value = serde_json::from_slice(&decoded).expect("request JSON");
+    assert!(body.get("instructions").is_none());
+    assert_eq!(
+        body["input"],
+        serde_json::json!([
+            {
+                "type": "message", "role": "developer",
+                "content": [{
+                    "type": "input_text",
+                    "text": "You are ChatGPT, a helpful AI assistant.\n\ncaller base",
+                }],
+                "internal_chat_message_metadata_passthrough": {
+                    "content_item_kinds": ["model.base_instructions"],
+                },
+            },
+            {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}],
+            },
+        ])
+    );
+}
+
 /// The default sends bodies as they are, and stays off the serialized wire.
 #[test]
 fn the_default_sends_bodies_as_they_are() {
