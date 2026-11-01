@@ -52,17 +52,22 @@ async fn the_shared_transport_reports_a_missing_ca_store_on_send() {
 
     // A stream opens (nothing is sent until it is polled) and the same
     // failure is its first item.
-    let mut stream = match model.stream(request) {
-        Ok(stream) => stream,
-        Err(error) => panic!("a stream opens before sending: {error:?}"),
-    };
-    let Some(first) = stream.next().await else {
-        panic!("the build failure is the first item");
-    };
-    let report = match first {
-        Err(report) => report,
-        Ok(item) => panic!("the first item is the failure: {item:?}"),
-    };
+    let stream = model.stream(request);
+    assert!(
+        stream.is_ok(),
+        "a stream opens before sending: {:?}",
+        stream.as_ref().err()
+    );
+    let Ok(mut stream) = stream else { return };
+    let first = stream.next().await;
+    assert!(first.is_some(), "the build failure is the first item");
+    let Some(first) = first else { return };
+    assert!(
+        first.is_err(),
+        "the first item is the failure: {:?}",
+        first.as_ref().ok()
+    );
+    let Err(report) = first else { return };
     assert_eq!(report.kind(), ErrorKind::Http, "{report:?}");
     assert!(
         report.to_string().contains("CA certificates"),
