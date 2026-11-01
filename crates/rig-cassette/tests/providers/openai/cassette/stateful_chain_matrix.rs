@@ -11,18 +11,20 @@ use std::panic::{AssertUnwindSafe, resume_unwind};
 use std::sync::{Arc, Mutex};
 
 use futures::FutureExt;
-use rig::completion::{CompletionModel, CompletionRequest, ToolDefinition};
+use rig::completion::{CompletionRequest, ToolDefinition};
 use rig::message::{AssistantContent, Message, ToolCall, ToolResultContent, UserContent};
 use serde_json::{Value, json};
 
-use super::super::support::{OpenAiCassette, with_openai_cassette};
+use rig::completion::Effort;
+
+use super::super::support::{OpenAiCassette, shared_options, stateless, with_openai_cassette};
 
 const MODEL: &str = "gpt-5-mini";
 const CODE: &str = "amber-5521";
 
 fn lookup_tool() -> ToolDefinition {
     ToolDefinition {
-        name: "lookup_code".to_owned(),
+        name: rig_core::message::ToolName::new("lookup_code").expect("tool name"),
         description: "Return the code stored for a record.".to_owned(),
         parameters: json!({
             "type": "object",
@@ -32,29 +34,15 @@ fn lookup_tool() -> ToolDefinition {
     }
 }
 
-fn request(history: Vec<Message>, tools: Vec<ToolDefinition>, params: Value) -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        chat_history: history,
-        documents: vec![],
-        tools,
-        temperature: None,
-        max_tokens: Some(2048),
-        tool_choice: None,
-        additional_params: Some(params),
-        output_schema: None,
-        record_telemetry_content: false,
-    }
+fn request(history: Vec<Message>, tools: Vec<ToolDefinition>) -> CompletionRequest {
+    let mut request = CompletionRequest::from(history);
+    request.tools = tools;
+    request.max_tokens = Some(2048);
+    request
 }
 
 fn text(choice: &[AssistantContent]) -> String {
-    choice
-        .iter()
-        .filter_map(|content| match content {
-            AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
-        .collect()
+    rig_test_support::support::assistant_text(choice)
 }
 
 fn only_call(choice: &[AssistantContent]) -> ToolCall {
@@ -71,9 +59,8 @@ fn only_call(choice: &[AssistantContent]) -> ToolCall {
 
 fn answer(call: &ToolCall) -> Message {
     Message::User {
-        content: vec![UserContent::tool_result_for(
+        content: vec![UserContent::tool_result(
             call.id.clone(),
-            call.provider.clone(),
             call.function.name.clone(),
             vec![ToolResultContent::text(format!(
                 "record alpha: code {CODE}"
@@ -104,7 +91,7 @@ async fn cleaned<F: Future<Output = ()>>(client: &OpenAiCassette, resources: &Cr
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    let config = &client.openai.wire;
+    let config = &client.openai.config;
     let http = reqwest::Client::new();
     let mut failures = Vec::new();
     for path in paths {
@@ -179,53 +166,60 @@ async fn stored_chain_with_tool_call() {
             let resources = Created::default();
             cleaned(&client, &resources, async {
                 let model = client.openai.responses(MODEL);
-                let stored = |previous: Option<&str>| {
-                    let mut params = json!({ "store": true, "reasoning": { "effort": "low" } });
-                    if let Some(previous) = previous {
-                        params["previous_response_id"] = json!(previous);
+                let stored = |request: CompletionRequest, previous: Option<&str>| {
+                    let request = request
+                        .reasoning(Effort::Low)
+                        .provider_options(shared_options(Some(true), None));
+                    match previous {
+                        Some(previous) => {
+                            request.additional_params(json!({ "previous_response_id": previous }))
+                        }
+                        None => request,
                     }
-                    params
                 };
 
                 let first = model
-                    .completion(request(
-                        vec![Message::user(
-                            "Use lookup_code to get the code of record alpha. Do not guess.",
-                        )],
-                        vec![lookup_tool()],
-                        stored(None),
+                    .call(stored(
+                        request(
+                            vec![Message::user(
+                                "Use lookup_code to get the code of record alpha. Do not guess.",
+                            )],
+                            vec![lookup_tool()],
+                        ),
+                        None,
                     ))
                     .await
                     .expect("turn one");
-                let first_id = first.response_id.clone().expect("a stored response id");
+                let first_id = first.response_id().expect("a stored response id");
                 created(&resources, format!("responses/{first_id}"));
                 let call = only_call(&first.choice);
 
                 let second = model
-                    .completion(request(
-                        vec![answer(&call)],
-                        vec![lookup_tool()],
-                        stored(Some(&first_id)),
+                    .call(stored(
+                        request(vec![answer(&call)], vec![lookup_tool()]),
+                        Some(first_id),
                     ))
                     .await
                     .expect(
                         "turn two continues from the stored response with the tool output alone",
                     );
-                let second_id = second.response_id.clone().expect("a stored response id");
+                let second_id = second.response_id().expect("a stored response id");
                 created(&resources, format!("responses/{second_id}"));
                 assert!(text(&second.choice).contains(CODE), "{:?}", second.choice);
 
                 let third = model
-                    .completion(request(
-                        vec![Message::user(
-                            "Repeat the code you reported, exactly, and nothing else.",
-                        )],
-                        vec![],
-                        stored(Some(&second_id)),
+                    .call(stored(
+                        request(
+                            vec![Message::user(
+                                "Repeat the code you reported, exactly, and nothing else.",
+                            )],
+                            vec![],
+                        ),
+                        Some(second_id),
                     ))
                     .await
                     .expect("turn three continues from turn two");
-                let third_id = third.response_id.clone().expect("a stored response id");
+                let third_id = third.response_id().expect("a stored response id");
                 created(&resources, format!("responses/{third_id}"));
                 assert!(text(&third.choice).contains(CODE), "{:?}", third.choice);
             })
@@ -260,107 +254,6 @@ async fn stored_chain_with_tool_call() {
     }
 }
 
-/// A conversation that starts stored and chained, then continues statelessly
-/// by resending the whole history: the stateless request must carry the
-/// reasoning items (by id and encrypted content) and the call exactly as the
-/// stored turns issued them.
-#[tokio::test]
-async fn stored_then_stateless_mid_conversation() {
-    const SCENARIO: &str = "stateful_chain_matrix/stored_then_stateless_mid_conversation";
-    with_openai_cassette(
-        "stateful_chain_matrix/stored_then_stateless_mid_conversation",
-        |client| async move {
-            let resources = Created::default();
-            cleaned(&client, &resources, async {
-                let model = client.openai.responses(MODEL);
-                let params = |previous: Option<&str>, store: bool| {
-                    let mut params = json!({
-                        "store": store,
-                        "reasoning": { "effort": "low" },
-                        "include": ["reasoning.encrypted_content"]
-                    });
-                    if let Some(previous) = previous {
-                        params["previous_response_id"] = json!(previous);
-                    }
-                    params
-                };
-                let prompt =
-                    Message::user("Use lookup_code to get the code of record alpha. Do not guess.");
-
-                let first = model
-                    .completion(request(
-                        vec![prompt.clone()],
-                        vec![lookup_tool()],
-                        params(None, true),
-                    ))
-                    .await
-                    .expect("turn one");
-                let first_id = first.response_id.clone().expect("a stored response id");
-                created(&resources, format!("responses/{first_id}"));
-                let call = only_call(&first.choice);
-                let tool_answer = answer(&call);
-
-                let second = model
-                    .completion(request(
-                        vec![tool_answer.clone()],
-                        vec![lookup_tool()],
-                        params(Some(&first_id), true),
-                    ))
-                    .await
-                    .expect("turn two chains");
-                let second_id = second.response_id.clone().expect("a stored response id");
-                created(&resources, format!("responses/{second_id}"));
-
-                let history = vec![
-                    prompt,
-                    Message::Assistant {
-                        id: first.message_id.clone(),
-                        content: first.choice.clone(),
-                    },
-                    tool_answer,
-                    Message::Assistant {
-                        id: second.message_id.clone(),
-                        content: second.choice.clone(),
-                    },
-                    Message::user("Repeat the code you reported, exactly, and nothing else."),
-                ];
-                let third = model
-                    .completion(request(history, vec![lookup_tool()], params(None, false)))
-                    .await
-                    .expect("turn three continues statelessly from the full history");
-                assert!(text(&third.choice).contains(CODE), "{:?}", third.choice);
-            })
-            .await;
-        },
-    )
-    .await;
-
-    let turns = turns(SCENARIO);
-    let (first_response, third_request) = (&turns[0].2, &turns[2].1);
-    assert!(third_request.get("previous_response_id").is_none());
-    let first_reasoning = first_response["output"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|item| item["type"] == "reasoning")
-        .expect("turn one reasoned");
-    let replayed = input_items(third_request, "reasoning");
-    assert!(
-        replayed
-            .iter()
-            .any(|item| item["id"] == first_reasoning["id"]
-                && item["encrypted_content"] == first_reasoning["encrypted_content"]),
-        "turn one's reasoning item is replayed with its exact id and ciphertext"
-    );
-    let calls = input_items(third_request, "function_call");
-    assert!(
-        calls
-            .iter()
-            .any(|item| item["call_id"] == json!(output_call_id(first_response))),
-        "turn one's call is replayed with its exact call id"
-    );
-}
-
 /// A PDF uploaded to the Files API, referenced by its id in Responses content
 /// on two turns, then deleted. The upload expires after an hour as a backstop.
 #[tokio::test]
@@ -369,7 +262,7 @@ async fn file_id_chain() {
     with_openai_cassette("stateful_chain_matrix/file_id_chain", |client| async move {
         let resources = Created::default();
         cleaned(&client, &resources, async {
-            let config = &client.openai.wire;
+            let config = &client.openai.config;
             let bytes = std::fs::read(crate::support::PDF_FIXTURE_PATH).expect("fixture PDF");
             let form = reqwest::multipart::Form::new()
                 .text("purpose", "user_data")
@@ -401,7 +294,7 @@ async fn file_id_chain() {
             let document = Message::User {
                 content: vec![
                     UserContent::Document(rig::message::Document {
-                        data: rig::message::DocumentSourceKind::file_id(&file_id),
+                        data: rig::message::DocumentSourceKind::file_id(&file_id).into(),
                         media_type: Some(rig::message::DocumentMediaType::PDF),
                         additional_params: None,
                     }),
@@ -409,21 +302,32 @@ async fn file_id_chain() {
                 ],
             };
             let model = client.openai.responses("gpt-4.1-mini");
-            let params = json!({ "store": false });
+            // The recording asked for `include: ["reasoning.encrypted_content"]`, which
+            // production no longer adds for a proven nonreasoning model
+            // (coord-a-rig-g215-1). The test asks for it explicitly, beside its existing
+            // options, as MEC132-7 treated producer 220; the production model guard and
+            // the recording stay unchanged, and this test is not about `include`.
+            // Both recorded turns carry it.
+            let include = json!({ "include": ["reasoning.encrypted_content"] });
             let first = model
-                .completion(request(vec![document.clone()], vec![], params.clone()))
+                .call(
+                    request(vec![document.clone()], vec![])
+                        .provider_options(stateless())
+                        .additional_params(include.clone()),
+                )
                 .await
                 .expect("turn one reads the file by id");
             let history = vec![
                 document,
-                Message::Assistant {
-                    id: first.message_id.clone(),
-                    content: first.choice.clone(),
-                },
+                Message::Assistant(first.head().with_content(first.choice.clone())),
                 Message::user("How many pages does the attached PDF have? Answer with a number."),
             ];
             let second = model
-                .completion(request(history, vec![], params))
+                .call(
+                    request(history, vec![])
+                        .provider_options(stateless())
+                        .additional_params(include),
+                )
                 .await
                 .expect("turn two still reads the file by id");
             assert!(

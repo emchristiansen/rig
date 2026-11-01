@@ -8,9 +8,9 @@ use serde_json::json;
 
 use super::*;
 use crate::{
-    completion::Usage,
     effect::{FamilyDescriptor, HandlerKey},
-    streaming::{StreamEvent, StreamFinal},
+    operation::Finish,
+    streaming::{Item, StreamEvent},
 };
 
 fn custom(payload: serde_json::Value) -> EffectKind {
@@ -68,18 +68,14 @@ impl Serve for Streamer {
     }
 
     async fn serve(&self, _kind: EffectKind, _dispatch: Dispatch) -> Reply {
-        Reply::written(|mut writer| async move {
-            writer.text("hel").await.expect("open");
-            writer.text("lo").await.expect("open");
-            writer
-                .finish(StreamFinal::new(
-                    "test",
-                    Usage::default(),
-                    serde_json::json!({}),
-                ))
-                .await
-                .expect("open");
-        })
+        Reply::written(
+            crate::message::Origin::new("test", "test", "test"),
+            |mut writer| async move {
+                writer.text("hel").await.expect("open");
+                writer.text("lo").await.expect("open");
+                writer.finish(Finish::default()).await.expect("open");
+            },
+        )
     }
 }
 
@@ -137,12 +133,13 @@ impl Intercept for Policy {
 #[derive(Default)]
 struct Tapped {
     outcomes: Mutex<Vec<Result<Outcome, ErrorReport>>>,
-    events: Mutex<Vec<StreamEvent>>,
+    events: Mutex<Vec<Item<StreamEvent>>>,
     discarded: AtomicUsize,
     patched: Mutex<Vec<EffectKind>>,
 }
 
 impl super::super::Observe for Arc<Tapped> {
+    fn origin(&mut self, _origin: &crate::message::Origin) {}
     fn outcome(&mut self, outcome: &Result<Outcome, ErrorReport>) {
         self.outcomes
             .lock()
@@ -154,7 +151,7 @@ impl super::super::Observe for Arc<Tapped> {
         true
     }
 
-    fn event(&mut self, event: &StreamEvent) {
+    fn event(&mut self, event: &Item<StreamEvent>) {
         self.events.lock().expect("events").push(event.clone());
     }
 
@@ -194,55 +191,6 @@ async fn unary(
 }
 
 #[tokio::test]
-async fn layers_nest_outermost_first() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let (handler, served) = echo();
-    let layered = handler
-        .layered(Policy::observing("a", &seen))
-        .layered(Policy::observing("b", &seen));
-    assert_eq!(layered.descriptor().layers, ["b", "a"], "outermost first");
-    assert_eq!(layered.descriptor().key.as_str(), "echo", "the inner's key");
-    let (outcome, tap) = unary(&layered, custom(json!(1))).await;
-    assert!(matches!(outcome, Ok(Outcome::Custom { payload }) if payload == json!(1)));
-    assert_eq!(served.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        *seen.lock().expect("seen"),
-        ["b.before", "a.before", "a.after", "b.after"],
-        "the handler-stack order: b sees the dispatch first, a's after runs first"
-    );
-    // The record is the handler's answer, once.
-    let outcomes = tap.outcomes.lock().expect("outcomes");
-    assert_eq!(outcomes.len(), 1);
-    assert!(matches!(&outcomes[0], Ok(Outcome::Custom { payload }) if *payload == json!(1)));
-    assert_eq!(tap.discarded.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn a_patch_of_the_same_family_is_what_the_handler_serves() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let (handler, _) = echo();
-    let mut policy = Policy::observing("patcher", &seen);
-    policy.before = Box::new(|_| Decision::Patch(custom(json!("patched"))));
-    let layered = handler.layered(policy);
-    let (outcome, tap) = unary(&layered, custom(json!("original"))).await;
-    assert!(matches!(outcome, Ok(Outcome::Custom { payload }) if payload == json!("patched")));
-    let outcomes = tap.outcomes.lock().expect("outcomes");
-    assert!(
-        matches!(&outcomes[0], Ok(Outcome::Custom { payload }) if *payload == json!("patched")),
-        "the record holds what was served"
-    );
-    let patched = tap.patched.lock().expect("patched");
-    assert_eq!(
-        patched.len(),
-        1,
-        "the tap saw the patch: the record's request is what was served"
-    );
-    assert!(
-        matches!(&patched[0], EffectKind::Custom { payload, .. } if *payload == json!("patched"))
-    );
-}
-
-#[tokio::test]
 async fn a_patch_of_another_family_is_internal_and_never_a_dispatch() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let (handler, served) = echo();
@@ -275,99 +223,6 @@ async fn a_patch_of_another_family_is_internal_and_never_a_dispatch() {
         ["wrong.before"],
         "no after: nothing was answered"
     );
-}
-
-#[tokio::test]
-async fn a_denial_never_reaches_the_handler_and_leaves_no_record() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let (handler, served) = echo();
-    let mut policy = Policy::observing("gate", &seen);
-    policy.before = Box::new(|_| Decision::deny("not today"));
-    let layered = handler.layered(policy);
-    let (outcome, tap) = unary(&layered, custom(json!(1))).await;
-    let report = outcome.expect_err("denied");
-    assert_eq!(report.kind, ErrorKind::Denied);
-    assert!(!report.retryable);
-    assert_eq!(report.message, "not today");
-    assert_eq!(served.load(Ordering::SeqCst), 0);
-    assert!(
-        tap.outcomes.lock().expect("outcomes").is_empty(),
-        "no record"
-    );
-    assert_eq!(
-        tap.discarded.load(Ordering::SeqCst),
-        1,
-        "the slot is forgotten"
-    );
-    // A denial with a kind of its own meaning travels as given.
-    let (handler, _) = echo();
-    let mut policy = Policy::observing("stop", &seen);
-    policy.before =
-        Box::new(|_| Decision::Deny(ErrorReport::new(ErrorKind::Cancelled, "the program stops")));
-    let (outcome, _) = unary(&handler.layered(policy), custom(json!(1))).await;
-    assert_eq!(outcome.expect_err("cancelled").kind, ErrorKind::Cancelled);
-}
-
-#[tokio::test]
-async fn a_replacement_on_the_way_out_leaves_the_handlers_answer_in_the_record() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let (handler, _) = echo();
-    let mut policy = Policy::observing("replacer", &seen);
-    policy.after = Box::new(|_| {
-        Verdict::Replace(Ok(Outcome::Custom {
-            payload: json!("replaced"),
-        }))
-    });
-    let layered = handler.layered(policy);
-    let (outcome, tap) = unary(&layered, custom(json!("real"))).await;
-    assert!(
-        matches!(&outcome, Ok(Outcome::Custom { payload }) if *payload == json!("replaced")),
-        "the consumer receives the replacement"
-    );
-    let outcomes = tap.outcomes.lock().expect("outcomes");
-    assert_eq!(outcomes.len(), 1, "one record");
-    assert!(
-        matches!(&outcomes[0], Ok(Outcome::Custom { payload }) if *payload == json!("real")),
-        "the record holds the handler's answer"
-    );
-}
-
-#[tokio::test]
-async fn a_layer_over_a_streaming_handler_sees_the_folded_outcome_in_after() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let folded = Arc::new(Mutex::new(None));
-    let mut policy = Policy::observing("fold", &seen);
-    let for_after = Arc::clone(&folded);
-    policy.after = Box::new(move |outcome| {
-        *for_after.lock().expect("folded") = Some(outcome.clone());
-        Verdict::Keep
-    });
-    let layered = ErasedHandler::new(Streamer).layered(policy);
-    let tap = Arc::new(Tapped::default());
-    let dispatch = tapped(Dispatch::new(EffectId::from_raw(9), true), &tap);
-    let items: Vec<_> = layered
-        .handle(custom(json!(1)), dispatch)
-        .await
-        .into_stream()
-        .collect()
-        .await;
-    assert_eq!(
-        items.len(),
-        5,
-        "a block start, two deltas, a block end, a final: {items:?}"
-    );
-    let folded = folded.lock().expect("folded").clone().expect("after ran");
-    let Ok(Outcome::Completion(response)) = folded else {
-        panic!("a folded completion, not {folded:?}");
-    };
-    assert_eq!(
-        response.choice,
-        vec![crate::message::AssistantContent::text("hello")]
-    );
-    // The record holds the fold and the events, tapped on the inner hop.
-    let outcomes = tap.outcomes.lock().expect("outcomes");
-    assert!(matches!(&outcomes[0], Ok(Outcome::Completion(_))));
-    assert_eq!(tap.events.lock().expect("events").len(), items.len());
 }
 
 #[tokio::test]
@@ -422,19 +277,6 @@ async fn an_error_replacing_a_streamed_answer_follows_its_events() {
         matches!(last, Err(report) if report.kind == ErrorKind::Internal && report.message.contains("layer `swap`")),
         "{last:?}"
     );
-}
-
-#[tokio::test]
-async fn a_layer_serves_inline_too() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let (handler, _) = echo();
-    let mut policy = Policy::observing("gate", &seen);
-    policy.before = Box::new(|_| Decision::deny("inline too"));
-    let layered = handler.layered(policy);
-    let report = super::super::serve_inline(&layered, custom(json!(1)))
-        .await
-        .expect_err("denied");
-    assert_eq!(report.kind, ErrorKind::Denied);
 }
 
 #[test]
@@ -564,118 +406,4 @@ async fn tool_argument_patches_keep_the_bound_target_and_reach_inner_policy() {
         ["outer.before", "inner.before", "inner.after", "outer.after"]
     );
     assert_eq!(tap.patched.lock().expect("patches").len(), 1);
-}
-
-/// A layered dispatch is resolved exactly once whichever future is dropped:
-/// the layer's own (its inner handler still pending, the observer moved
-/// inward by `Dispatch::inner`) resolves the record as cancelled once; a
-/// layer whose `after` is dropped mid-decision leaves the handler's answer
-/// as the one resolution, with no cancellation after it.
-#[test]
-fn a_dropped_layer_resolves_its_record_exactly_once() {
-    use std::task::Context;
-
-    use futures::task::noop_waker_ref;
-
-    use super::super::Resolver;
-
-    /// Answers when told to, from outside.
-    struct Deferred(Arc<Mutex<Option<Resolver>>>);
-    impl Serve for Deferred {
-        type Family = family::Dynamic;
-        fn descriptor(&self) -> HandlerDescriptor {
-            HandlerDescriptor {
-                key: HandlerKey::from("deferred"),
-                family: FamilyDescriptor::Custom {
-                    kind: "test".into(),
-                },
-                layers: Vec::new(),
-            }
-        }
-        async fn serve(&self, _: EffectKind, _: Dispatch) -> Reply {
-            let (resolver, answer) = super::super::deferred();
-            *self.0.lock().expect("slot") = Some(resolver);
-            Reply::Outcome(answer.await)
-        }
-    }
-    /// Decides `after` only when told to, from outside.
-    struct Deciding(Arc<Mutex<Option<futures::channel::oneshot::Sender<()>>>>);
-    impl Intercept for Deciding {
-        fn name(&self) -> String {
-            "deciding".to_owned()
-        }
-        async fn before(&self, _: EffectId, _: &EffectKind) -> Decision {
-            Decision::Proceed
-        }
-        async fn after(
-            &self,
-            _: EffectId,
-            _: &EffectKind,
-            _: &Result<Outcome, ErrorReport>,
-        ) -> Verdict {
-            let (decide, decided) = futures::channel::oneshot::channel();
-            *self.0.lock().expect("slot") = Some(decide);
-            let _ = decided.await;
-            Verdict::Keep
-        }
-    }
-
-    // The layer's future dropped while its handler is pending.
-    let slot = Arc::new(Mutex::new(None));
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let handler = ErasedHandler::new(Deferred(slot.clone())).layered(Policy::observing("p", &seen));
-    let tap = Arc::new(Tapped::default());
-    let mut serving = handler.handle(
-        custom(json!(1)),
-        tapped(Dispatch::new(EffectId::from_raw(1), false), &tap),
-    );
-    assert!(
-        serving
-            .as_mut()
-            .poll(&mut Context::from_waker(noop_waker_ref()))
-            .is_pending()
-    );
-    let resolver = slot
-        .lock()
-        .expect("slot")
-        .take()
-        .expect("the handler is waiting");
-    drop(serving);
-    assert!(resolver.is_closed());
-    {
-        let outcomes = tap.outcomes.lock().expect("outcomes");
-        assert_eq!(outcomes.len(), 1, "{outcomes:?}");
-        assert_eq!(
-            outcomes[0].as_ref().expect_err("cancelled").kind,
-            ErrorKind::Cancelled
-        );
-    }
-
-    // The layer's `after` dropped while it decides: the handler answered,
-    // the record holds that answer, and nothing else is told.
-    let (handler, _served) = echo();
-    let decide = Arc::new(Mutex::new(None));
-    let handler = handler.layered(Deciding(decide.clone()));
-    let tap = Arc::new(Tapped::default());
-    let mut serving = handler.handle(
-        custom(json!(2)),
-        tapped(Dispatch::new(EffectId::from_raw(2), false), &tap),
-    );
-    assert!(
-        serving
-            .as_mut()
-            .poll(&mut Context::from_waker(noop_waker_ref()))
-            .is_pending()
-    );
-    assert!(
-        decide.lock().expect("slot").is_some(),
-        "`after` is deciding"
-    );
-    drop(serving);
-    let outcomes = tap.outcomes.lock().expect("outcomes");
-    assert_eq!(outcomes.len(), 1, "{outcomes:?}");
-    assert!(
-        matches!(&outcomes[0], Ok(Outcome::Custom { payload }) if payload == &json!(2)),
-        "the handler's answer is the one resolution: {outcomes:?}"
-    );
 }

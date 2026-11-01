@@ -4,8 +4,7 @@ use base64::{Engine, prelude::BASE64_STANDARD};
 use rig::completion::message::Image;
 use rig::message::DocumentSourceKind;
 use rig::message::ImageMediaType;
-use rig::prelude::*;
-use rig::providers::ollama::wire::Ollama;
+use rig_test_support::cassette_models::OllamaModels;
 
 use crate::support::{
     IMAGE_FIXTURE_PATH, assert_contains_any_case_insensitive, assert_nonempty_response,
@@ -14,24 +13,20 @@ use crate::support::{
 #[tokio::test]
 #[ignore = "requires a local Ollama server with a multimodal model"]
 async fn multimodal_image_prompt() {
-    let ollama = Ollama::from_env()
-        .expect("config should build from env")
-        .bound()
-        .expect("transport should build");
-    let agent = ollama
-        .agent("llava")
+    let ollama = OllamaModels::from_env().expect("config should build from env");
+    let agent = rig::AgentBuilder::new(ollama.completion("llava"))
         .preamble("Describe this image and include anything notable about it.")
         .temperature(0.5)
         .build();
 
     let image_bytes = std::fs::read(IMAGE_FIXTURE_PATH).expect("fixture image should be readable");
     let image = Image {
-        data: DocumentSourceKind::base64(&BASE64_STANDARD.encode(image_bytes)),
+        data: DocumentSourceKind::base64(BASE64_STANDARD.encode(image_bytes)),
         media_type: Some(ImageMediaType::JPEG),
         ..Default::default()
     };
     let response = agent.prompt(image).await.expect("prompt should succeed");
 
-    assert_nonempty_response(&response.output);
-    assert_contains_any_case_insensitive(&response.output, &["ant", "insect"]);
+    assert_nonempty_response(&response.output());
+    assert_contains_any_case_insensitive(&response.output(), &["ant", "insect"]);
 }

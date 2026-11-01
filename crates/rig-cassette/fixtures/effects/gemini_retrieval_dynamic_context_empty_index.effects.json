@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 10072942899351225430,
+    "run_spec": 11761598427705777809,
     "handlers": [
       {
         "key": "golden/model:default",
@@ -49,7 +49,6 @@
             "query": "What is a glarb-glarb? Answer in one sentence.",
             "samples": 1,
             "threshold": null,
-            "additional_params": null,
             "filter": null
           }
         }
@@ -101,20 +100,36 @@
           "choice": [
             {
               "type": "text",
-              "text": "A \"glarb-glarb\" is not a recognized term or concept."
+              "text": "A \"glarb-glarb\" is not a recognized term or concept.",
+              "native": {
+                "item": {
+                  "text": "A \"glarb-glarb\" is not a recognized term or concept."
+                },
+                "fingerprint": "252baf8ff55310fa"
+              }
             }
           ],
           "usage": {
             "input_tokens": 26,
-            "output_tokens": 18,
+            "output_tokens": 95,
             "total_tokens": 121,
-            "reasoning_tokens": 77
+            "reasoning_tokens": 77,
+            "cost": {
+              "input": 7.8e-6,
+              "output": 0.0002375,
+              "cache_read": 0.0,
+              "cache_write": 0.0,
+              "total": 0.0002453
+            }
           },
-          "message_id": null,
-          "response_id": "oXizaum2Ad-JmtkPlbOD2A8",
+          "origin": {
+            "api": "gemini.generate_content",
+            "provider": "gcp.gemini",
+            "model": "gemini-2.5-flash",
+            "response_model": "gemini-2.5-flash",
+            "response_id": "oXizaum2Ad-JmtkPlbOD2A8"
+          },
           "finish_reason": "stop",
-          "provider": "gcp.gemini",
-          "model": "gemini-2.5-flash",
           "raw": {
             "candidates": [
               {

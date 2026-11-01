@@ -1,7 +1,7 @@
 use super::*;
 use crate::completion::{CompletionRequest, Message};
 use crate::providers::chatgpt;
-use crate::providers::openai::OpenAI;
+use crate::providers::openai::OpenAIConfig;
 use crate::providers::openai::responses_api::wire::Responses;
 use crate::wire::{Body, Mode, Wire};
 
@@ -17,11 +17,12 @@ fn prompt() -> CompletionRequest {
         additional_params: None,
         output_schema: None,
         record_telemetry_content: false,
+        ..CompletionRequest::new("say hi")
     }
 }
 
 fn chatgpt() -> Responses {
-    OpenAI::with_key(&chatgpt::DIALECT, "test-token")
+    OpenAIConfig::with_key(&chatgpt::DIALECT, "test-token")
         .with_caller_identity(crate::test_utils::test_caller_identity())
         .responses("gpt-5.4")
 }
@@ -30,10 +31,7 @@ fn chatgpt() -> Responses {
 /// body bytes.
 fn sent(wire: &Responses) -> (Option<String>, Vec<u8>) {
     let encoded = wire.encode(prompt(), Mode::Streaming).expect("encodes");
-    let request = encoded
-        .requests
-        .first()
-        .expect("a Responses request is one request");
+    let request = &encoded.request;
     let encoding = request
         .headers()
         .get(http::header::CONTENT_ENCODING)

@@ -1,21 +1,24 @@
 //! Image-generation requests, normalized responses, and model interfaces.
 //!
 //! ```no_run
-//! use rig_core::image_generation::{ImageGenerationModel, ImageGenerationRequestBuilder};
+//! use rig_core::DynModel;
+//! use rig_core::image_generation::ImageGenerationRequestBuilder;
+//! use rig_core::operation::ImageGeneration;
 //!
-//! # async fn example(model: impl ImageGenerationModel) -> Result<(), Box<dyn std::error::Error>> {
-//! let response = ImageGenerationRequestBuilder::new(model, "A mountain lake")
-//!     .width(1024).height(1024).send().await?;
+//! # async fn example(model: DynModel<ImageGeneration>) -> Result<(), Box<dyn std::error::Error>> {
+//! let request = ImageGenerationRequestBuilder::new("A mountain lake")
+//!     .width(1024)
+//!     .height(1024)
+//!     .build();
+//! let response = model.call(request).await?;
 //! # let _ = response;
 //! # Ok(())
 //! # }
 //! ```
-use crate::completion::{ResponseIdentity, Usage};
+use crate::completion::Usage;
 use crate::error::ProviderError;
-use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::Arc;
 
 /// Generated image bytes and normalized provider metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,72 +48,27 @@ pub struct ImageGenerationResponse {
 }
 
 impl ImageGenerationResponse {
-    /// Create a response from its required parts; optional metadata starts
-    /// unset and is filled in with the `with_*` helpers.
-    pub fn new(image: Vec<u8>, provider: impl Into<String>) -> Self {
+    /// A response carrying `image`. The driver writes the provider, the
+    /// transport request id and the reply document; decoders set what the
+    /// provider reported.
+    pub fn new(image: Vec<u8>) -> Self {
         Self {
             image,
             usage: Usage::default(),
-            provider: provider.into(),
+            provider: String::new(),
             model: None,
             response_id: None,
             provider_request_id: None,
             raw: serde_json::Value::Null,
         }
     }
-
-    /// This response's identity metadata as one [`ResponseIdentity`] carrier.
-    /// `message_id` is always `None`: nothing here is replayed as an
-    /// assistant message.
-    pub fn identity(&self) -> ResponseIdentity {
-        ResponseIdentity {
-            message_id: None,
-            response_id: self.response_id.clone(),
-            provider_request_id: self.provider_request_id.clone(),
-        }
-    }
 }
 
-crate::provider_response::modality_response_metadata_setters!(ImageGenerationResponse);
-
-/// Normalizes provider image payloads, attributing the response to the supplied
-/// provider name.
+/// Normalizes provider image payloads. The driver writes the provider, request
+/// id and `raw` afterwards.
 pub trait NormalizeImageGenerationResponse {
-    /// Normalize this payload, attributing it to `provider`.
-    fn normalize(self, provider: &str) -> Result<ImageGenerationResponse, ProviderError>;
-}
-
-/// Generates images from prompts. Only [`Self::image_generation_request`]
-/// requires cloning; `Arc<M>` forwards generation calls.
-pub trait ImageGenerationModel: WasmCompatSend + WasmCompatSync {
-    fn image_generation(
-        &self,
-        request: ImageGenerationRequest,
-    ) -> impl std::future::Future<Output = Result<ImageGenerationResponse, ProviderError>> + WasmCompatSend;
-
-    /// Creates a request builder for `prompt`.
-    fn image_generation_request(
-        &self,
-        prompt: impl Into<String>,
-    ) -> ImageGenerationRequestBuilder<Self>
-    where
-        Self: Sized + Clone,
-    {
-        ImageGenerationRequestBuilder::new(self.clone(), prompt)
-    }
-}
-
-impl<M> ImageGenerationModel for Arc<M>
-where
-    M: ImageGenerationModel,
-{
-    fn image_generation(
-        &self,
-        request: ImageGenerationRequest,
-    ) -> impl std::future::Future<Output = Result<ImageGenerationResponse, ProviderError>> + WasmCompatSend
-    {
-        (**self).image_generation(request)
-    }
+    /// Normalize this payload.
+    fn normalize(self) -> Result<ImageGenerationResponse, ProviderError>;
 }
 
 pub struct ImageGenerationRequest {
@@ -122,16 +80,14 @@ pub struct ImageGenerationRequest {
 
 /// Builds an image request for a prompt. Defaults to 256 by 256 pixels;
 /// supported dimensions depend on the provider.
-pub struct ImageGenerationRequestBuilder<M> {
-    model: M,
+pub struct ImageGenerationRequestBuilder {
     request: ImageGenerationRequest,
 }
 
-impl<M> ImageGenerationRequestBuilder<M> {
+impl ImageGenerationRequestBuilder {
     /// A request for `prompt`.
-    pub fn new(model: M, prompt: impl Into<String>) -> Self {
+    pub fn new(prompt: impl Into<String>) -> Self {
         Self {
-            model,
             request: ImageGenerationRequest {
                 prompt: prompt.into(),
                 width: 256,
@@ -164,13 +120,6 @@ impl<M> ImageGenerationRequestBuilder<M> {
     /// Builds the image generation request.
     pub fn build(self) -> ImageGenerationRequest {
         self.request
-    }
-}
-
-impl<M: ImageGenerationModel> ImageGenerationRequestBuilder<M> {
-    /// Sends the request to the model and returns the generated image.
-    pub async fn send(self) -> Result<ImageGenerationResponse, ProviderError> {
-        self.model.image_generation(self.request).await
     }
 }
 

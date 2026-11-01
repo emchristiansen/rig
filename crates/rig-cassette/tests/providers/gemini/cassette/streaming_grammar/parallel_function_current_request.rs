@@ -1,0 +1,124 @@
+//! Parallel calls through the recorded reply and current request projection.
+
+use super::*;
+use rig::test_utils::{MockHttpResponse, SequencedHttpClient};
+use rig_test_support::cassette_models::GeminiModels;
+
+#[tokio::test]
+async fn parallel_function_calls_stay_distinct_on_current_schema_projection() {
+    const SCENARIO: &str = "streaming_grammar/parallel_function_calls";
+    let replies = crate::cassettes::recorded_statuses_and_bodies("gemini", SCENARIO);
+    let headers = crate::cassettes::recorded_response_header_pairs("gemini", SCENARIO);
+    assert_eq!(replies.len(), 1, "one recorded exchange");
+    assert_eq!(headers.len(), replies.len());
+    let responses = replies
+        .into_iter()
+        .zip(headers)
+        .map(|((status, body), pairs)| {
+            assert_eq!(status, 200);
+            let mut headers = http::HeaderMap::new();
+            for (name, value) in pairs {
+                headers.append(
+                    http::HeaderName::from_bytes(name.as_bytes()).expect("recorded header name"),
+                    http::HeaderValue::from_str(&value).expect("recorded header value"),
+                );
+            }
+            MockHttpResponse::SuccessWithHeaders(body.into(), headers)
+        });
+    let http = SequencedHttpClient::new(responses);
+    let client = GeminiModels::new(gemini::GeminiConfig::new("[REDACTED]"), http.clone());
+    let model = client.completion(gemini::completion::GEMINI_2_5_FLASH);
+    let request = CompletionRequest::new(
+        "Call `lookup_harbor_label` and `lookup_orchard_label` now, both of them \
+             together in this single reply, before writing any text. Emit the two \
+             tool calls in one turn - do not wait for results between them.",
+    )
+    .preamble(TWO_TOOL_STREAM_PREAMBLE.to_string())
+    .tool(rig::tool::tool_definition(&AlphaSignal))
+    .tool(rig::tool::tool_definition(&BetaSignal))
+    .reasoning(rig::completion::Reasoning::Off);
+    let run = drain_stream(model.stream(request).expect("stream should start")).await;
+    let actual = http.requests();
+    assert_eq!(actual.len(), 1, "one real model request");
+    let recorded = crate::cassettes::recorded_interaction_bodies("gemini", SCENARIO);
+    assert_eq!(recorded.len(), 1, "one recorded request and reply");
+    let mut expected: serde_json::Value =
+        serde_json::from_str(&recorded[0].0).expect("the original recorded request is JSON");
+    let declarations = expected["tools"][0]["functionDeclarations"]
+        .as_array_mut()
+        .expect("the original two declarations");
+    assert_eq!(declarations.len(), 2);
+    for (declaration, name) in declarations
+        .iter_mut()
+        .zip(["lookup_harbor_label", "lookup_orchard_label"])
+    {
+        assert_eq!(declaration["name"], name);
+        let object = declaration
+            .as_object_mut()
+            .expect("the recorded declaration");
+        assert!(!object.contains_key("parameters"));
+        let parameters = object
+            .shift_remove("parametersJsonSchema")
+            .expect("the recorded JSON Schema");
+        object.insert("parameters".to_owned(), parameters);
+    }
+    let actual_body: serde_json::Value =
+        serde_json::from_slice(&actual[0].body).expect("the actual request is JSON");
+    assert_eq!(
+        actual_body, expected,
+        "whole request, with only the two settled schema-key differences"
+    );
+    assert_eq!(
+        http.remaining_responses(),
+        0,
+        "the original reply is consumed"
+    );
+
+    assert_terminal(&run, FinishReason::ToolCalls);
+    let aggregated: Vec<&ToolCall> = run
+        .choice
+        .iter()
+        .filter_map(|content| match content {
+            AssistantContent::ToolCall(call) => Some(call),
+            _ => None,
+        })
+        .collect();
+    for name in ["lookup_harbor_label", "lookup_orchard_label"] {
+        let streamed = run
+            .tool_calls
+            .iter()
+            .find(|call| call.function.name == name)
+            .unwrap_or_else(|| panic!("stream should yield a {name} call"));
+        let aggregated_call = aggregated
+            .iter()
+            .find(|call| call.function.name == name)
+            .unwrap_or_else(|| panic!("aggregated choice should keep the {name} call"));
+        // IDs derived from the recorded turn, never minted literally.
+        assert_eq!(
+            aggregated_call.id, streamed.id,
+            "{name} id should aggregate"
+        );
+    }
+    assert_eq!(
+        aggregated.len(),
+        2,
+        "aggregated choice should contain exactly the two parallel calls"
+    );
+    // The recorded turn carries no wire ids, and rig no longer
+    // fabricates durable identifiers from the wire (not from an
+    // index, not from the tool name): both calls surface with a
+    // minted id and no provider id, and stay distinct as parts —
+    // two calls, in wire order, uncorrupted.
+    assert!(aggregated[0].id.provider().is_none());
+    assert!(aggregated[1].id.provider().is_none());
+    assert!(aggregated[0].id.is_local());
+    assert!(aggregated[1].id.is_local());
+    assert_ne!(
+        aggregated[0].id, aggregated[1].id,
+        "each id-less call mints a unique durable id"
+    );
+    assert_ne!(
+        aggregated[0].function.name, aggregated[1].function.name,
+        "the two parallel calls stay distinct parts"
+    );
+}

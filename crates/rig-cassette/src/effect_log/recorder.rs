@@ -15,7 +15,7 @@ use rig_core::serve::{Origin, Recorder};
 use rig_core::{
     effect::{EffectId, EffectKind, EffectRecord, HandlerDescriptor, HandlerKey, Outcome},
     error::ErrorReport,
-    streaming::StreamEvent,
+    streaming::{Item, StreamEvent},
 };
 
 use super::{EffectLog, LogHeader};
@@ -44,7 +44,8 @@ struct RecordSlot {
     key: HandlerKey,
     kind: EffectKind,
     outcome: Option<Result<Outcome, ErrorReport>>,
-    events: Option<Vec<StreamEvent>>,
+    events: Option<Vec<Item<StreamEvent>>>,
+    stream_origin: Option<rig_core::message::Origin>,
 }
 
 impl RecordSlot {
@@ -57,7 +58,11 @@ impl RecordSlot {
             key: self.key.clone(),
             kind: self.kind.clone(),
             outcome: outcome.clone(),
-            events: self.events.clone(),
+            events: self
+                .events
+                .clone()
+                .and_then(|items| rig_core::streaming::Transcript::from_items(items).ok()),
+            stream_origin: self.stream_origin.clone(),
         })
     }
 }
@@ -89,7 +94,7 @@ impl EffectLogRecorder {
     }
 
     /// Stamp one program's identity under its scope
-    /// ([`LogHeader::programs`]): a world writing several programs' effects
+    /// ([`LogHeader::programs`]): a host writing several programs' effects
     /// into one log names each by its scope.
     pub fn set_program_identity(&self, scope: impl Into<String>, identity: super::ProgramIdentity) {
         self.header
@@ -120,6 +125,7 @@ impl EffectLogRecorder {
     /// the header. A dispatch still in flight is not in the log yet; it
     /// takes its place (ahead of everything served after it) when it
     /// resolves.
+    /// A kept stream snapshot includes only the items observed so far.
     #[must_use = "the log is a copy of the recorder's state"]
     pub fn log(&self) -> EffectLog {
         let slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
@@ -135,6 +141,8 @@ impl EffectLogRecorder {
 
     /// Take the resolved dispatches, leaving the recorder holding only the
     /// ones still in flight; the header stays (the signature keeps growing).
+    /// Drain a kept stream first to retain its complete sequence. Taking a
+    /// resolved stream removes its slot, so later items are not retained.
     #[must_use = "the taken log is the only copy"]
     pub fn take(&self) -> EffectLog {
         let mut slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
@@ -151,6 +159,7 @@ impl EffectLogRecorder {
         let mut header = self.header.lock().unwrap_or_else(PoisonError::into_inner);
         let taken_header = header.clone();
         header.stream_errors.retain(|id, _| !taken_ids.contains(id));
+        header.stream_done.retain(|id, _| !taken_ids.contains(id));
         if let Some(deliveries) = &mut header.deliveries {
             deliveries.retain(|delivery| !taken_ids.contains(&delivery.id));
         }
@@ -198,12 +207,13 @@ impl EffectLogRecorder {
                 kind,
                 outcome: None,
                 events,
+                stream_origin: None,
             });
     }
 
     // Active slots are usually newest; reverse scanning avoids traversing
     // completed records for each streamed event.
-    fn event_slot(&self, id: EffectId, event: &StreamEvent) {
+    fn event_slot(&self, id: EffectId, event: &Item<StreamEvent>) {
         let mut slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(slot) = slots.iter_mut().rev().find(|slot| slot.id == id)
             && let Some(events) = slot.events.as_mut()
@@ -220,11 +230,10 @@ impl EffectLogRecorder {
             return;
         };
         let key = slots.remove(position).key;
-        self.header
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .stream_errors
-            .remove(&id);
+        let mut header = self.header.lock().unwrap_or_else(PoisonError::into_inner);
+        header.stream_errors.remove(&id);
+        header.stream_done.remove(&id);
+        drop(header);
         if let Some(deliveries) = &mut self
             .header
             .lock()
@@ -300,10 +309,30 @@ impl Recorder for EffectLogRecorder {
             return;
         };
         let mut header = self.header.lock().unwrap_or_else(PoisonError::into_inner);
+        let done = header.stream_done.get(&id).map_or(0, Vec::len);
         let errors = header.stream_errors.entry(id).or_default();
         errors.push(super::RecordedStreamError {
-            item: events.len() + errors.len(),
+            item: events.len() + errors.len() + done,
             error: error.clone(),
+        });
+    }
+
+    fn stream_done(&self, id: EffectId, response: &rig_core::completion::CompletionResponse) {
+        let slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(events) = slots
+            .iter()
+            .rev()
+            .find(|slot| slot.id == id)
+            .and_then(|slot| slot.events.as_ref())
+        else {
+            return;
+        };
+        let mut header = self.header.lock().unwrap_or_else(PoisonError::into_inner);
+        let errors = header.stream_errors.get(&id).map_or(0, Vec::len);
+        let done = header.stream_done.entry(id).or_default();
+        done.push(super::RecordedStreamDone {
+            item: events.len() + errors + done.len(),
+            response: response.clone(),
         });
     }
 
@@ -361,8 +390,17 @@ impl Recorder for EffectLogRecorder {
         self.keep_events
     }
 
-    fn event(&self, id: EffectId, event: &StreamEvent) {
-        self.event_slot(id, event);
+    fn event(&self, id: EffectId, item: &Item<StreamEvent>) {
+        self.event_slot(id, item);
+    }
+
+    fn origin(&self, id: EffectId, origin: &rig_core::message::Origin) {
+        let mut slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(slot) = slots.iter_mut().rev().find(|slot| slot.id == id)
+            && slot.events.is_some()
+        {
+            slot.stream_origin = Some(origin.clone());
+        }
     }
 
     fn resolve(&self, id: EffectId, outcome: Result<Outcome, ErrorReport>) {

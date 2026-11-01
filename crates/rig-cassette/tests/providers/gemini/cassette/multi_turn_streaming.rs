@@ -3,77 +3,56 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use futures::StreamExt;
-use rig::agent::MultiTurnStreamItem;
-use rig::prelude::*;
 use rig::providers::gemini;
 use rig::tool::Tool;
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
 
-use crate::support::{
-    MULTI_TURN_STREAMING_EXPECTED_RESULT, MULTI_TURN_STREAMING_PROMPT,
-    assert_mentions_expected_number, assert_nonempty_response,
+use super::super::request_witness_support::{
+    NamedCase, stream_result, with_gemini_request_witness_cassette,
 };
+use crate::support::MULTI_TURN_STREAMING_PROMPT;
 
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 5,
+/// mec-rig-schema-route-1 item 1(b)): the recording is unchanged; the only
+/// request difference is that declarations 0-3 send their recorded schemars
+/// `parametersJsonSchema` as `parameters`, less exactly the members the
+/// projected subset does not carry (named in
+/// `NamedCase::RunnerMultiTurnStreaming`), and replay refuses interaction 0.
+/// Named losses: a substantial final response mentioning
+/// `MULTI_TURN_STREAMING_EXPECTED_RESULT`, and add, subtract, multiply and
+/// divide each being called at least once.
 #[tokio::test]
-async fn runner_driven_multi_turn_streaming_loop() {
+async fn runner_driven_multi_turn_streaming_loop() -> anyhow::Result<()> {
     let add_calls = Arc::new(AtomicUsize::new(0));
     let subtract_calls = Arc::new(AtomicUsize::new(0));
     let multiply_calls = Arc::new(AtomicUsize::new(0));
     let divide_calls = Arc::new(AtomicUsize::new(0));
 
-    super::super::support::with_gemini_cassette(
+    with_gemini_request_witness_cassette(
         "multi_turn_streaming/manual_multi_turn_streaming_loop",
-        |client| async move {
-            let agent = client
-                .agent(gemini::completion::GEMINI_2_5_FLASH)
-                .preamble("You must use tools to answer arithmetic prompts.")
-                .tool(Add::new(add_calls.clone()))
-                .tool(Subtract::new(subtract_calls.clone()))
-                .tool(Multiply::new(multiply_calls.clone()))
-                .tool(Divide::new(divide_calls.clone()))
-                .build();
+        NamedCase::RunnerMultiTurnStreaming,
+        |client, _clock| async move {
+            let agent =
+                rig::AgentBuilder::new(client.completion(gemini::completion::GEMINI_2_5_FLASH))
+                    .preamble("You must use tools to answer arithmetic prompts.")
+                    .tool(Add::new(add_calls.clone()))
+                    .tool(Subtract::new(subtract_calls.clone()))
+                    .tool(Multiply::new(multiply_calls.clone()))
+                    .tool(Divide::new(divide_calls.clone()))
+                    .build();
 
             let mut stream = agent
                 .prompt(MULTI_TURN_STREAMING_PROMPT)
                 .max_turns(10)
                 .stream();
-            let mut response = None;
-            while let Some(item) = stream.next().await {
-                if let MultiTurnStreamItem::FinalResponse(final_response) =
-                    item.expect("runner-driven multi-turn streaming should succeed")
-                {
-                    response = Some(final_response.output);
-                }
-            }
-            let response = response.expect("stream should emit a final response");
-
-            assert_nonempty_response(&response);
-            assert!(
-                response.trim().len() >= 30,
-                "expected a substantial streamed response, got {response:?}"
-            );
-            assert_mentions_expected_number(&response, MULTI_TURN_STREAMING_EXPECTED_RESULT);
-            assert!(
-                add_calls.load(Ordering::SeqCst) >= 1,
-                "add should be called"
-            );
-            assert!(
-                subtract_calls.load(Ordering::SeqCst) >= 1,
-                "subtract should be called"
-            );
-            assert!(
-                multiply_calls.load(Ordering::SeqCst) >= 1,
-                "multiply should be called"
-            );
-            assert!(
-                divide_calls.load(Ordering::SeqCst) >= 1,
-                "divide should be called"
-            );
+            let result = stream_result(&mut stream).await;
+            drop(stream);
+            drop(agent);
+            result
         },
     )
-    .await;
+    .await
 }
 
 #[derive(Deserialize, JsonSchema)]

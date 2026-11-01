@@ -59,9 +59,9 @@ pub enum AdapterEvent {
         /// Scrubbed original envelope fields, not an inferred HTTP status.
         error: AdapterErrorEnvelope,
     },
-    /// Provider-reported usage for this attempt, including rejected responses.
+    /// The attempt's normalized usage, observed once when its reply ends.
     Usage {
-        /// A cumulative snapshot: replace earlier snapshots, never sum them.
+        /// The counters of the response's usage.
         usage: AdapterUsage,
     },
     /// A request is about to be sent.
@@ -134,61 +134,91 @@ pub struct AdapterErrorEnvelope {
 
 /// Error-envelope projection with optional code, message, and `type`/`status`.
 /// Codes remain JSON values until emission validates their scalar shape.
-#[derive(Default, Deserialize)]
+#[derive(Default)]
 pub struct ObservedError {
     pub code: Option<serde_json::Value>,
-    #[serde(rename = "type", alias = "status")]
     pub kind: Option<String>,
     pub message: Option<String>,
 }
 
 impl ObservedError {
+    /// The error envelope a provider document carries, located as its
+    /// [`crate::provider_response::ProviderResponseError`] reads it: an
+    /// error event's own `type` is its tag, not a kind, and an `error`
+    /// string is the message alone.
+    pub fn of(doc: &serde_json::Value) -> Option<Self> {
+        let (error, nested) = crate::provider_response::located_error(doc)?;
+        let text = |key: &str| error.get(key).and_then(serde_json::Value::as_str);
+        let kind = nested.then(|| text("type").or_else(|| text("status")));
+        Some(Self {
+            code: error.get("code").filter(|code| !code.is_null()).cloned(),
+            kind: kind.flatten().map(str::to_owned),
+            message: error
+                .as_str()
+                .or_else(|| text("message"))
+                .map(str::to_owned),
+        })
+    }
+
     /// Emit this envelope as the attempt's error-envelope fact, scrubbed.
-    pub fn emit(self, sink: &mut dyn crate::wire::ObservationSink) {
+    pub fn emit(self, sink: &mut ObservationSink<'_>) {
         let code = self.code.map(|code| match code {
             serde_json::Value::String(code) => sink.scrub(&code),
             serde_json::Value::Number(code) => code.to_string(),
             _ => "[invalid]".to_owned(),
         });
-        sink.emit(AdapterEvent::ErrorEnvelope {
-            error: AdapterErrorEnvelope {
-                code,
-                status: self.kind.map(|value| sink.scrub(&value)),
-                message: self.message.map(|value| sink.scrub(&value)),
-            },
+        sink.error(AdapterErrorEnvelope {
+            code,
+            status: self.kind.map(|value| sink.scrub(&value)),
+            message: self.message.map(|value| sink.scrub(&value)),
         });
     }
 }
 
-/// Deserialize one [`AdapterUsage`] counter a provider may send as a number,
-/// a string or `null`: anything that is not a `u64` stays unknown rather
-/// than failing the payload that carried it.
-pub(crate) fn lenient_count<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<u64>, D::Error> {
-    Ok(serde_json::Value::deserialize(deserializer)?.as_u64())
-}
-
-/// A provider's cumulative usage snapshot for one HTTP attempt.
-///
-/// Missing, invalid or negative counts remain unknown. A present zero is a
-/// reported zero. These fields may overlap (for example cached tokens are
-/// included in input tokens); never sum fields to invent a total. A later
-/// snapshot replaces the earlier snapshot, including its unknown fields.
+/// Usage counters from the source selected by the wire's
+/// [`UsageObservation`](crate::wire::UsageObservation). Normalized usage is
+/// observed once at the end; payload snapshots retain provider ordering and
+/// remain observable on an incomplete or failed attempt. Unreported is `None`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdapterUsage {
-    /// Input tokens, including cached input where the provider includes it.
+    /// The input count reported by the selected usage source.
     pub input_tokens: Option<u64>,
-    /// Output candidate tokens, as reported by the provider.
+    /// Every output token, reasoning included.
     pub output_tokens: Option<u64>,
-    /// Provider-reported total, not a sum of the other fields.
+    /// The total reported by a payload snapshot, without summing counters.
+    /// Normalized end observations leave this absent; read the response's
+    /// [`Usage::total_tokens`](crate::completion::Usage::total_tokens).
     pub total_tokens: Option<u64>,
-    /// Cached input tokens, when reported.
+    /// The part of the input read from a provider-managed cache.
     pub cached_input_tokens: Option<u64>,
-    /// Reasoning tokens, when reported separately.
+    /// The part of the output spent on internal reasoning.
     pub reasoning_tokens: Option<u64>,
-    /// Provider tool-use input tokens, when reported separately.
+    /// The part of the input a provider's hosted tools added to the prompt.
     pub tool_input_tokens: Option<u64>,
+}
+
+impl From<&crate::completion::Usage> for AdapterUsage {
+    fn from(usage: &crate::completion::Usage) -> Self {
+        // Exhaustive: a new `Usage` counter must be mapped or ignored here.
+        let crate::completion::Usage {
+            input_tokens,
+            output_tokens,
+            total_tokens: _,
+            cached_input_tokens,
+            cache_creation_input_tokens: _,
+            tool_use_prompt_tokens,
+            reasoning_tokens,
+            cost: _,
+        } = *usage;
+        Self {
+            input_tokens,
+            output_tokens,
+            total_tokens: None,
+            cached_input_tokens,
+            reasoning_tokens,
+            tool_input_tokens: tool_use_prompt_tokens,
+        }
+    }
 }
 
 /// Boundary identified by the adapter's original typed error, not its message.
@@ -394,7 +424,7 @@ impl AdapterContext {
             number,
             closed: false,
             response_seen: false,
-            sse_tail: crate::http_client::tail::SseTail::default(),
+            sse_tail: super::sse_tail::SseTail::default(),
             secrets: Vec::new(),
             pending_response_id: None,
             error_boundary: None,
@@ -408,7 +438,7 @@ pub(crate) struct AdapterAttempt {
     number: u64,
     closed: bool,
     response_seen: bool,
-    sse_tail: crate::http_client::tail::SseTail,
+    sse_tail: super::sse_tail::SseTail,
     secrets: Vec<String>,
     pending_response_id: Option<String>,
     error_boundary: Option<AdapterErrorBoundary>,
@@ -419,19 +449,19 @@ impl AdapterAttempt {
         scrub::text(text, &self.secrets)
     }
 
-    pub(crate) fn emit_with_analysis(&self, event: AdapterEvent, analysis: AdapterAnalysis) {
+    fn emit_with_analysis(&self, event: AdapterEvent, analysis: AdapterAnalysis) {
         let analysis = (analysis != AdapterAnalysis::default()).then_some(analysis);
         self.context
             .emit_with_analysis(Some(self.number), event, analysis);
     }
 
-    pub(crate) fn emit(&self, event: AdapterEvent) {
+    fn emit(&self, event: AdapterEvent) {
         self.context.emit(Some(self.number), event);
     }
 
-    /// Project a payload's facts through the decoder that understands it.
-    pub(crate) fn project(&mut self, project: impl FnOnce(&mut dyn crate::wire::ObservationSink)) {
-        project(self);
+    /// Project a payload's facts through the projector that understands it.
+    pub(crate) fn project(&mut self, project: impl FnOnce(&mut ObservationSink<'_>)) {
+        project(&mut ObservationSink { attempt: self });
     }
 
     pub(crate) fn provider(&mut self, verdict: AdapterVerdict, response_id: Option<String>) {
@@ -492,18 +522,50 @@ impl Drop for AdapterAttempt {
     }
 }
 
-/// The projection surface a decoder writes its observation facts through.
-impl crate::wire::ObservationSink for AdapterAttempt {
-    fn emit(&mut self, event: AdapterEvent) {
-        AdapterAttempt::emit(self, event);
+/// Where a payload projector writes its observation facts.
+///
+/// A projector reads verdicts, ids and error envelopes off a raw payload
+/// before normalization discards them. Text it forwards must go through
+/// [`Self::scrub`]: a payload can echo credentials.
+///
+/// FinalNormalized wires report usage through the driver's normalized end.
+/// PayloadSnapshots wires use [`Self::usage_snapshot`] in payload order;
+/// their final normalized usage is suppressed.
+///
+/// ```compile_fail
+/// use rig_core::wire::{AdapterEvent, AdapterUsage, ObservationSink};
+///
+/// // Arbitrary observation events cannot bypass the typed sink methods.
+/// fn project(sink: &mut ObservationSink<'_>) {
+///     sink.emit(AdapterEvent::Usage {
+///         usage: AdapterUsage::default(),
+///     });
+/// }
+/// ```
+pub struct ObservationSink<'a> {
+    attempt: &'a mut AdapterAttempt,
+}
+
+impl ObservationSink<'_> {
+    /// Record the exact usage snapshot at this payload's position.
+    /// Used by PayloadSnapshots wires before the corresponding verdict or error.
+    pub fn usage_snapshot(&mut self, usage: AdapterUsage) {
+        self.attempt.emit(AdapterEvent::Usage { usage });
     }
 
-    fn provider(&mut self, verdict: AdapterVerdict, response_id: Option<String>) {
-        AdapterAttempt::provider(self, verdict, response_id);
+    /// Record the provider's error envelope.
+    pub fn error(&mut self, error: AdapterErrorEnvelope) {
+        self.attempt.emit(AdapterEvent::ErrorEnvelope { error });
     }
 
-    fn scrub(&self, value: &str) -> String {
-        self.text(value)
+    /// Record the provider's verdict, and the response id it named.
+    pub fn provider(&mut self, verdict: AdapterVerdict, response_id: Option<String>) {
+        self.attempt.provider(verdict, response_id);
+    }
+
+    /// Bound and redact diagnostic text from the payload.
+    pub fn scrub(&self, value: &str) -> String {
+        self.attempt.text(value)
     }
 }
 
@@ -526,9 +588,9 @@ impl AdapterSlot {
         }
     }
 
-    /// Project a reply payload's facts through the decoder that understands
-    /// it.
-    pub(crate) fn project(&self, project: impl FnOnce(&mut dyn crate::wire::ObservationSink)) {
+    /// Project a reply payload's facts through the projector that
+    /// understands it.
+    pub(crate) fn project(&self, project: impl FnOnce(&mut ObservationSink<'_>)) {
         if let Some(attempt) = self
             .0
             .lock()
@@ -536,6 +598,22 @@ impl AdapterSlot {
             .as_mut()
         {
             attempt.project(project);
+        }
+    }
+
+    /// Close the attempt as its reply ended: the one place usage is
+    /// observed, once, from the decoder's end, just before `Terminal`.
+    pub(crate) fn terminal(&self, usage: Option<&crate::completion::Usage>) {
+        let mut attempt = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(attempt) = attempt.as_mut().filter(|attempt| !attempt.closed) {
+            let usage = usage.map(AdapterUsage::from);
+            if let Some(usage) = usage.filter(|usage| *usage != AdapterUsage::default()) {
+                attempt.emit(AdapterEvent::Usage { usage });
+            }
+            attempt.finish(AdapterEnding::Terminal);
         }
     }
 
@@ -566,7 +644,7 @@ impl AdapterSlot {
         }
     }
 
-    pub(crate) fn finish(&self, ending: AdapterEnding) {
+    fn finish(&self, ending: AdapterEnding) {
         if let Some(attempt) = self
             .0
             .lock()
@@ -654,3 +732,6 @@ impl AdapterSlot {
 mod scrub;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod usage_tests;

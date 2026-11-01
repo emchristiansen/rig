@@ -63,18 +63,35 @@ fn an_await_hidden_in_a_macro_body_is_rejected() {
 /// The token pass is not a text search: a comment is not a token and a
 /// string literal is one, so neither can name an `.await`.
 #[test]
-fn an_await_in_a_comment_or_a_string_is_not_one() {
-    let source = r#"
-        // the driver does the .await
-        /// doc: `x.await`
-        fn name() -> &'static str { ".await" }
-    "#;
-    assert!(offenders("anthropic/wire.rs", source).is_empty());
+fn a_plain_wire_and_an_await_in_a_comment_or_a_string_pass() {
+    for (case, source) in [
+        (
+            "an await in a comment or a string is not one",
+            r#"
+            // the driver does the .await
+            /// doc: `x.await`
+            fn name() -> &'static str { ".await" }
+        "#,
+        ),
+        (
+            "a plain wire passes",
+            r#"
+            pub struct Messages { pub model: String }
+            impl Wire for Messages {
+                fn name(&self) -> &str { "anthropic" }
+                fn decoder(&self, _mode: Mode) -> MessagesDecoder { MessagesDecoder::new("anthropic") }
+            }
+        "#,
+        ),
+    ] {
+        let found = offenders("anthropic/wire.rs", source);
+        assert!(found.is_empty(), "{case}: {found:?}");
+    }
 }
 
 /// The rule is the **bound**, not the letter: what makes a parameter a
 /// transport is that a request can be sent through it, which is
-/// `HttpClientExt` — or the `BoxedHttpClient` default a provider reaches for
+/// `HttpClientExt` — or the `DynHttpClient` default a provider reaches for
 /// to hide one. A parameter with no such bound cannot carry a request, so it
 /// is payload-generic and needs no allowlist; that is why there is no list
 /// of blessed letters to keep in step with the types.
@@ -82,7 +99,7 @@ fn an_await_in_a_comment_or_a_string_is_not_one() {
 fn a_transport_parameter_is_rejected_by_its_bound_not_its_letter() {
     for rejected in [
         "pub struct Foo<Transport: HttpClientExt> { http: Transport }",
-        "pub struct Foo<H = BoxedHttpClient> { http: H }",
+        "pub struct Foo<H = DynHttpClient> { http: H }",
         "pub struct Foo<T> where T: HttpClientExt { http: T }",
         "pub enum Reply<C: crate::http_client::HttpClientExt> { Sent(C) }",
     ] {
@@ -134,26 +151,17 @@ fn a_wires_own_data_may_not_be_shared_erased_or_deferred() {
 }
 
 #[test]
-fn a_provider_may_not_implement_a_consumer_trait() {
-    let found = offenders("cohere/wire.rs", "impl CompletionModel for CohereChat { }");
+fn a_provider_may_not_implement_transport() {
+    let found = offenders(
+        "cohere/wire.rs",
+        "impl Transport<CohereChat> for Cohere { }",
+    );
     assert_eq!(found.len(), 1);
     assert!(
         found
             .first()
-            .is_some_and(|report| report.contains("`driver::Bound`"))
+            .is_some_and(|report| report.contains("`driver::http_transport`"))
     );
-}
-
-#[test]
-fn a_plain_wire_passes() {
-    let source = r#"
-        pub struct Messages { pub model: String }
-        impl Wire for Messages {
-            fn name(&self) -> &str { "anthropic" }
-            fn decoder(&self, _mode: Mode) -> MessagesDecoder { MessagesDecoder::new("anthropic") }
-        }
-    "#;
-    assert!(offenders("anthropic/wire.rs", source).is_empty());
 }
 
 #[test]

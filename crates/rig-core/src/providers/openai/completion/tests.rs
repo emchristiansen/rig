@@ -25,34 +25,46 @@ fn completion_response_tolerates_null_or_missing_envelope_metadata() {
     assert_eq!(response.choices[0].finish_reason, "");
 }
 
-/// Boundary-minted tool ids (`tool-{index}`, from id-less streamed calls)
-/// replay to the chat wire as a self-consistent pair: the assistant
-/// message's `tool_calls[].id` and the tool result's `tool_call_id` carry
-/// the same minted value. The wire requires both fields, so gating minted
-/// ids out (the Responses reasoning treatment) is impossible here — and
-/// unnecessary: a gateway that omitted ids has no server-side id to
-/// validate against, so the consistent pair is accepted. This pins the
-/// per-wire upstream rule documented on `SyntheticIds`.
+/// F's assistant constructor records provider handle `tool-0`.
+/// This scoped canonical input adaptation copies that handle into its result,
+/// losing F's explicit-local-handle result with absent provider metadata.
+/// Assistant-only and result-only Chat requests encode separately, preserving
+/// the original independent success subjects and both ID predicates.
+/// This fixture provides no live-provider acceptance or missing-ID minting evidence.
 #[test]
 fn minted_tool_ids_replay_as_a_consistent_pair() {
-    let assistant = crate::message::Message::Assistant {
-        id: None,
-        content: vec![crate::message::AssistantContent::tool_call(
-            "tool-0",
-            "get_weather",
+    let call = message::ToolCall::from_wire(
+        "tool-0",
+        message::ToolFunction::new(
+            message::ToolName::new("get_weather").expect("original nonempty name"),
             serde_json::json!({"city": "Tokyo"}),
+        ),
+    );
+    // This scoped input adaptation copies the actual assistant's provider ID
+    // into the result; F's explicit-local-handle/provider-absent distinction
+    // is lost. Each leg below encodes separately, as the original subjects did.
+    let tool_result = message::Message::User {
+        content: vec![message::UserContent::ToolResult(
+            call.result(vec![message::ToolResultContent::text("22C")]),
         )],
     };
-    let tool_result = crate::message::Message::User {
-        content: vec![crate::message::UserContent::tool_result(
-            "tool-0",
-            "get_weather",
-            vec![crate::message::ToolResultContent::text("22C")],
-        )],
-    };
-
-    let assistant_wire: Vec<super::Message> = assistant.try_into().expect("assistant converts");
-    let result_wire: Vec<super::Message> = tool_result.try_into().expect("tool result converts");
+    let assistant = message::Message::Assistant(message::AssistantMessage::new(vec![
+        message::AssistantContent::ToolCall(call),
+    ]));
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let assistant_encoded = target
+        .encode(CoreCompletionRequest::from(vec![assistant]), Mode::Unary)
+        .expect("assistant-only request encodes");
+    let assistant_body = crate::test_utils::json_body(&assistant_encoded.request);
+    let assistant_wire: Vec<Message> = serde_json::from_value(assistant_body["messages"].clone())
+        .expect("actual assistant messages deserialize through the retained Chat view");
+    let result_encoded = target
+        .encode(CoreCompletionRequest::from(vec![tool_result]), Mode::Unary)
+        .expect("result-only request encodes through the provider-orphan route");
+    let result_body = crate::test_utils::json_body(&result_encoded.request);
+    let result_wire: Vec<Message> = serde_json::from_value(result_body["messages"].clone())
+        .expect("actual result messages deserialize through the retained Chat view");
 
     let call_id = assistant_wire
         .iter()
@@ -79,9 +91,10 @@ fn minted_tool_ids_replay_as_a_consistent_pair() {
 }
 
 use super::*;
-use crate::completion::CompletionRequestBuilder;
+use crate::completion::CompletionRequest as CoreCompletionRequest;
 use crate::error::ProviderError;
-use crate::test_utils::MockCompletionModel;
+use crate::message;
+use crate::message::DocumentSourceKind;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
@@ -94,47 +107,46 @@ fn test_document(id: &str, text: &str) -> crate::completion::Document {
 }
 
 fn request_with_multi_block_tool_result() -> CoreCompletionRequest {
-    let tool_result = message::ToolResult {
-        call: message::ToolCallId::new_or_minted("call-id", 0),
-        provider: message::ProviderCallId::new("call-id"),
-        name: "tool".to_string(),
-        answers: crate::message::AnsweredToolCall::Function,
-        content: vec![
-            message::ToolResultContent::text("first"),
-            message::ToolResultContent::text("second"),
-        ],
-    };
-
-    CoreCompletionRequest {
-        model: None,
-        chat_history: vec![message::Message::User {
-            content: vec![message::UserContent::ToolResult(tool_result)],
-        }],
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    }
+    let call = message::ToolCall::from_wire(
+        "call-id",
+        message::ToolFunction::new(
+            message::ToolName::new("tool").expect("original nonempty name"),
+            json!({}),
+        ),
+    );
+    let tool_result = call.result(vec![
+        message::ToolResultContent::text("first"),
+        message::ToolResultContent::text("second"),
+    ]);
+    CoreCompletionRequest::from(vec![message::Message::User {
+        content: vec![message::UserContent::ToolResult(tool_result)],
+    }])
 }
 
 #[test]
 fn mixed_user_content_preserves_order_around_tool_results() {
+    // This scoped input adaptation drops F's independent result item ID
+    // "result-id": current ToolResult has no slot for it. The original
+    // correlator "call-id", name, text and ordered predicate remain exact.
     let content = vec![
         message::UserContent::text("before"),
-        message::UserContent::tool_result_with_call_id(
-            "result-id",
-            "call-id".to_string(),
-            "tool",
+        message::UserContent::tool_result(
+            message::CallId::from_wire("call-id"),
+            message::ToolName::new("tool").expect("original nonempty name"),
             vec![message::ToolResultContent::text("tool output")],
         ),
         message::UserContent::text("after"),
     ];
 
-    let messages = user_content_to_messages(content).expect("message conversion");
+    let request = CoreCompletionRequest::from(vec![message::Message::User { content }]);
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let body = crate::test_utils::json_body(&encoded.request);
+    let messages: Vec<Message> = serde_json::from_value(body["messages"].clone())
+        .expect("actual messages deserialize through the retained Chat view");
 
     assert!(matches!(
         messages.as_slice(),
@@ -153,7 +165,21 @@ fn video_url_with_unrecognized_mime_stays_a_url_on_the_wire() {
     let original = "data:video/quicktime;base64,AAAA";
     let rig_content = message::UserContent::video_url(original.to_string(), None);
 
-    let back = UserContent::try_from(rig_content).expect("video should convert back");
+    let request = CoreCompletionRequest::from(vec![message::Message::User {
+        content: vec![rig_content],
+    }]);
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let body = crate::test_utils::json_body(&encoded.request);
+    let converted: Vec<Message> = serde_json::from_value(body["messages"].clone())
+        .expect("actual messages deserialize through the retained Chat view");
+    let Message::User { content, .. } = &converted[0] else {
+        panic!("expected user message");
+    };
+    let back = content[0].clone();
     assert!(matches!(
         back,
         UserContent::Video { video_url } if video_url.url == original
@@ -162,7 +188,7 @@ fn video_url_with_unrecognized_mime_stays_a_url_on_the_wire() {
 
 #[test]
 fn sanitize_plain_text_history_strips_tool_exchange_and_keeps_alternation() {
-    let mut messages = vec![
+    let messages = vec![
         serde_json::json!({"role": "user", "content": "Look up the label."}),
         serde_json::json!({"role": "assistant", "tool_calls": [
             {"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
@@ -176,7 +202,14 @@ fn sanitize_plain_text_history_strips_tool_exchange_and_keeps_alternation() {
         serde_json::json!({"role": "user", "content": "Thanks!"}),
     ];
 
-    sanitize_plain_text_history(&mut messages, Some(("\n", true)), false, true);
+    let mut body = json!({"messages": messages});
+    crate::providers::openai::wire::chat::rewrite_body(
+        crate::providers::openai::wire::BodyRewrite::Perplexity,
+        None,
+        body.as_object_mut().expect("body object"),
+    )
+    .expect("existing Perplexity rewrite");
+    let messages = body["messages"].as_array().expect("same messages array");
 
     let roles = messages
         .iter()
@@ -195,7 +228,7 @@ fn sanitize_plain_text_history_merges_consecutive_user_messages() {
     // Dropping a tool exchange whose final assistant answer never made it
     // into history leaves user/user adjacency, which alternation-strict
     // APIs reject.
-    let mut messages = vec![
+    let messages = vec![
         serde_json::json!({"role": "user", "content": "Look it up."}),
         serde_json::json!({"role": "assistant", "tool_calls": [
             {"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
@@ -204,7 +237,14 @@ fn sanitize_plain_text_history_merges_consecutive_user_messages() {
         serde_json::json!({"role": "user", "content": "Ask again."}),
     ];
 
-    sanitize_plain_text_history(&mut messages, Some(("\n", true)), false, true);
+    let mut body = json!({"messages": messages});
+    crate::providers::openai::wire::chat::rewrite_body(
+        crate::providers::openai::wire::BodyRewrite::Perplexity,
+        None,
+        body.as_object_mut().expect("body object"),
+    )
+    .expect("existing Perplexity rewrite");
+    let messages = body["messages"].as_array().expect("same messages array");
 
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["role"], "user");
@@ -213,25 +253,40 @@ fn sanitize_plain_text_history_merges_consecutive_user_messages() {
 
 #[test]
 fn flatten_text_content_parts_treats_refusals_as_text() {
-    let mut content = serde_json::json!([
+    let content = serde_json::json!([
         {"type": "text", "text": "Partly:"},
         {"type": "refusal", "refusal": "I cannot help with that."}
     ]);
 
-    flatten_text_content_parts(&mut content, "\n", true);
+    // One User wrapper exposes the same private content projection.
+    let mut body = json!({"messages": [{"role": "user", "content": content}]});
+    crate::providers::openai::wire::chat::rewrite_body(
+        crate::providers::openai::wire::BodyRewrite::Perplexity,
+        None,
+        body.as_object_mut().expect("body object"),
+    )
+    .expect("existing Perplexity rewrite");
+    let content = &body["messages"][0]["content"];
 
     assert_eq!(content, "Partly:\nI cannot help with that.");
 }
 
 #[test]
 fn sanitize_plain_text_history_merges_consecutive_assistant_messages() {
-    let mut messages = vec![
+    let messages = vec![
         serde_json::json!({"role": "assistant", "content": "First."}),
         serde_json::json!({"role": "tool", "tool_call_id": "c", "content": "x"}),
         serde_json::json!({"role": "assistant", "content": "Second."}),
     ];
 
-    sanitize_plain_text_history(&mut messages, Some(("\n", true)), false, true);
+    let mut body = json!({"messages": messages});
+    crate::providers::openai::wire::chat::rewrite_body(
+        crate::providers::openai::wire::BodyRewrite::Perplexity,
+        None,
+        body.as_object_mut().expect("body object"),
+    )
+    .expect("existing Perplexity rewrite");
+    let messages = body["messages"].as_array().expect("same messages array");
 
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["content"], "First.\nSecond.");
@@ -239,20 +294,16 @@ fn sanitize_plain_text_history_merges_consecutive_assistant_messages() {
 
 #[test]
 fn tool_result_array_content_preserves_multiple_text_blocks() {
-    let request = CompletionRequest::try_from(OpenAIRequestParams {
-        reasoning_details: false,
-        model: "gpt-4o-mini".to_string(),
-        request: request_with_multi_block_tool_result(),
-        strict_tools: false,
-        tool_result_array_content: true,
-        supports_response_format: true,
-        response_format_with_tools: false,
-        supports_image_tool_results: false,
-        supports_tools: true,
-    })
-    .expect("request conversion should succeed");
-
-    let wire = serde_json::to_value(&request.messages).expect("messages should serialize");
+    let request = request_with_multi_block_tool_result();
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
+        .chat("gpt-4o-mini")
+        .with_tool_result_array_content();
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let body = crate::test_utils::json_body(&encoded.request);
+    let wire = body["messages"].clone();
 
     assert_eq!(
         wire,
@@ -277,20 +328,14 @@ fn tool_result_array_content_preserves_multiple_text_blocks() {
 
 #[test]
 fn tool_result_string_content_flattens_multiple_text_blocks() {
-    let request = CompletionRequest::try_from(OpenAIRequestParams {
-        reasoning_details: false,
-        model: "gpt-4o-mini".to_string(),
-        request: request_with_multi_block_tool_result(),
-        strict_tools: false,
-        tool_result_array_content: false,
-        supports_response_format: true,
-        response_format_with_tools: false,
-        supports_image_tool_results: false,
-        supports_tools: true,
-    })
-    .expect("request conversion should succeed");
-
-    let wire = serde_json::to_value(&request.messages).expect("messages should serialize");
+    let request = request_with_multi_block_tool_result();
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let body = crate::test_utils::json_body(&encoded.request);
+    let wire = body["messages"].clone();
 
     assert_eq!(
         wire,
@@ -307,10 +352,10 @@ fn tool_result_string_content_flattens_multiple_text_blocks() {
 #[test]
 fn multiple_tool_result_blocks_convert_to_distinct_content_parts() {
     let result = message::ToolResult {
-        call: message::ToolCallId::new_or_minted("call-id", 0),
-        name: "tool".to_string(),
-        provider: message::ProviderCallId::new("call-id"),
+        call: message::CallId::from_wire("call-id"),
+        name: message::ToolName::new("tool").expect("original nonempty name"),
         answers: crate::message::AnsweredToolCall::Function,
+        is_error: false,
         content: vec![
             message::ToolResultContent::text("first"),
             message::ToolResultContent::json(serde_json::json!({
@@ -320,7 +365,18 @@ fn multiple_tool_result_blocks_convert_to_distinct_content_parts() {
         ],
     };
 
-    let converted = Message::try_from(result).expect("tool result should convert");
+    let request = CoreCompletionRequest::from(vec![message::Message::tool_results(vec![result])]);
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
+        .chat("gpt-4o-mini")
+        .with_tool_result_array_content();
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let body = crate::test_utils::json_body(&encoded.request);
+    let messages: Vec<Message> = serde_json::from_value(body["messages"].clone())
+        .expect("actual messages deserialize through the retained Chat view");
+    let converted = messages[0].clone();
 
     assert_eq!(
         converted,
@@ -337,32 +393,13 @@ fn multiple_tool_result_blocks_convert_to_distinct_content_parts() {
 
 #[test]
 fn test_openai_request_uses_request_model_override() {
-    let request = crate::completion::CompletionRequest {
-        model: Some("gpt-4.1".to_string()),
-        chat_history: vec!["Hello".into()],
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    };
-
-    let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
-        reasoning_details: false,
-        model: "gpt-4o-mini".to_string(),
-        request,
-        strict_tools: false,
-        tool_result_array_content: false,
-        supports_response_format: true,
-        response_format_with_tools: false,
-        supports_image_tool_results: false,
-        supports_tools: true,
-    })
-    .expect("request conversion should succeed");
-    let serialized = serde_json::to_value(openai_request).expect("serialization should succeed");
+    let request = CoreCompletionRequest::new("Hello").model::<String>(Some("gpt-4.1".to_owned()));
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let serialized = crate::test_utils::json_body(&encoded.request);
 
     assert_eq!(serialized["model"], "gpt-4.1");
 }
@@ -372,170 +409,108 @@ fn test_openai_request_uses_request_model_override() {
 /// `tool_choice: none`, an `active_tools: []` patch) carries no choice.
 #[test]
 fn tool_choice_is_dropped_when_no_tool_is_advertised() {
-    let request =
-        |tools: Vec<crate::completion::ToolDefinition>| crate::completion::CompletionRequest {
-            model: None,
-            chat_history: vec!["Hello".into()],
-            documents: vec![],
-            tools,
-            temperature: None,
-            max_tokens: None,
-            tool_choice: Some(crate::message::ToolChoice::None),
-            additional_params: None,
-            output_schema: None,
-            record_telemetry_content: false,
-        };
+    let request = |tools: Vec<crate::completion::ToolDefinition>| {
+        let mut request = CoreCompletionRequest::new("Hello").tools(tools);
+        request.tool_choice = Some(message::ToolChoice::None);
+        request
+    };
     let convert = |request| {
-        CompletionRequest::try_from(OpenAIRequestParams {
-            reasoning_details: false,
-            model: "gpt-4o-mini".to_string(),
-            request,
-            strict_tools: false,
-            tool_result_array_content: false,
-            supports_response_format: true,
-            response_format_with_tools: false,
-            supports_image_tool_results: false,
-            supports_tools: true,
-        })
-        .expect("request conversion should succeed")
+        use crate::wire::{Mode, Wire};
+        let target =
+            crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+        let encoded = target
+            .encode(request, Mode::Unary)
+            .expect("the original request encodes");
+        crate::test_utils::json_body(&encoded.request)
     };
 
-    let without_tools = serde_json::to_value(convert(request(vec![]))).expect("serializes");
+    let without_tools = convert(request(vec![]));
     assert!(
         without_tools.get("tool_choice").is_none(),
         "no tool, no choice: {without_tools}"
     );
 
-    let with_tool =
-        serde_json::to_value(convert(request(vec![crate::completion::ToolDefinition {
-            name: "add".to_string(),
-            description: "add two numbers".to_string(),
-            parameters: json!({"type": "object", "properties": {}}),
-        }])))
-        .expect("serializes");
+    let with_tool = convert(request(vec![crate::completion::ToolDefinition::new(
+        message::ToolName::new("add").expect("original nonempty name"),
+        "add two numbers",
+        json!({"type": "object", "properties": {}}),
+    )]));
     assert_eq!(with_tool["tool_choice"], json!("none"), "{with_tool}");
 }
 
 #[test]
 fn test_openai_request_uses_default_model_when_override_unset() {
-    let request = crate::completion::CompletionRequest {
-        model: None,
-        chat_history: vec!["Hello".into()],
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    };
-
-    let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
-        reasoning_details: false,
-        model: "gpt-4o-mini".to_string(),
-        request,
-        strict_tools: false,
-        tool_result_array_content: false,
-        supports_response_format: true,
-        response_format_with_tools: false,
-        supports_image_tool_results: false,
-        supports_tools: true,
-    })
-    .expect("request conversion should succeed");
-    let serialized = serde_json::to_value(openai_request).expect("serialization should succeed");
+    let request = CoreCompletionRequest::new("Hello");
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let serialized = crate::test_utils::json_body(&encoded.request);
 
     assert_eq!(serialized["model"], "gpt-4o-mini");
 }
 
 #[test]
 fn openai_chat_request_keeps_documents_after_system_messages() {
-    let request = CompletionRequestBuilder::new(MockCompletionModel::default(), "Prompt")
+    use crate::wire::{Mode, Operation, Wire};
+
+    let request = crate::completion::CompletionRequest::new("Prompt")
         .message(crate::completion::Message::system("System prompt"))
         .message(crate::completion::Message::user("Earlier user turn"))
         .message(crate::completion::Message::assistant(
             "Earlier assistant turn",
         ))
-        .document(test_document("doc1", "Document text."))
-        .build();
+        .document(test_document("doc1", "Document text."));
+    let wire = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let request = crate::operation::Completion::prepare(request, &wire.describe())
+        .expect("the original request prepares");
+    let encoded = wire
+        .encode(request, Mode::Unary)
+        .expect("the prepared request encodes");
+    let serialized = crate::test_utils::json_body(&encoded.request);
 
-    let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
-        reasoning_details: false,
-        model: "gpt-4o-mini".to_string(),
-        request,
-        strict_tools: false,
-        tool_result_array_content: false,
-        supports_response_format: true,
-        response_format_with_tools: false,
-        supports_image_tool_results: false,
-        supports_tools: true,
-    })
-    .expect("request conversion should succeed");
-
-    let serialized =
-        serde_json::to_value(&openai_request.messages).expect("messages should serialize");
-    let messages = serialized.as_array().expect("messages should be an array");
-
-    assert_eq!(messages.len(), 5);
-    assert_eq!(messages[0]["role"], "system");
-    assert_eq!(messages[1]["role"], "user");
-    assert!(
-        messages[1].to_string().contains("<file id: doc1>"),
-        "document message should follow system message: {messages:?}"
-    );
-    assert_eq!(messages[2]["role"], "user");
-    assert!(
-        messages[2].to_string().contains("Earlier user turn"),
-        "prior user history should follow document message: {messages:?}"
-    );
-    assert_eq!(messages[3]["role"], "assistant");
-    assert!(
-        messages[3].to_string().contains("Earlier assistant turn"),
-        "prior assistant history should follow prior user history: {messages:?}"
-    );
-    assert_eq!(messages[4]["role"], "user");
-    assert!(
-        messages[4].to_string().contains("Prompt"),
-        "prompt should remain last: {messages:?}"
+    // The document joins the first existing user, before its earlier text.
+    // This whole request pins every role, content part, field and order.
+    assert_eq!(
+        serialized,
+        json!({
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": [
+                    {"type": "text", "text": "System prompt"}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "<file id: doc1>\nDocument text.\n</file>\n"},
+                    {"type": "text", "text": "Earlier user turn"}
+                ]},
+                {"role": "assistant", "content": "Earlier assistant turn"},
+                {"role": "user", "content": "Prompt"}
+            ]
+        })
     );
 }
 
 #[test]
 fn openai_chat_direct_request_keeps_documents_after_system_messages() {
-    let request = CoreCompletionRequest {
-        model: None,
-        chat_history: vec![
-            crate::completion::Message::system("System prompt"),
-            crate::completion::Message::assistant("Earlier assistant turn"),
-            crate::completion::Message::system("Mid-conversation instruction"),
-            crate::completion::Message::user("Prompt"),
-        ],
-        documents: vec![test_document("doc1", "Document text.")],
-        tools: vec![],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    };
-
-    let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
-        reasoning_details: false,
-        model: "gpt-4o-mini".to_string(),
-        request,
-        strict_tools: false,
-        tool_result_array_content: false,
-        supports_response_format: true,
-        response_format_with_tools: false,
-        supports_image_tool_results: false,
-        supports_tools: true,
-    })
-    .expect("request conversion should succeed");
-
-    let serialized =
-        serde_json::to_value(&openai_request.messages).expect("messages should serialize");
-    let messages = serialized.as_array().expect("messages should be an array");
+    let request = CoreCompletionRequest::from(vec![
+        crate::completion::Message::system("System prompt"),
+        crate::completion::Message::assistant("Earlier assistant turn"),
+        crate::completion::Message::system("Mid-conversation instruction"),
+        crate::completion::Message::user("Prompt"),
+    ])
+    .document(test_document("doc1", "Document text."));
+    use crate::wire::{Mode, Operation, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let request = crate::operation::Completion::prepare(request, &target.describe())
+        .expect("the original request prepares");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let serialized = crate::test_utils::json_body(&encoded.request);
+    let messages = serialized["messages"]
+        .as_array()
+        .expect("messages should be an array");
 
     assert_eq!(messages.len(), 5);
     assert_eq!(messages[0]["role"], "system");
@@ -559,12 +534,55 @@ fn openai_chat_direct_request_keeps_documents_after_system_messages() {
 
 #[test]
 fn assistant_reasoning_alone_is_dropped() {
-    let assistant_content = vec![message::AssistantContent::reasoning("hidden")];
+    use crate::message::{
+        AssistantMessage, CarriedPayload, CarriedPosition, CarriedReasoning, CarriedReasoningPart,
+    };
+    use crate::providers::openai::completion::Message;
+    use crate::wire::{Mode, Wire};
 
-    let converted: Vec<Message> =
-        assistant_content_to_messages(assistant_content, false).expect("conversion should work");
+    // The known legacy text has explicitly neutral hand-built carrier data.
+    // Neither raw {}, Whole, nor the absent IDs/issuer claim provider authority.
+    let assistant_content = vec![crate::message::AssistantContent::CarriedReasoning(
+        CarriedReasoning {
+            id: None,
+            content: vec![CarriedReasoningPart::Text {
+                text: "hidden".to_string(),
+                signature: None,
+            }],
+            payload: CarriedPayload {
+                item: serde_json::json!({}),
+                provider: None,
+                position: CarriedPosition::Whole,
+            },
+        },
+    )];
+    // The admitted new probe User follows the intact reasoning-only Assistant.
+    // It gives direct encoding a surviving message; it changes this fixture input.
+    let request = crate::completion::CompletionRequest::from(vec![
+        crate::completion::Message::Assistant(AssistantMessage::new(assistant_content)),
+        crate::completion::Message::user("probe"),
+    ]);
+    let wire = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = wire
+        .encode(request, Mode::Unary)
+        .expect("the adapted request with its probe user encodes");
+    let body = crate::test_utils::json_body(&encoded.request);
+    let messages: Vec<Message> = serde_json::from_value(body["messages"].clone())
+        .expect("the actual wire messages read through the retained Chat view");
+    let converted: Vec<Message> = messages
+        .into_iter()
+        .filter(|message| matches!(message, Message::Assistant { .. }))
+        .collect();
 
     assert!(converted.is_empty());
+    // These are new pins for the admitted probe adaptation, not old parity claims.
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": "probe"}]
+        })
+    );
 }
 
 // Regression test: providers that serve thinking models over the OpenAI
@@ -573,18 +591,48 @@ fn assistant_reasoning_alone_is_dropped() {
 // turn if the prior assistant tool-call message didn't echo the reasoning.
 #[test]
 fn assistant_reasoning_is_attached_to_tool_call_message() {
+    use crate::message::{
+        AssistantMessage, CarriedPayload, CarriedPosition, CarriedReasoning, CarriedReasoningPart,
+        ToolName,
+    };
+    use crate::providers::openai::completion::{AssistantContent, Message};
+    use crate::wire::{Mode, Wire};
+
+    // This known legacy text uses the admitted neutral hand-built carrier shape:
+    // raw {}, Whole, no item ID or issuer, and no provider raw/Native/Origin claim.
     let assistant_content = vec![
-        message::AssistantContent::reasoning("hidden"),
-        message::AssistantContent::text("visible"),
-        message::AssistantContent::tool_call(
+        crate::message::AssistantContent::CarriedReasoning(CarriedReasoning {
+            id: None,
+            content: vec![CarriedReasoningPart::Text {
+                text: "hidden".to_string(),
+                signature: None,
+            }],
+            payload: CarriedPayload {
+                item: serde_json::json!({}),
+                provider: None,
+                position: CarriedPosition::Whole,
+            },
+        }),
+        crate::message::AssistantContent::text("visible"),
+        crate::message::AssistantContent::tool_call(
             "call_1",
-            "subtract",
+            ToolName::new("subtract").expect("the original tool name is nonempty"),
             serde_json::json!({"x": 2, "y": 1}),
         ),
     ];
-
-    let converted: Vec<Message> =
-        assistant_content_to_messages(assistant_content, false).expect("conversion should work");
+    let request =
+        crate::completion::CompletionRequest::from(vec![crate::completion::Message::Assistant(
+            AssistantMessage::new(assistant_content),
+        )]);
+    let wire = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = wire
+        .encode(request, Mode::Unary)
+        .expect("the original mixed assistant turn encodes");
+    let body = crate::test_utils::json_body(&encoded.request);
+    // The existing retained Chat view reads the actual emitted content string
+    // as Text parts, preserving the original typed predicates without a converter.
+    let converted: Vec<Message> = serde_json::from_value(body["messages"].clone())
+        .expect("the actual wire messages read through the retained Chat view");
     assert_eq!(converted.len(), 1);
 
     match &converted[0] {
@@ -616,9 +664,8 @@ fn assistant_reasoning_is_attached_to_tool_call_message() {
     assert_eq!(json["reasoning_content"], "hidden");
 }
 
-/// The raw text view of an assistant turn joins its non-empty parts in
-/// order, refusal parts included. This is the helper every unary path on
-/// this wire reads text through.
+/// The retained assistant text helper joins non-empty parts in order,
+/// including refusals. This tests that helper, not the live unary decoder.
 #[test]
 fn assistant_message_text_joins_every_non_empty_part() {
     let message = Message::Assistant {
@@ -783,9 +830,9 @@ fn refusal_message(body: Value) -> Message {
     serde_json::from_value(body).expect("the refusal wire shape must deserialize")
 }
 
-/// The fallback as every reader of this wire applies it: the message's own
-/// parts decide, and the top-level `refusal` is the turn's text only when
-/// they carry nothing.
+/// The retained message fallback uses the top-level `refusal` as the
+/// turn's text only when its own parts carry nothing. This helper fixture
+/// does not establish the live wire reader's behavior.
 fn fallback(message: &Message) -> Option<String> {
     let Message::Assistant {
         content, refusal, ..
@@ -866,67 +913,37 @@ fn refusal_content_part_suppresses_the_sibling_fallback() {
 
 #[test]
 fn test_max_tokens_is_forwarded_to_request() {
-    let request = crate::completion::CompletionRequest {
-        model: None,
-        chat_history: vec!["Hello".into()],
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: Some(4096),
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    };
-
-    let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
-        reasoning_details: false,
-        model: "gpt-4o-mini".to_string(),
-        request,
-        strict_tools: false,
-        tool_result_array_content: false,
-        supports_response_format: true,
-        response_format_with_tools: false,
-        supports_image_tool_results: false,
-        supports_tools: true,
-    })
-    .expect("request conversion should succeed");
-    let serialized = serde_json::to_value(openai_request).expect("serialization should succeed");
+    let request = capped_request(Some(4096), None);
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let serialized = crate::test_utils::json_body(&encoded.request);
 
     assert_eq!(serialized["max_tokens"], 4096);
 }
 
 /// A chat-completions request whose only interesting property is the cap.
-fn capped_request(max_tokens: Option<u64>, additional_params: Option<Value>) -> CompletionRequest {
-    CompletionRequest::try_from(OpenAIRequestParams {
-        reasoning_details: false,
-        model: "gpt-4o-mini".to_string(),
-        request: crate::completion::CompletionRequest {
-            model: None,
-            chat_history: vec!["Hello".into()],
-            documents: vec![],
-            tools: vec![],
-            temperature: None,
-            max_tokens,
-            tool_choice: None,
-            additional_params,
-            output_schema: None,
-            record_telemetry_content: false,
-        },
-        strict_tools: false,
-        tool_result_array_content: false,
-        supports_response_format: true,
-        response_format_with_tools: false,
-        supports_image_tool_results: false,
-        supports_tools: true,
-    })
-    .expect("request conversion should succeed")
+fn capped_request(
+    max_tokens: Option<u64>,
+    additional_params: Option<Value>,
+) -> CoreCompletionRequest {
+    let mut request = CoreCompletionRequest::new("Hello");
+    request.max_tokens = max_tokens;
+    request.additional_params = additional_params;
+    request
 }
 
 #[test]
 fn request_body_keeps_the_legacy_cap_when_the_endpoint_wants_it() {
-    let body =
-        request_body(&capped_request(Some(4096), None), false).expect("body should serialize");
+    let request = capped_request(Some(4096), None);
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let body = crate::test_utils::json_body(&encoded.request);
 
     assert_eq!(body["max_tokens"], 4096);
     assert!(body.get("max_completion_tokens").is_none());
@@ -934,8 +951,13 @@ fn request_body_keeps_the_legacy_cap_when_the_endpoint_wants_it() {
 
 #[test]
 fn request_body_renames_the_cap_for_the_modern_endpoint() {
-    let body =
-        request_body(&capped_request(Some(4096), None), true).expect("body should serialize");
+    let request = capped_request(Some(4096), None);
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-5");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let body = crate::test_utils::json_body(&encoded.request);
 
     assert_eq!(body["max_completion_tokens"], 4096);
     assert!(
@@ -946,7 +968,13 @@ fn request_body_renames_the_cap_for_the_modern_endpoint() {
 
 #[test]
 fn request_body_without_a_cap_carries_neither_spelling() {
-    let body = request_body(&capped_request(None, None), true).expect("body should serialize");
+    let request = capped_request(None, None);
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let body = crate::test_utils::json_body(&encoded.request);
 
     assert!(body.get("max_tokens").is_none());
     assert!(body.get("max_completion_tokens").is_none());
@@ -954,11 +982,13 @@ fn request_body_without_a_cap_carries_neither_spelling() {
 
 #[test]
 fn request_body_keeps_a_caller_supplied_modern_cap() {
-    let body = request_body(
-        &capped_request(Some(4096), Some(json!({ "max_completion_tokens": 48 }))),
-        true,
-    )
-    .expect("body should serialize");
+    let request = capped_request(Some(4096), Some(json!({ "max_completion_tokens": 48 })));
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-5");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let body = crate::test_utils::json_body(&encoded.request);
 
     assert_eq!(body["max_completion_tokens"], 48);
     assert!(body.get("max_tokens").is_none());
@@ -966,11 +996,13 @@ fn request_body_keeps_a_caller_supplied_modern_cap() {
 
 #[test]
 fn request_body_upgrades_a_caller_supplied_legacy_cap() {
-    let body = request_body(
-        &capped_request(None, Some(json!({ "max_tokens": 48 }))),
-        true,
-    )
-    .expect("body should serialize");
+    let request = capped_request(None, Some(json!({ "max_tokens": 48 })));
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-5");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let body = crate::test_utils::json_body(&encoded.request);
 
     assert_eq!(body["max_completion_tokens"], 48);
     assert!(body.get("max_tokens").is_none());
@@ -979,17 +1011,44 @@ fn request_body_upgrades_a_caller_supplied_legacy_cap() {
 #[test]
 fn request_body_moves_nothing_but_the_cap() {
     let request = capped_request(Some(4096), Some(json!({ "top_p": 0.5 })));
-    let plain = serde_json::to_value(&request).expect("serialization should succeed");
-    let mut renamed = request_body(&request, true).expect("body");
-
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let plain = crate::test_utils::json_body(&encoded.request);
+    let request = capped_request(Some(4096), Some(json!({ "top_p": 0.5 })));
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-5");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let renamed = crate::test_utils::json_body(&encoded.request);
+    let mut renamed = renamed;
+    assert_eq!(plain["model"], "gpt-4o-mini");
+    assert_eq!(renamed["model"], "gpt-5");
+    assert_eq!(plain["max_tokens"], 4096);
+    assert!(plain.get("max_completion_tokens").is_none());
+    assert_eq!(renamed["max_completion_tokens"], 4096);
+    assert!(renamed.get("max_tokens").is_none());
     let cap = renamed
         .as_object_mut()
         .expect("object body")
-        .remove("max_completion_tokens")
+        .shift_remove("max_completion_tokens")
         .expect("renamed cap");
     renamed["max_tokens"] = cap;
+    // The admitted real-model coordinate is the only other body difference.
+    renamed["model"] = plain["model"].clone();
 
     assert_eq!(renamed, plain);
+    assert_eq!(
+        plain,
+        json!({
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 4096,
+            "top_p": 0.5,
+        })
+    );
 }
 
 /// The gate itself, over every family whose behavior was measured against
@@ -1005,6 +1064,15 @@ fn modern_output_cap_covers_exactly_the_reasoning_families() {
         "gpt-5-nano",
         "gpt-5-2025-08-07",
         "gpt-6",
+        // U's additional known model cases remain beside F's literal gpt-6.
+        GPT_6_ASTRA,
+        GPT_6_1_SOL,
+        GPT_6_SOL,
+        GPT_6_LUNA,
+        GPT_5_4,
+        GPT_5_4_MINI,
+        GPT_5_4_NANO,
+        GPT_5_2_PRO,
         "o1",
         "o1-mini",
         "o3",
@@ -1013,7 +1081,7 @@ fn modern_output_cap_covers_exactly_the_reasoning_families() {
         "o4-mini-2025-04-16",
     ] {
         assert!(
-            is_openai_reasoning_model(model),
+            crate::providers::openai::options::reasons(model) == Some(true),
             "{model} rejects `max_tokens` and must get the modern spelling"
         );
     }
@@ -1040,7 +1108,7 @@ fn modern_output_cap_covers_exactly_the_reasoning_families() {
         "",
     ] {
         assert!(
-            !is_openai_reasoning_model(model),
+            crate::providers::openai::options::reasons(model) != Some(true),
             "{model:?} still takes `max_tokens`; changing its request would be a regression"
         );
     }
@@ -1048,58 +1116,34 @@ fn modern_output_cap_covers_exactly_the_reasoning_families() {
 
 #[test]
 fn test_max_tokens_omitted_when_none() {
-    let request = crate::completion::CompletionRequest {
-        model: None,
-        chat_history: vec!["Hello".into()],
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    };
-
-    let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
-        reasoning_details: false,
-        model: "gpt-4o-mini".to_string(),
-        request,
-        strict_tools: false,
-        tool_result_array_content: false,
-        supports_response_format: true,
-        response_format_with_tools: false,
-        supports_image_tool_results: false,
-        supports_tools: true,
-    })
-    .expect("request conversion should succeed");
-    let serialized = serde_json::to_value(openai_request).expect("serialization should succeed");
+    let request = capped_request(None, None);
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let serialized = crate::test_utils::json_body(&encoded.request);
 
     assert!(serialized.get("max_tokens").is_none());
 }
 
-/// A mixed `additional_params.tools` array splits by shape: function tools
-/// merge into the typed `tools` field (issue #1890 — left in the flattened
-/// params they replace the typed field at serialization), while
-/// non-function entries stay behind for the provider's `prepare_request`
-/// hook (Groq folds its native tools into `compound_custom` from there).
-/// Not a cassette test: OpenAI proper rejects non-function chat tools, so
-/// the retained-entry half cannot be recorded against the live API.
+/// The current official Chat wire intentionally sends both converted function
+/// tools that F's flattened native tools field dropped, alongside browser_search.
+/// This pins the complete unary body; the retired converted-leftover DTO equality
+/// is inapplicable here.
+/// This synthetic request does not establish acceptance by the live API.
 #[test]
 fn additional_params_function_tools_merge_and_native_tools_stay() {
-    let request = CoreCompletionRequest {
-        model: None,
-        chat_history: vec!["Hello".into()],
-        documents: vec![],
-        tools: vec![crate::completion::ToolDefinition {
-            name: "builder_tool".to_string(),
-            description: "from the builder".to_string(),
-            parameters: serde_json::json!({"type": "object", "properties": {}}),
-        }],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: Some(serde_json::json!({
+    use crate::message::ToolName;
+    use crate::wire::{Mode, Wire};
+
+    let request = crate::completion::CompletionRequest::new("Hello")
+        .tools(vec![crate::completion::ToolDefinition::new(
+            ToolName::new("builder_tool").expect("the fixture tool name is nonempty"),
+            "from the builder",
+            serde_json::json!({"type": "object", "properties": {}}),
+        )])
+        .additional_params(serde_json::json!({
             "tools": [
                 {
                     "type": "function",
@@ -1111,65 +1155,73 @@ fn additional_params_function_tools_merge_and_native_tools_stay() {
                 },
                 {"type": "browser_search"}
             ]
-        })),
-        output_schema: None,
-        record_telemetry_content: false,
-    };
+        }));
+    let wire = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = wire
+        .encode(request, Mode::Unary)
+        .expect("the original mixed-tools request encodes");
+    let body = crate::test_utils::json_body(&encoded.request);
 
-    let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
-        reasoning_details: false,
-        model: "gpt-4o-mini".to_string(),
-        request,
-        strict_tools: false,
-        tool_result_array_content: false,
-        supports_response_format: true,
-        response_format_with_tools: false,
-        supports_image_tool_results: false,
-        supports_tools: true,
-    })
-    .expect("request conversion should succeed");
-
-    let names: Vec<&str> = openai_request
-        .tools
-        .iter()
-        .map(|tool| tool.function.name.as_str())
-        .collect();
-    assert_eq!(names, vec!["builder_tool", "params_tool"]);
     assert_eq!(
-        openai_request.additional_params,
-        Some(serde_json::json!({"tools": [{"type": "browser_search"}]}))
+        body,
+        serde_json::json!({
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "builder_tool",
+                        "description": "from the builder",
+                        "parameters": {"type": "object", "properties": {}}
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "params_tool",
+                        "description": "from additional_params",
+                        "parameters": {"type": "object", "properties": {}}
+                    }
+                },
+                {"type": "browser_search"}
+            ]
+        })
     );
 }
 
 #[test]
 fn request_conversion_errors_when_all_messages_are_filtered() {
-    let request = CoreCompletionRequest {
-        model: None,
-        chat_history: vec![message::Message::Assistant {
-            id: None,
-            content: vec![message::AssistantContent::reasoning("hidden")],
-        }],
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
+    use crate::error::ProviderError;
+    use crate::message::{
+        AssistantMessage, CarriedPayload, CarriedPosition, CarriedReasoning, CarriedReasoningPart,
     };
+    use crate::wire::{Mode, Wire};
 
-    let result = CompletionRequest::try_from(OpenAIRequestParams {
-        reasoning_details: false,
-        model: "gpt-4o-mini".to_string(),
-        request,
-        strict_tools: false,
-        tool_result_array_content: false,
-        supports_response_format: true,
-        response_format_with_tools: false,
-        supports_image_tool_results: false,
-        supports_tools: true,
-    });
+    // The original sole reasoning-only Assistant is retained; there is no probe.
+    // Its known legacy text uses the admitted neutral raw {} at Whole, with no
+    // item ID/issuer, provider raw, Native or Origin claim.
+    let request =
+        crate::completion::CompletionRequest::from(vec![crate::completion::Message::Assistant(
+            AssistantMessage::new(vec![crate::message::AssistantContent::CarriedReasoning(
+                CarriedReasoning {
+                    id: None,
+                    content: vec![CarriedReasoningPart::Text {
+                        text: "hidden".to_string(),
+                        signature: None,
+                    }],
+                    payload: CarriedPayload {
+                        item: serde_json::json!({}),
+                        provider: None,
+                        position: CarriedPosition::Whole,
+                    },
+                },
+            )]),
+        )]);
+    let wire = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let result = wire.encode(request, Mode::Unary);
 
     assert!(matches!(
         result.map_err(ProviderError::from),
@@ -1179,56 +1231,38 @@ fn request_conversion_errors_when_all_messages_are_filtered() {
 
 #[test]
 fn request_conversion_omits_response_format_on_initial_tool_turn() {
-    let request = CoreCompletionRequest {
-        model: None,
-        chat_history: vec![message::Message::user(
-            "Hello, whats the weather in London?",
-        )],
-        documents: vec![],
-        tools: vec![completion::ToolDefinition {
-            name: "weather".to_string(),
-            description: "Get the weather".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "city": { "type": "string" }
-                },
-                "required": ["city"]
-            }),
-        }],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: Some(
-            serde_json::from_value(serde_json::json!({
-                "title": "WeatherResponse",
-                "type": "object",
-                "properties": {
-                    "city": { "type": "string" },
-                    "weather": { "type": "string" }
-                },
-                "required": ["city", "weather"]
-            }))
-            .expect("schema should deserialize"),
-        ),
-        record_telemetry_content: false,
-    };
-
-    let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
-        reasoning_details: false,
-        model: "gpt-4o-mini".to_string(),
-        request,
-        strict_tools: false,
-        tool_result_array_content: false,
-        supports_response_format: true,
-        response_format_with_tools: false,
-        supports_image_tool_results: false,
-        supports_tools: true,
-    })
-    .expect("request conversion should succeed");
-
-    let serialized = serde_json::to_value(openai_request).expect("serialization should succeed");
+    let mut request = CoreCompletionRequest::from(vec![message::Message::user(
+        "Hello, whats the weather in London?",
+    )]);
+    request.tools = vec![completion::ToolDefinition {
+        name: message::ToolName::new("weather").expect("original nonempty name"),
+        description: "Get the weather".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        }),
+    }];
+    request.output_schema = Some(
+        serde_json::from_value(serde_json::json!({
+            "title": "WeatherResponse",
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" },
+                "weather": { "type": "string" }
+            },
+            "required": ["city", "weather"]
+        }))
+        .expect("schema should deserialize"),
+    );
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let serialized = crate::test_utils::json_body(&encoded.request);
 
     assert!(
         serialized.get("response_format").is_none(),
@@ -1238,69 +1272,53 @@ fn request_conversion_omits_response_format_on_initial_tool_turn() {
 
 #[test]
 fn request_conversion_restores_response_format_after_tool_result() {
-    let request = CoreCompletionRequest {
-        model: None,
-        chat_history: vec![
-            message::Message::user("Hello, whats the weather in London?"),
-            message::Message::Assistant {
-                id: None,
-                content: vec![message::AssistantContent::tool_call(
-                    "call_1",
-                    "weather",
-                    serde_json::json!({ "city": "London" }),
-                )],
-            },
-            message::Message::tool_result(
+    // This scoped input adaptation uses the preceding provider call's "call_1"
+    // identity for the result. F's separate explicit handle with provider None
+    // is lost; every original history value, schema and predicate remains exact.
+    let mut request = CoreCompletionRequest::from(vec![
+        message::Message::user("Hello, whats the weather in London?"),
+        message::Message::Assistant(message::AssistantMessage::new(vec![
+            message::AssistantContent::tool_call(
                 "call_1",
-                "weather",
-                "The weather in London is all fire and brimstone",
+                message::ToolName::new("weather").expect("original nonempty name"),
+                serde_json::json!({ "city": "London" }),
             ),
-        ],
-        documents: vec![],
-        tools: vec![completion::ToolDefinition {
-            name: "weather".to_string(),
-            description: "Get the weather".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "city": { "type": "string" }
-                },
-                "required": ["city"]
-            }),
-        }],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: Some(
-            serde_json::from_value(serde_json::json!({
-                "title": "WeatherResponse",
-                "type": "object",
-                "properties": {
-                    "city": { "type": "string" },
-                    "weather": { "type": "string" }
-                },
-                "required": ["city", "weather"]
-            }))
-            .expect("schema should deserialize"),
+        ])),
+        message::Message::tool_result(
+            message::CallId::from_wire("call_1"),
+            message::ToolName::new("weather").expect("original nonempty name"),
+            "The weather in London is all fire and brimstone",
         ),
-        record_telemetry_content: false,
-    };
-
-    let openai_request = CompletionRequest::try_from(OpenAIRequestParams {
-        reasoning_details: false,
-        model: "gpt-4o-mini".to_string(),
-        request,
-        strict_tools: false,
-        tool_result_array_content: false,
-        supports_response_format: true,
-        response_format_with_tools: false,
-        supports_image_tool_results: false,
-        supports_tools: true,
-    })
-    .expect("request conversion should succeed");
-
-    let serialized = serde_json::to_value(openai_request).expect("serialization should succeed");
+    ]);
+    request.tools = vec![completion::ToolDefinition {
+        name: message::ToolName::new("weather").expect("original nonempty name"),
+        description: "Get the weather".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        }),
+    }];
+    request.output_schema = Some(
+        serde_json::from_value(serde_json::json!({
+            "title": "WeatherResponse",
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" },
+                "weather": { "type": "string" }
+            },
+            "required": ["city", "weather"]
+        }))
+        .expect("schema should deserialize"),
+    );
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let serialized = crate::test_utils::json_body(&encoded.request);
 
     assert!(
         serialized.get("response_format").is_some(),
@@ -1382,13 +1400,11 @@ fn deserialize_openai_stringified_tool_call() {
     );
 }
 
-/// A `max_tokens`-capped turn still emits the tool call, with `arguments`
-/// cut off partway through the JSON object. Parsing strictly failed the
-/// *whole* response -- the text, usage, id and finish reason went with it
-/// -- where the streaming path keeps the turn and drops the unusable call.
-/// Reproduced live against DeepSeek (rig#2354) at 24/32/48/64-token
-/// budgets; this wire type backs every other OpenAI-compatible provider in
-/// the tree, so the same shape is pinned here.
+/// A `max_tokens`-capped turn can truncate tool arguments mid-object.
+/// Historically, strict parsing lost the whole response while streaming
+/// kept the turn and dropped the unusable call; DeepSeek reproduced this
+/// at 24/32/48/64-token budgets (rig#2354). This fixture pins the retained
+/// response reader's repair behavior, not the current Value-based decoder.
 #[test]
 fn truncated_tool_arguments_do_not_destroy_the_response() {
     let request = r#"{
@@ -1528,8 +1544,9 @@ fn output_length_drops_a_tool_call_with_no_argument_tokens() {
 ///
 /// The `"null"` spelling is not hypothetical: every zero-argument call in
 /// `crates/rig-cassette/fixtures/cassettes/groq/agent_tool_sessions/parallel_tool_calls_single_turn_nonstreaming.yaml`
-/// carries it, so folding it to `{}` is what keeps the truncation sentinel
-/// from swallowing a real call.
+/// carries it. That nonempty string parses successfully and remains JSON
+/// Null, so it is not an incomplete-arguments sentinel. Only an empty or
+/// whitespace-only argument string becomes `{}` in this retained reader.
 #[test]
 fn tolerant_tool_arguments_leave_complete_payloads_alone() {
     let request = r#"{
@@ -1579,11 +1596,11 @@ fn tolerant_tool_arguments_leave_complete_payloads_alone() {
     );
 }
 
-/// The Doubleword reasoning tool-loop cassette exposed text-before-reasoning
-/// in the shared unary converter. The ordering itself is the chat wire's
-/// rule; what this pins is the decode the wire reads it from — a
-/// `reasoning_content` sibling of `content` lands on the assistant
-/// message's `reasoning` field rather than being dropped.
+/// The Doubleword reasoning tool-loop cassette historically exposed
+/// text-before-reasoning in the shared unary converter. This fixture pins
+/// the retained response view: a `reasoning_content` sibling of `content`
+/// reaches the assistant message's `reasoning` field. It does not test the
+/// current Value-based decoder or its output ordering.
 #[test]
 fn compatible_response_decodes_reasoning_content_beside_text() {
     let request = r#"
@@ -1645,11 +1662,23 @@ fn compatible_response_decodes_reasoning_content_beside_text() {
 #[test]
 fn pdf_base64_document_serializes_as_file_content_part() {
     let doc = message::UserContent::Document(message::Document {
-        data: DocumentSourceKind::Base64("JVBERi0xLjQK".into()),
+        data: message::DocumentData::File(DocumentSourceKind::Base64("JVBERi0xLjQK".into())),
         media_type: Some(message::DocumentMediaType::PDF),
         additional_params: None,
     });
-    let converted: UserContent = doc.try_into().expect("conversion should succeed");
+    let request = CoreCompletionRequest::from(vec![message::Message::User { content: vec![doc] }]);
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let body = crate::test_utils::json_body(&encoded.request);
+    let messages: Vec<Message> = serde_json::from_value(body["messages"].clone())
+        .expect("actual messages deserialize through the retained Chat view");
+    let Message::User { content, .. } = &messages[0] else {
+        panic!("expected user message");
+    };
+    let converted = content[0].clone();
     let json = serde_json::to_value(&converted).expect("serialize");
 
     assert_eq!(json["type"], "file");
@@ -1664,11 +1693,23 @@ fn pdf_base64_document_serializes_as_file_content_part() {
 #[test]
 fn file_id_document_serializes_as_file_content_part() {
     let doc = message::UserContent::Document(message::Document {
-        data: DocumentSourceKind::FileId("file_abc".into()),
+        data: message::DocumentData::File(DocumentSourceKind::FileId("file_abc".into())),
         media_type: None,
         additional_params: None,
     });
-    let converted: UserContent = doc.try_into().expect("conversion should succeed");
+    let request = CoreCompletionRequest::from(vec![message::Message::User { content: vec![doc] }]);
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let body = crate::test_utils::json_body(&encoded.request);
+    let messages: Vec<Message> = serde_json::from_value(body["messages"].clone())
+        .expect("actual messages deserialize through the retained Chat view");
+    let Message::User { content, .. } = &messages[0] else {
+        panic!("expected user message");
+    };
+    let converted = content[0].clone();
     let json = serde_json::to_value(&converted).expect("serialize");
 
     assert_eq!(json["type"], "file");
@@ -1682,9 +1723,23 @@ fn base64_image_without_detail_defaults_to_auto() {
         data: DocumentSourceKind::Base64("iVBORw0KGgo=".into()),
         media_type: Some(message::ImageMediaType::PNG),
         detail: None,
-        additional_params: None,
+        native: None,
     });
-    let converted: UserContent = image.try_into().expect("conversion should succeed");
+    let request = CoreCompletionRequest::from(vec![message::Message::User {
+        content: vec![image],
+    }]);
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let body = crate::test_utils::json_body(&encoded.request);
+    let messages: Vec<Message> = serde_json::from_value(body["messages"].clone())
+        .expect("actual messages deserialize through the retained Chat view");
+    let Message::User { content, .. } = &messages[0] else {
+        panic!("expected user message");
+    };
+    let converted = content[0].clone();
     let UserContent::Image { image_url } = converted else {
         panic!("expected image content");
     };
@@ -1698,11 +1753,23 @@ fn base64_image_without_detail_defaults_to_auto() {
 #[test]
 fn non_pdf_document_still_serializes_as_text() {
     let doc = message::UserContent::Document(message::Document {
-        data: DocumentSourceKind::String("# Markdown".into()),
+        data: message::DocumentData::Text("# Markdown".into()),
         media_type: None,
         additional_params: None,
     });
-    let converted: UserContent = doc.try_into().expect("conversion should succeed");
+    let request = CoreCompletionRequest::from(vec![message::Message::User { content: vec![doc] }]);
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let body = crate::test_utils::json_body(&encoded.request);
+    let messages: Vec<Message> = serde_json::from_value(body["messages"].clone())
+        .expect("actual messages deserialize through the retained Chat view");
+    let Message::User { content, .. } = &messages[0] else {
+        panic!("expected user message");
+    };
+    let converted = content[0].clone();
     let json = serde_json::to_value(&converted).expect("serialize");
 
     assert_eq!(json["type"], "text");
@@ -1712,11 +1779,27 @@ fn non_pdf_document_still_serializes_as_text() {
 #[test]
 fn pdf_url_document_returns_conversion_error() {
     let doc = message::UserContent::Document(message::Document {
-        data: DocumentSourceKind::Url("https://example.com/x.pdf".into()),
+        data: message::DocumentData::File(DocumentSourceKind::Url(
+            "https://example.com/x.pdf".into(),
+        )),
         media_type: Some(message::DocumentMediaType::PDF),
         additional_params: None,
     });
-    let res: Result<UserContent, _> = doc.try_into();
+    use crate::wire::{Mode, Wire};
+    let request = CoreCompletionRequest::from(vec![message::Message::User { content: vec![doc] }]);
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let error = target
+        .encode(request, Mode::Unary)
+        .expect_err("conversion refused");
+    let error = ProviderError::from(error);
+    let ProviderError::Request(cause) = error else {
+        panic!("expected Request category");
+    };
+    let res = Err::<(), _>(
+        cause
+            .downcast_ref::<message::MessageError>()
+            .expect("concrete MessageError cause"),
+    );
     assert!(matches!(
         res,
         Err(message::MessageError::ConversionError(_))
@@ -1726,11 +1809,25 @@ fn pdf_url_document_returns_conversion_error() {
 #[test]
 fn pdf_raw_document_returns_conversion_error() {
     let doc = message::UserContent::Document(message::Document {
-        data: DocumentSourceKind::Raw(b"%PDF-1.4\n".to_vec()),
+        data: message::DocumentData::File(DocumentSourceKind::Raw(b"%PDF-1.4\n".to_vec())),
         media_type: Some(message::DocumentMediaType::PDF),
         additional_params: None,
     });
-    let res: Result<UserContent, _> = doc.try_into();
+    use crate::wire::{Mode, Wire};
+    let request = CoreCompletionRequest::from(vec![message::Message::User { content: vec![doc] }]);
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let error = target
+        .encode(request, Mode::Unary)
+        .expect_err("conversion refused");
+    let error = ProviderError::from(error);
+    let ProviderError::Request(cause) = error else {
+        panic!("expected Request category");
+    };
+    let res = Err::<(), _>(
+        cause
+            .downcast_ref::<message::MessageError>()
+            .expect("concrete MessageError cause"),
+    );
     assert!(matches!(
         res,
         Err(message::MessageError::ConversionError(_))
@@ -1755,14 +1852,26 @@ fn file_user_content_deserializes_from_wire_json() {
 #[test]
 fn document_file_id_serializes_as_a_file_part() {
     let doc = message::Document {
-        data: DocumentSourceKind::FileId("file_abc".to_string()),
+        data: message::DocumentData::File(DocumentSourceKind::FileId("file_abc".to_string())),
         media_type: None,
         additional_params: None,
     };
 
-    let converted: UserContent = message::UserContent::Document(doc)
-        .try_into()
-        .expect("conversion should succeed");
+    let request = CoreCompletionRequest::from(vec![message::Message::User {
+        content: vec![message::UserContent::Document(doc)],
+    }]);
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let body = crate::test_utils::json_body(&encoded.request);
+    let messages: Vec<Message> = serde_json::from_value(body["messages"].clone())
+        .expect("actual messages deserialize through the retained Chat view");
+    let Message::User { content, .. } = &messages[0] else {
+        panic!("expected user message");
+    };
+    let converted = content[0].clone();
     let json = serde_json::to_value(&converted).expect("serialize");
 
     assert_eq!(json["type"], "file");
@@ -1778,13 +1887,21 @@ fn mixed_text_and_pdf_user_message_produces_two_content_parts() {
         content: vec![
             message::UserContent::text("What is in this PDF?"),
             message::UserContent::Document(message::Document {
-                data: DocumentSourceKind::Base64("JVBERi0K".into()),
+                data: message::DocumentData::File(DocumentSourceKind::Base64("JVBERi0K".into())),
                 media_type: Some(message::DocumentMediaType::PDF),
                 additional_params: None,
             }),
         ],
     };
-    let converted: Vec<Message> = user.try_into().expect("conversion should succeed");
+    let request = CoreCompletionRequest::from(vec![user]);
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let body = crate::test_utils::json_body(&encoded.request);
+    let converted: Vec<Message> = serde_json::from_value(body["messages"].clone())
+        .expect("actual messages deserialize through the retained Chat view");
     assert_eq!(converted.len(), 1);
     let Message::User { content, .. } = &converted[0] else {
         panic!("expected user message");
@@ -1799,83 +1916,52 @@ fn mixed_text_and_pdf_user_message_produces_two_content_parts() {
 /// reliably elicited from a live provider; assertions inspect the request wire.
 #[test]
 fn request_plans_tool_ids_across_namespaces_turns_and_split_user_content() {
-    use crate::message::{AssistantContent, ToolCallId, ToolFunction, UserContent};
-    let generated = message::ToolCall {
-        id: ToolCallId::minted(0),
-        provider: None,
-        function: ToolFunction {
-            name: "test".into(),
-            namespace: None,
-            arguments: serde_json::json!({}),
-        },
-        signature: None,
-        additional_params: None,
+    use crate::message::{
+        AssistantContent, AssistantMessage, CallId, LocalCallId, ToolFunction, ToolName,
+        UserContent,
     };
-    let hint = generated.id.wire_hint().into_owned();
+    // F's deterministic minted(0) BlockId becomes one fresh Local UUID here.
+    // Cloning reuses that UUID across both completed occurrences and results;
+    // the original ordinal/assembly identity is lost, not asserted as preserved.
+    let generated = message::ToolCall::new(
+        CallId::Local(LocalCallId::new()),
+        ToolFunction::new(
+            ToolName::new("test").expect("original nonempty name"),
+            json!({}),
+        ),
+    );
+    // F BlockId::Display made minted(0)'s original hint exactly tool-0.
+    // That genuine from_wire fixture input is independent of this local UUID.
+    let hint = "tool-0".to_string();
     let real = message::ToolCall::from_wire(&hint, generated.function.clone());
     let history = vec![
-        message::Message::Assistant {
-            id: None,
-            content: vec![
-                AssistantContent::ToolCall(generated.clone()),
-                AssistantContent::ToolCall(real.clone()),
-            ],
-        },
+        message::Message::Assistant(AssistantMessage::new(vec![
+            AssistantContent::ToolCall(generated.clone()),
+            AssistantContent::ToolCall(real.clone()),
+        ])),
         message::Message::User {
             content: vec![
-                UserContent::tool_result_for(
-                    real.id.clone(),
-                    real.provider.clone(),
-                    "test",
-                    vec![],
-                ),
+                UserContent::ToolResult(real.result(vec![])),
                 UserContent::text("between results"),
-                UserContent::tool_result_for(
-                    generated.id.clone(),
-                    generated.provider.clone(),
-                    "test",
-                    vec![],
-                ),
+                UserContent::ToolResult(generated.result(vec![])),
             ],
         },
-        message::Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::ToolCall(generated.clone())],
-        },
+        message::Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
+            generated.clone(),
+        )])),
         message::Message::User {
-            content: vec![UserContent::tool_result_for(
-                generated.id.clone(),
-                generated.provider.clone(),
-                "test",
-                vec![],
-            )],
+            content: vec![UserContent::ToolResult(generated.result(vec![]))],
         },
     ];
-    let request = CoreCompletionRequest {
-        model: None,
-        chat_history: history,
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    };
-    let wire = CompletionRequest::try_from(OpenAIRequestParams {
-        reasoning_details: false,
-        model: "test".into(),
-        request,
-        strict_tools: false,
-        tool_result_array_content: true,
-        supports_response_format: true,
-        response_format_with_tools: false,
-        supports_image_tool_results: false,
-        supports_tools: true,
-    })
-    .unwrap();
-    let wire = serde_json::to_value(wire).unwrap();
+    let request = CoreCompletionRequest::from(history);
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
+        .chat("test")
+        .with_tool_result_array_content();
+    let encoded = target
+        .encode(request, Mode::Unary)
+        .expect("the original request encodes");
+    let wire = crate::test_utils::json_body(&encoded.request);
     let messages = wire["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 6);
     let first = &messages[0]["tool_calls"][0]["id"];
@@ -1895,32 +1981,91 @@ fn request_plans_tool_ids_across_namespaces_turns_and_split_user_content() {
 /// overrides the typed value (`build` warns about it; it does not stop it).
 #[test]
 fn additional_params_override_typed_fields_on_the_wire() {
-    let rig_request = crate::completion::CompletionRequestBuilder::unbound("hi")
+    let rig_request = CoreCompletionRequest::new("hi")
         .temperature(0.1)
-        .additional_params(serde_json::json!({"temperature": 0.9, "top_p": 0.5}))
-        .build();
-    let request = CompletionRequest::try_from(OpenAIRequestParams {
-        reasoning_details: false,
-        model: "gpt-4o-mini".to_string(),
-        request: rig_request,
-        strict_tools: false,
-        tool_result_array_content: true,
-        supports_response_format: true,
-        response_format_with_tools: false,
-        supports_image_tool_results: false,
-        supports_tools: true,
-    })
-    .expect("request conversion should succeed");
-
-    let body = request_body(&request, false).expect("body should serialize");
+        .additional_params(serde_json::json!({"temperature": 0.9, "top_p": 0.5}));
+    use crate::wire::{Mode, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
+        .chat("gpt-4o-mini")
+        .with_tool_result_array_content();
+    let encoded = target
+        .encode(rig_request, Mode::Unary)
+        .expect("the original request encodes");
+    let body = crate::test_utils::json_body(&encoded.request);
     assert_eq!(body["temperature"], 0.9, "{body}");
     assert_eq!(body["top_p"], 0.5, "{body}");
 }
 
+// Current canonical calls have no independent item-ID field: fc_1 and
+// ctc_1 from the original fixture are omitted under the named adaptation.
+// This preserves refusal inputs and predicates, without item-ID parity.
 #[test]
 fn chat_completions_refuses_namespaced_and_custom_calls() {
-    for (turn, kind) in crate::message::unrepresentable_turns() {
-        let error = Vec::<Message>::try_from(turn).expect_err("refused, not dropped");
-        crate::message::assert_message_refused(&error, kind, CHAT_COMPLETIONS_WIRE);
+    use crate::message::{
+        AssistantMessage, CallId, CustomToolCall, ToolFunction, ToolName, UnrepresentableToolCall,
+    };
+    use crate::wire::{Mode, Wire};
+    let namespaced = message::ToolCall::from_wire(
+        "call_1",
+        ToolFunction::new(
+            ToolName::new("add").expect("original nonempty name"),
+            json!({"x": 1}),
+        ),
+    )
+    .with_namespace(Some("math".to_owned()));
+    let custom = CustomToolCall::new(
+        CallId::from_wire("call_2"),
+        ToolName::new("apply_patch").expect("original nonempty name"),
+        r#"{"x": 1}"#,
+    );
+    let turns = [
+        (
+            message::Message::Assistant(AssistantMessage::new(vec![
+                message::AssistantContent::ToolCall(namespaced),
+            ])),
+            "namespace",
+        ),
+        (
+            message::Message::Assistant(AssistantMessage::new(vec![
+                message::AssistantContent::CustomToolCall(custom),
+            ])),
+            "custom",
+        ),
+    ];
+    for (turn, kind) in turns {
+        let target =
+            crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+        let error = target
+            .encode(CoreCompletionRequest::from(vec![turn]), Mode::Unary)
+            .expect_err("refused, not dropped");
+        // New pin: the actual direct Chat encode refusal has Request category.
+        let ProviderError::Request(source) = ProviderError::from(error) else {
+            panic!("expected concrete Request refusal");
+        };
+        // F's removed MessageError::UnrepresentableToolCall wrapper is inapplicable,
+        // not passed. Inspect the existing concrete leaf at the actual Request source.
+        let refusal = source
+            .downcast_ref::<UnrepresentableToolCall>()
+            .expect("concrete UnrepresentableToolCall cause");
+        let wire = "OpenAI-compatible Chat Completions";
+        match (kind, refusal) {
+            (
+                "namespace",
+                UnrepresentableToolCall::Namespace {
+                    wire: got,
+                    name,
+                    namespace,
+                },
+            ) => {
+                assert_eq!(
+                    (*got, name.as_str(), namespace.as_str()),
+                    (wire, "add", "math")
+                );
+            }
+            ("custom", UnrepresentableToolCall::CustomCall { wire: got, name }) => {
+                assert_eq!((*got, name.as_str()), (wire, "apply_patch"));
+            }
+            _ => panic!("expected the {kind} refusal on {wire}, got {refusal:?}"),
+        }
     }
 }

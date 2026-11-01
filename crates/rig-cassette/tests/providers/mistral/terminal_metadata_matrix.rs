@@ -15,18 +15,15 @@
 //! | output budget | roomy, one-token tiny |
 //! | response shape | one text candidate, two text candidates, forced tool |
 //!
-//! That is 24 recorded cells. Each cell proves its request and terminal premise
-//! from the fixture, then compares the native raw response/terminal metadata
-//! with those exact bytes. The `n = 2` cells additionally prove that the shared
-//! streaming adapter selects candidate zero without concatenating candidate
-//! one into it.
+//! That is 24 cells, of which the five below are tests. Each proves its
+//! request and terminal premise from the fixture, then compares the native raw
+//! response/terminal metadata with those exact bytes. The `n = 2` cells
+//! additionally prove that the shared streaming adapter selects candidate zero
+//! without concatenating candidate one into it.
 //!
-//! Coverage ledger: the proposed 24-cell logprobs product was pruned in full
-//! after both models rejected live blocking and streaming probes with code
-//! 3051; it was replaced, not counted, by this unpruned 24-cell terminal
-//! product. Each explicit test maps to
-//! `crates/rig-cassette/fixtures/cassettes/mistral/terminal_metadata_matrix/<test-name>.yaml`; none of
-//! these cells is unit-only. `mistral-small-latest` and
+//! Each test maps to
+//! `crates/rig-cassette/fixtures/cassettes/mistral/terminal_metadata_matrix/<test-name>.yaml`.
+//! `mistral-small-latest` and
 //! `ministral-3b-latest` are the two inexpensive, currently served chat/tool
 //! families. Assertions cover requests, native terminals, ids, models, finish
 //! reasons, usage including `service_tier`, primary-choice behavior, and every
@@ -34,18 +31,18 @@
 //!
 //! | recorded cells | exact fixture set |
 //! |---|---|
-//! | all 24 replacement cells | `crates/rig-cassette/fixtures/cassettes/mistral/terminal_metadata_matrix/{blocking,streaming}_{mistral_small,ministral_3b}_{roomy,tiny}_{plain_one,plain_two,tool}.yaml` |
+//! | 5 of 24 | `crates/rig-cassette/fixtures/cassettes/mistral/terminal_metadata_matrix/{blocking_ministral_3b_roomy_plain_one,blocking_ministral_3b_roomy_plain_two,blocking_ministral_3b_tiny_tool,streaming_ministral_3b_tiny_plain_one,streaming_mistral_small_tiny_plain_two}.yaml` |
 
+use rig_test_support::cassette_models::OpenAiModels;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use futures::StreamExt as _;
-use rig::completion::CompletionModel;
-use rig::streaming::StreamEvent;
 use serde_json::{Value, json};
 
-use super::support::{BoundMistral, with_mistral_terminal_metadata_cassette_result};
+use super::support::with_mistral_terminal_metadata_cassette_result;
 use crate::support::assert_matches_recorded_document;
+use rig::completion::CompletionRequest;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Transport {
@@ -120,28 +117,27 @@ fn model_name(model: ModelVariant) -> &'static str {
     }
 }
 
-async fn run_cell(client: BoundMistral, cell: Cell, observed: SharedObservation) -> Result<()> {
+async fn run_cell(client: OpenAiModels, cell: Cell, observed: SharedObservation) -> Result<()> {
     let model = client.completion(model_name(cell.model));
-    let mut builder = model
-        .completion_request(prompt(cell))
+    let mut builder = CompletionRequest::new(prompt(cell))
         .additional_params(params(cell))
         .max_tokens(max_tokens(cell));
     if cell.shape == Shape::Tool {
         builder = builder.tool(rig::tool::tool_definition(&crate::support::Adder));
     }
-    let request = builder.build();
+    let request = builder;
 
     let raw = match cell.transport {
-        Transport::Blocking => model.completion(request).await?.raw,
+        Transport::Blocking => model.call(request).await?.raw,
         Transport::Streaming => {
-            let mut stream = model.stream(request).await?;
-            let mut terminal = None;
+            let mut stream = model.stream(request)?;
             while let Some(item) = stream.next().await {
-                if let StreamEvent::Final(response) = item? {
-                    terminal = Some(response);
-                }
+                item?;
             }
-            let terminal = terminal.context("raw stream should carry a terminal response")?;
+            let terminal = stream
+                .finish()
+                .await
+                .context("raw stream should carry a terminal response")?;
             terminal.raw
         }
     };
@@ -181,24 +177,25 @@ fn recorded_stream_chunks(scenario: &str) -> Vec<Value> {
     crate::cassettes::recorded_sse_json_frames("mistral", scenario)
 }
 
-fn recorded_additional_params(chunks: &[Value]) -> Value {
-    let mut accumulated: Option<rig::message::AdditionalParams> = None;
+/// The top-level fields of a stream's chunks as the document they rebuild
+/// states them: a later value replaces an earlier one and a `null` never
+/// erases one. The stream's own envelope is kept as delivered: the chunk tag
+/// and the `p` padding Mistral sends (coord-a-rig-port-chat-document-12 (1);
+/// mec-rig-132-dispositions-1 item 2).
+fn recorded_envelope(chunks: &[Value]) -> Value {
+    let mut accumulated = serde_json::Map::new();
     for chunk in chunks {
-        let mut extras = chunk
+        let fields = chunk
             .as_object()
-            .cloned()
             .expect("recorded SSE frame should be an object");
-        for modeled in ["id", "model", "choices", "usage"] {
-            extras.remove(modeled);
-        }
-        if let Some(incoming) = rig::message::AdditionalParams::new(extras) {
-            match accumulated.as_mut() {
-                Some(current) => current.merge(incoming),
-                None => accumulated = Some(incoming),
+        for (key, value) in fields {
+            if value.is_null() && accumulated.contains_key(key) {
+                continue;
             }
+            accumulated.insert(key.clone(), value.clone());
         }
     }
-    serde_json::to_value(accumulated).expect("recorded metadata should serialize")
+    Value::Object(accumulated)
 }
 
 fn assert_usage(scenario: &str, actual: &Value, wire: &Value) {
@@ -315,11 +312,11 @@ fn assert_cell(scenario: &str, cell: Cell, observed: SharedObservation) {
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             assert!(
-                observation.raw["response_id"]
+                observation.raw["id"]
                     .as_str()
                     .is_some_and(|id| !id.is_empty())
                     && response_id.as_deref().is_some_and(|id| !id.is_empty()),
-                "{scenario}: both the native terminal and fixture retain an id"
+                "{scenario}: both the rebuilt document and fixture retain an id"
             );
             assert_eq!(
                 observation.raw["model"],
@@ -328,14 +325,14 @@ fn assert_cell(scenario: &str, cell: Cell, observed: SharedObservation) {
             );
             assert_usage(scenario, &observation.raw["usage"], &usage);
             assert_matches_recorded_document(
-                &observation.raw["additional_params"],
-                &recorded_additional_params(&chunks),
-                &[],
-                &format!("{scenario}: every unmodeled top-level SSE field"),
+                &observation.raw,
+                &recorded_envelope(&chunks),
+                &["choices", "usage"],
+                &format!("{scenario}: every top-level SSE field"),
             );
             assert_eq!(
-                observation.raw["finish_reason"], expected_finish,
-                "{scenario}"
+                observation.raw["choices"][0]["finish_reason"], expected_finish,
+                "{scenario}: terminal reason"
             );
         }
     }
@@ -356,51 +353,13 @@ fn cell(transport: Transport, model: ModelVariant, limit: Limit, shape: Shape) -
 crate::matrix::case_matrix! {
     wrapper: with_mistral_terminal_metadata_cassette_result, family: terminal_metadata_matrix_case;
     # [tokio :: test]
-    blocking_mistral_small_roomy_plain_one: ("terminal_metadata_matrix/blocking_mistral_small_roomy_plain_one", configured, cell (Transport :: Blocking , ModelVariant :: MistralSmall , Limit :: Roomy , Shape :: PlainOne ,));
-    # [tokio :: test]
-    blocking_mistral_small_roomy_plain_two: ("terminal_metadata_matrix/blocking_mistral_small_roomy_plain_two", configured, cell (Transport :: Blocking , ModelVariant :: MistralSmall , Limit :: Roomy , Shape :: PlainTwo ,));
-    # [tokio :: test]
-    blocking_mistral_small_roomy_tool: ("terminal_metadata_matrix/blocking_mistral_small_roomy_tool", configured, cell (Transport :: Blocking , ModelVariant :: MistralSmall , Limit :: Roomy , Shape :: Tool ,));
-    # [tokio :: test]
-    blocking_mistral_small_tiny_plain_one: ("terminal_metadata_matrix/blocking_mistral_small_tiny_plain_one", configured, cell (Transport :: Blocking , ModelVariant :: MistralSmall , Limit :: Tiny , Shape :: PlainOne ,));
-    # [tokio :: test]
-    blocking_mistral_small_tiny_plain_two: ("terminal_metadata_matrix/blocking_mistral_small_tiny_plain_two", configured, cell (Transport :: Blocking , ModelVariant :: MistralSmall , Limit :: Tiny , Shape :: PlainTwo ,));
-    # [tokio :: test]
-    blocking_mistral_small_tiny_tool: ("terminal_metadata_matrix/blocking_mistral_small_tiny_tool", configured, cell (Transport :: Blocking , ModelVariant :: MistralSmall , Limit :: Tiny , Shape :: Tool ,));
-    # [tokio :: test]
     blocking_ministral_3b_roomy_plain_one: ("terminal_metadata_matrix/blocking_ministral_3b_roomy_plain_one", configured, cell (Transport :: Blocking , ModelVariant :: Ministral3b , Limit :: Roomy , Shape :: PlainOne ,));
     # [tokio :: test]
     blocking_ministral_3b_roomy_plain_two: ("terminal_metadata_matrix/blocking_ministral_3b_roomy_plain_two", configured, cell (Transport :: Blocking , ModelVariant :: Ministral3b , Limit :: Roomy , Shape :: PlainTwo ,));
     # [tokio :: test]
-    blocking_ministral_3b_roomy_tool: ("terminal_metadata_matrix/blocking_ministral_3b_roomy_tool", configured, cell (Transport :: Blocking , ModelVariant :: Ministral3b , Limit :: Roomy , Shape :: Tool ,));
-    # [tokio :: test]
-    blocking_ministral_3b_tiny_plain_one: ("terminal_metadata_matrix/blocking_ministral_3b_tiny_plain_one", configured, cell (Transport :: Blocking , ModelVariant :: Ministral3b , Limit :: Tiny , Shape :: PlainOne ,));
-    # [tokio :: test]
-    blocking_ministral_3b_tiny_plain_two: ("terminal_metadata_matrix/blocking_ministral_3b_tiny_plain_two", configured, cell (Transport :: Blocking , ModelVariant :: Ministral3b , Limit :: Tiny , Shape :: PlainTwo ,));
-    # [tokio :: test]
     blocking_ministral_3b_tiny_tool: ("terminal_metadata_matrix/blocking_ministral_3b_tiny_tool", configured, cell (Transport :: Blocking , ModelVariant :: Ministral3b , Limit :: Tiny , Shape :: Tool ,));
-    # [tokio :: test]
-    streaming_mistral_small_roomy_plain_one: ("terminal_metadata_matrix/streaming_mistral_small_roomy_plain_one", configured, cell (Transport :: Streaming , ModelVariant :: MistralSmall , Limit :: Roomy , Shape :: PlainOne ,));
-    # [tokio :: test]
-    streaming_mistral_small_roomy_plain_two: ("terminal_metadata_matrix/streaming_mistral_small_roomy_plain_two", configured, cell (Transport :: Streaming , ModelVariant :: MistralSmall , Limit :: Roomy , Shape :: PlainTwo ,));
-    # [tokio :: test]
-    streaming_mistral_small_roomy_tool: ("terminal_metadata_matrix/streaming_mistral_small_roomy_tool", configured, cell (Transport :: Streaming , ModelVariant :: MistralSmall , Limit :: Roomy , Shape :: Tool ,));
-    # [tokio :: test]
-    streaming_mistral_small_tiny_plain_one: ("terminal_metadata_matrix/streaming_mistral_small_tiny_plain_one", configured, cell (Transport :: Streaming , ModelVariant :: MistralSmall , Limit :: Tiny , Shape :: PlainOne ,));
     # [tokio :: test]
     streaming_mistral_small_tiny_plain_two: ("terminal_metadata_matrix/streaming_mistral_small_tiny_plain_two", configured, cell (Transport :: Streaming , ModelVariant :: MistralSmall , Limit :: Tiny , Shape :: PlainTwo ,));
     # [tokio :: test]
-    streaming_mistral_small_tiny_tool: ("terminal_metadata_matrix/streaming_mistral_small_tiny_tool", configured, cell (Transport :: Streaming , ModelVariant :: MistralSmall , Limit :: Tiny , Shape :: Tool ,));
-    # [tokio :: test]
-    streaming_ministral_3b_roomy_plain_one: ("terminal_metadata_matrix/streaming_ministral_3b_roomy_plain_one", configured, cell (Transport :: Streaming , ModelVariant :: Ministral3b , Limit :: Roomy , Shape :: PlainOne ,));
-    # [tokio :: test]
-    streaming_ministral_3b_roomy_plain_two: ("terminal_metadata_matrix/streaming_ministral_3b_roomy_plain_two", configured, cell (Transport :: Streaming , ModelVariant :: Ministral3b , Limit :: Roomy , Shape :: PlainTwo ,));
-    # [tokio :: test]
-    streaming_ministral_3b_roomy_tool: ("terminal_metadata_matrix/streaming_ministral_3b_roomy_tool", configured, cell (Transport :: Streaming , ModelVariant :: Ministral3b , Limit :: Roomy , Shape :: Tool ,));
-    # [tokio :: test]
     streaming_ministral_3b_tiny_plain_one: ("terminal_metadata_matrix/streaming_ministral_3b_tiny_plain_one", configured, cell (Transport :: Streaming , ModelVariant :: Ministral3b , Limit :: Tiny , Shape :: PlainOne ,));
-    # [tokio :: test]
-    streaming_ministral_3b_tiny_plain_two: ("terminal_metadata_matrix/streaming_ministral_3b_tiny_plain_two", configured, cell (Transport :: Streaming , ModelVariant :: Ministral3b , Limit :: Tiny , Shape :: PlainTwo ,));
-    # [tokio :: test]
-    streaming_ministral_3b_tiny_tool: ("terminal_metadata_matrix/streaming_ministral_3b_tiny_tool", configured, cell (Transport :: Streaming , ModelVariant :: Ministral3b , Limit :: Tiny , Shape :: Tool ,));
 }

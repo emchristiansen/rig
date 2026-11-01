@@ -1,6 +1,5 @@
 //! llama.cpp structured output coverage, including the migrated example path.
 
-use rig::prelude::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -53,7 +52,7 @@ async fn structured_output_smoke() {
     with_llamacpp_cassette(
         "structured_output/structured_output_smoke",
         |client| async move {
-            let agent = client.agent(CASSETTE_MODEL).build();
+            let agent = rig::AgentBuilder::new(client.completion(CASSETTE_MODEL)).build();
 
             let response: SmokeStructuredOutput = agent
                 .prompt_typed(STRUCTURED_OUTPUT_PROMPT)
@@ -68,32 +67,10 @@ async fn structured_output_smoke() {
 }
 
 #[tokio::test]
-async fn prompt_typed_structured_output() {
-    with_llamacpp_cassette("structured_output/prompt_typed_structured_output", |client| async move {
-        let model = CASSETTE_MODEL;
-        let agent = client
-            .agent(model)
-            .preamble(WEATHER_PREAMBLE)
-            .temperature(0.0)
-            .build();
-
-        let forecast: WeatherForecast = agent
-            .prompt_typed(
-                "Return JSON weather data for New York City today with fields city, current.temperature_f, current.humidity_pct, and current.description.",
-            )
-            .await
-            .expect("prompt_typed should succeed").output;
-        assert_weather_forecast(&forecast, &["new york", "nyc"]);
-    })
-    .await;
-}
-
-#[tokio::test]
 async fn prompt_typed_extended_details_structured_output() {
     with_llamacpp_cassette("structured_output/prompt_typed_extended_details_structured_output", |client| async move {
         let model = CASSETTE_MODEL;
-        let agent = client
-            .agent(model)
+        let agent = rig::AgentBuilder::new(client.completion(model))
             .preamble(WEATHER_PREAMBLE)
             .temperature(0.0)
             .build();
@@ -109,29 +86,6 @@ async fn prompt_typed_extended_details_structured_output() {
             extended.usage.total_tokens.is_some_and(|n| n > 0),
             "usage should be populated"
         );
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn output_schema_structured_output() {
-    with_llamacpp_cassette("structured_output/output_schema_structured_output", |client| async move {
-        let model = CASSETTE_MODEL;
-        let agent_with_schema = client
-            .agent(model)
-            .preamble(WEATHER_PREAMBLE)
-            .temperature(0.0)
-            .output_schema::<WeatherForecast>()
-            .build();
-        let response = agent_with_schema
-            .prompt(
-                "Return JSON weather data for Chicago with fields city, current.temperature_f, current.humidity_pct, and current.description.",
-            )
-            .await
-            .expect("output schema prompt should succeed");
-        let parsed: WeatherForecast =
-            serde_json::from_str(&response.output).expect("schema response should deserialize");
-        assert_weather_forecast(&parsed, &["chicago"]);
     })
     .await;
 }

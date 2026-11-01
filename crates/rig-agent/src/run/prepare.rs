@@ -11,13 +11,19 @@
 use std::collections::BTreeSet;
 
 use rig_core::completion::{
-    CompletionRequestBuilder, Document, Message, ProviderCapabilities, ToolDefinition,
+    CompletionRequest, Document, GenerationOptions, Message, ProviderCapabilities, ProviderOptions,
+    ToolDefinition,
 };
 use rig_core::error::ProviderError;
-use rig_core::message::ToolChoice;
+use rig_core::message::ToolName;
+use rig_core::structured_output::{
+    AUGMENTATION_SEPARATOR, OUTPUT_TOOL_DESCRIPTION, output_tool_augmentation,
+    output_tool_callable, output_tool_name, prompted_augmentation,
+};
 
 use super::output::OutputMode;
 use super::patch::RequestPatch;
+use super::policy::TurnPolicy;
 use super::spec::RunSpec;
 
 /// Why a request could not be prepared. Every variant is a local, pre-IO
@@ -36,7 +42,7 @@ pub enum PrepareError {
 
 impl From<PrepareError> for ProviderError {
     fn from(error: PrepareError) -> Self {
-        ProviderError::Request(error.to_string().into())
+        ProviderError::request(error.to_string())
     }
 }
 
@@ -44,9 +50,8 @@ impl From<PrepareError> for ProviderError {
 ///
 /// Apply it to a provider's request builder with [`apply`](Self::apply); the
 /// driver adds only what is its own (telemetry flags), then sends. The
-/// bookkeeping fields (`executable_tool_names`, `allowed_tool_names`,
-/// `output_tool_name`, `output_mode`) are what the driver feeds back into the
-/// run when the response arrives.
+/// turn's [`policy`](Self::policy) is what the driver feeds back into the run
+/// when the response arrives.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PreparedRequest {
     /// Prior messages to send: the effective (possibly augmented) preamble as a
@@ -66,41 +71,47 @@ pub struct PreparedRequest {
     /// Effective provider passthrough parameters (patch shallow-merged over
     /// spec when both are objects).
     pub additional_params: Option<serde_json::Value>,
-    /// Effective tool choice (patch over spec).
-    pub tool_choice: Option<ToolChoice>,
+    /// The spec's portable generation options.
+    #[serde(default, skip_serializing_if = "GenerationOptions::is_default")]
+    pub options: GenerationOptions,
+    /// The spec's typed per-provider options.
+    #[serde(default, skip_serializing_if = "ProviderOptions::is_empty")]
+    pub provider_options: ProviderOptions,
     /// The provider-native structured-output constraint, set only when the
     /// resolved mode is [`OutputMode::Native`].
     pub output_schema: Option<rig_core::schemars::Schema>,
     /// The mode this turn actually runs in (never [`OutputMode::Auto`]).
     pub output_mode: OutputMode,
-    /// Names of the real, dispatchable tools advertised this turn.
-    pub executable_tool_names: BTreeSet<String>,
-    /// Names the model may call without it being an invalid tool call: the
-    /// executable tools narrowed by the tool choice, plus the output tool.
-    pub allowed_tool_names: BTreeSet<String>,
-    /// In Tool output mode, the synthetic output tool's name (allowed but never
-    /// executable); reuse it as `committed_output_tool` on later turns.
-    pub output_tool_name: Option<String>,
+    /// The turn's tool policy: executable tools, effective tool choice
+    /// (patch over spec), output tool and the names the choice allows.
+    pub policy: TurnPolicy,
+    /// The spec's [`RunSpec::accept_unknown_finish_reasons`].
+    #[serde(default)]
+    pub accept_unknown_finish_reasons: bool,
 }
 
 impl PreparedRequest {
-    /// Apply every prepared field to a provider request builder, in the
-    /// protocol's canonical order. The builder keeps its prompt; the prepared
-    /// sampling fields (`temperature`, `max_tokens`, `output_schema`)
-    /// overwrite whatever the driver set on it, while messages, documents,
-    /// tools and additional parameters accumulate.
-    pub fn apply<M>(self, builder: CompletionRequestBuilder<M>) -> CompletionRequestBuilder<M> {
-        let builder = builder
+    /// Apply every prepared field to `request`, in the protocol's canonical
+    /// order. The request keeps its prompt last; the prepared sampling fields
+    /// (`temperature`, `max_tokens`, `output_schema`) and
+    /// `accept_unknown_finish_reasons` overwrite whatever the driver set on
+    /// it, while messages, documents, tools and additional parameters
+    /// accumulate.
+    pub fn apply(self, mut request: CompletionRequest) -> CompletionRequest {
+        request.accept_unknown_finish_reasons = self.accept_unknown_finish_reasons;
+        let request = request
             .messages(self.chat_history)
             .temperature(self.temperature)
             .max_tokens(self.max_tokens)
             .additional_params(self.additional_params)
+            .options(self.options)
+            .provider_options(self.provider_options)
             .documents(self.documents)
             .tools(self.tools)
             .output_schema(self.output_schema);
-        match self.tool_choice {
-            Some(tool_choice) => builder.tool_choice(tool_choice),
-            None => builder,
+        match self.policy.tool_choice() {
+            Some(tool_choice) => request.tool_choice(tool_choice.clone()),
+            None => request,
         }
     }
 }
@@ -154,7 +165,7 @@ pub fn prepare_request(
     // Reserve output names against the full tool set because filtered tools may
     // return on later turns while the output name remains pinned.
     let pre_filter_tool_names: Option<BTreeSet<String>> =
-        active_tools.map(|_| tools.iter().map(|tool| tool.name.clone()).collect());
+        active_tools.map(|_| tools.iter().map(|tool| tool.name.to_string()).collect());
 
     // Filter before computing executable names so request advertisements and
     // runtime validation agree. Synthetic output remains independent of this filter.
@@ -162,29 +173,28 @@ pub fn prepare_request(
     if let Some(allow) = active_tools {
         if let Some(missing) = allow
             .iter()
-            .find(|name| !tooldefs.iter().any(|tool| &tool.name == *name))
+            .find(|name| !tooldefs.iter().any(|tool| tool.name == **name))
         {
             return Err(PrepareError::Request(format!(
                 "active_tools requested tool `{missing}`, which is not available this turn"
             )));
         }
         let allowed: BTreeSet<String> = allow.iter().cloned().collect();
-        tooldefs.retain(|tool| allowed.contains(&tool.name));
+        tooldefs.retain(|tool| allowed.contains(tool.name.as_str()));
     }
 
     // The synthetic output tool must never enter the executable set.
     let executable_tool_names: BTreeSet<String> =
-        tooldefs.iter().map(|tool| tool.name.clone()).collect();
+        tooldefs.iter().map(|tool| tool.name.to_string()).collect();
 
     // Resolve against the actual candidate name so Specific choices can permit
     // the output tool. A committed name prevents changing output mode mid-run.
     let candidate_output_tool = committed_output_tool.map_or_else(
         || {
-            pick_output_tool_name(
-                pre_filter_tool_names
-                    .as_ref()
-                    .unwrap_or(&executable_tool_names),
-            )
+            let taken = pre_filter_tool_names
+                .as_ref()
+                .unwrap_or(&executable_tool_names);
+            output_tool_name(|name| taken.contains(name))
         },
         str::to_owned,
     );
@@ -232,27 +242,16 @@ pub fn prepare_request(
         let base = preamble.map(str::to_owned);
         let instruction = match &resolved_mode {
             OutputMode::Tool if augment_output_preamble => {
-                output_tool_name.as_deref().map(|name| {
-                    format!(
-                        "When you have gathered enough information to answer, call the `{name}` \
-                     tool exactly once with your final answer. Its arguments are the structured \
-                     result and must satisfy the required schema. Do not return the final answer \
-                     as plain text."
-                    )
-                })
+                output_tool_name.as_deref().map(output_tool_augmentation)
             }
             OutputMode::Tool => None,
             OutputMode::Prompted => output_schema.map(|schema| {
-                let schema_json = rig_core::json_utils::to_canonical_string(schema);
-                format!(
-                    "Respond with ONLY a single JSON object that conforms to this JSON Schema. \
-                     Do not include any prose, explanation, or markdown code fences.\n{schema_json}"
-                )
+                prompted_augmentation(&rig_core::json_utils::to_canonical_string(schema))
             }),
             OutputMode::Native | OutputMode::Auto => None,
         };
         match (base, instruction) {
-            (Some(b), Some(i)) => Some(format!("{b}\n\n{i}")),
+            (Some(b), Some(i)) => Some(format!("{b}{AUGMENTATION_SEPARATOR}{i}")),
             (Some(b), None) => Some(b),
             (None, Some(i)) => Some(i),
             (None, None) => None,
@@ -273,12 +272,11 @@ pub fn prepare_request(
 
     if let (Some(name), Some(schema)) = (&output_tool_name, output_schema) {
         tooldefs.push(ToolDefinition {
-            name: name.clone(),
+            name: ToolName::new(name.clone()).map_err(|_| {
+                PrepareError::Request("the output tool name cannot be empty".to_string())
+            })?,
             description: output_tool_description
-                .unwrap_or(
-                    "Call this tool exactly once with your final answer when you are done. \
-                     Its arguments are the structured result and must satisfy the output schema.",
-                )
+                .unwrap_or(OUTPUT_TOOL_DESCRIPTION)
                 .to_string(),
             parameters: schema.clone(),
         });
@@ -298,17 +296,12 @@ pub fn prepare_request(
     }
 
     // Reject impossible choices before spending a provider request.
-    let mut allowed_tool_names = allowed_tool_names_for_choice(
-        &executable_tool_names,
-        tool_choice,
-        output_tool_name.as_deref(),
+    let policy = TurnPolicy::resolve(
+        executable_tool_names,
+        tool_choice.cloned(),
+        output_tool_name,
         pre_filter_tool_names.as_ref(),
     )?;
-    // The output tool must be allowed (so it isn't flagged as an invalid tool
-    // call) even though it is not executable.
-    if let Some(name) = &output_tool_name {
-        allowed_tool_names.insert(name.clone());
-    }
 
     Ok(PreparedRequest {
         chat_history,
@@ -317,28 +310,13 @@ pub fn prepare_request(
         temperature,
         max_tokens,
         additional_params,
-        tool_choice: tool_choice.cloned(),
+        options: spec.options.clone(),
+        provider_options: spec.provider_options.clone(),
         output_schema: native_schema,
         output_mode: resolved_mode,
-        executable_tool_names,
-        allowed_tool_names,
-        output_tool_name,
+        policy,
+        accept_unknown_finish_reasons: spec.accept_unknown_finish_reasons,
     })
-}
-
-/// Base name of the synthetic output tool used by [`OutputMode::Tool`].
-const DEFAULT_OUTPUT_TOOL_NAME: &str = "final_result";
-
-/// Return whether tool choice permits the named output tool. Unspecified, auto,
-/// required, and specific choices naming it permit the call.
-fn output_tool_callable(tool_choice: Option<&ToolChoice>, output_tool_name: &str) -> bool {
-    match tool_choice {
-        None | Some(ToolChoice::Auto | ToolChoice::Required) => true,
-        Some(ToolChoice::None) => false,
-        Some(ToolChoice::Specific { function_names }) => function_names
-            .iter()
-            .any(|name| name.as_str() == output_tool_name),
-    }
 }
 
 /// Resolve to a non-auto mode. Without a schema, use native output. Auto selects
@@ -367,96 +345,6 @@ fn resolve_output_mode(
         }
         OutputMode::Auto => OutputMode::Native,
     }
-}
-
-/// Pick a collision-safe name for the synthetic output tool, never shadowing a
-/// real executable tool (which would make the model's output call dispatchable).
-fn pick_output_tool_name(executable_tool_names: &BTreeSet<String>) -> String {
-    let mut name = DEFAULT_OUTPUT_TOOL_NAME.to_string();
-    let mut suffix = 1u32;
-    while executable_tool_names.contains(&name) {
-        name = format!("{DEFAULT_OUTPUT_TOOL_NAME}_{suffix}");
-        suffix += 1;
-    }
-    name
-}
-
-/// Validate tool choice and return permitted names. Auto and required choices
-/// return executable names; specific choices return their requested names,
-/// including the output tool if named. None returns an empty set.
-/// Errors on required choice without any advertised tool, empty specific choices,
-/// or names absent from executable tools and the output tool. Supply pre-filter
-/// names only when an allow-list was applied, for filter-specific diagnostics.
-pub fn allowed_tool_names_for_choice(
-    executable_tool_names: &BTreeSet<String>,
-    tool_choice: Option<&ToolChoice>,
-    output_tool_name: Option<&str>,
-    pre_filter_tool_names: Option<&BTreeSet<String>>,
-) -> Result<BTreeSet<String>, PrepareError> {
-    let has_advertised_tool = !executable_tool_names.is_empty() || output_tool_name.is_some();
-    let hint = |active_tools_caused: bool| {
-        if active_tools_caused {
-            " A per-turn `active_tools` allow-list narrowed the advertised tools this turn; \
-             set a compatible `tool_choice` in the same `RequestPatch`, or widen `active_tools`."
-        } else {
-            ""
-        }
-    };
-    let advertised = || {
-        executable_tool_names
-            .iter()
-            .map(String::as_str)
-            .chain(output_tool_name)
-            .collect::<Vec<_>>()
-    };
-
-    let allowed = match tool_choice {
-        None | Some(ToolChoice::Auto) => executable_tool_names.clone(),
-        Some(ToolChoice::Required) => {
-            if !has_advertised_tool {
-                let active_tools_caused = pre_filter_tool_names.is_some_and(|pf| !pf.is_empty());
-                return Err(PrepareError::Request(format!(
-                    "ToolChoice::Required forces the model to call a tool, but no tools are \
-                     advertised this turn.{}",
-                    hint(active_tools_caused)
-                )));
-            }
-            executable_tool_names.clone()
-        }
-        Some(ToolChoice::None) => BTreeSet::new(),
-        Some(ToolChoice::Specific { function_names }) => {
-            if function_names.is_empty() {
-                return Err(PrepareError::Request(
-                    "ToolChoice::Specific requires at least one function name".to_string(),
-                ));
-            }
-
-            let requested = function_names.iter().cloned().collect::<BTreeSet<String>>();
-            let missing = function_names
-                .iter()
-                .map(String::as_str)
-                .filter(|name| {
-                    !executable_tool_names.contains(*name) && Some(*name) != output_tool_name
-                })
-                .collect::<Vec<_>>();
-
-            if !missing.is_empty() {
-                // Attribute missing names to filtering only if they existed before it.
-                let active_tools_caused = pre_filter_tool_names
-                    .is_some_and(|pf| missing.iter().any(|name| pf.contains(*name)));
-                return Err(PrepareError::Request(format!(
-                    "ToolChoice::Specific requested tool names not advertised this turn: \
-                     {missing:?}. Advertised: {:?}.{}",
-                    advertised(),
-                    hint(active_tools_caused)
-                )));
-            }
-
-            requested
-        }
-    };
-
-    Ok(allowed)
 }
 
 #[cfg(test)]

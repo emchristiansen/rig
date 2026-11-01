@@ -1,84 +1,62 @@
 //! The route's options, reached the way a caller reaches them.
 //!
-//! `Bound<OpenAI>::completion` yields a `Bound<OpenAiWire>`, so every
-//! per-route option has to be reachable through `Bound::map_wire` or it is
-//! not reachable at all. Each test below asserts on the *encoded request*:
+//! `OpenAI::completion` yields an `OpenAiWire`, so every per-route option
+//! has to be reachable on that wire or it is not reachable at all. Each test below asserts on the *encoded request*:
 //! an option that only sets a field the encoder ignores is not forwarded.
 
 use super::*;
 use crate::completion::ToolDefinition;
-use crate::driver::Bound;
 use crate::message::{AssistantContent, Message, ToolResultContent, UserContent};
-
-use super::super::OPENROUTER;
+use crate::test_utils::json_body;
 
 /// A turn with a system prompt, a tool and a tool result, so each option
 /// under test has something in the body it could change.
 fn request() -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        chat_history: vec![
-            Message::system("be brief"),
-            "probe".into(),
-            Message::Assistant {
-                id: None,
-                content: vec![AssistantContent::tool_call(
-                    "call_1",
-                    "lookup",
-                    serde_json::json!({"q": "x"}),
-                )],
-            },
-            Message::User {
-                content: vec![UserContent::tool_result_from_wire(
-                    "call_1",
-                    "lookup",
-                    vec![ToolResultContent::text("the answer")],
-                )],
-            },
-        ],
-        documents: vec![],
-        tools: vec![ToolDefinition {
-            name: "lookup".to_owned(),
-            description: "look something up".to_owned(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {"q": {"type": "string"}}
-            }),
-        }],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    }
+    CompletionRequest::from(vec![
+        Message::system("be brief"),
+        "probe".into(),
+        Message::Assistant(crate::message::AssistantMessage::new(vec![
+            AssistantContent::tool_call(
+                "call_1",
+                crate::message::ToolName::new("lookup").expect("tool name"),
+                serde_json::json!({"q": "x"}),
+            ),
+        ])),
+        Message::User {
+            content: vec![UserContent::tool_result(
+                crate::message::CallId::from_wire("call_1"),
+                crate::message::ToolName::new("lookup").expect("tool name"),
+                vec![ToolResultContent::text("the answer")],
+            )],
+        },
+    ])
+    .tools(vec![ToolDefinition {
+        name: crate::message::ToolName::new("lookup").expect("tool name"),
+        description: "look something up".to_owned(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {"q": {"type": "string"}}
+        }),
+    }])
 }
 
-/// What `provider`'s route sends after `option` went through
-/// [`Bound::map_wire`].
-fn body(provider: OpenAI, option: impl FnOnce(OpenAiWire) -> OpenAiWire) -> serde_json::Value {
+/// What `provider`'s route sends after `option` rewrote its wire.
+fn body(
+    provider: OpenAIConfig,
+    option: impl FnOnce(OpenAiWire) -> OpenAiWire,
+) -> serde_json::Value {
     body_with_request(provider, option, request())
 }
 
 fn body_with_request(
-    provider: OpenAI,
+    provider: OpenAIConfig,
     option: impl FnOnce(OpenAiWire) -> OpenAiWire,
     request: CompletionRequest,
 ) -> serde_json::Value {
-    let bound = Bound::new(provider, ())
-        .completion("gpt-5.2")
-        .map_wire(option);
-    let encoded = bound
-        .wire
+    let encoded = option(provider.completion("gpt-5.2"))
         .encode(request, Mode::Unary)
         .expect("the request encodes");
-    let [request] = encoded.requests.as_slice() else {
-        panic!("a completion route sends one request");
-    };
-    match request.body() {
-        Body::Bytes(bytes) => serde_json::from_slice(bytes).expect("the body is JSON"),
-        Body::Multipart(_) => panic!("neither completion route sends a multipart body"),
-    }
+    json_body(&encoded.request)
 }
 
 /// The wire unchanged, as the baseline every assertion compares against.
@@ -88,7 +66,11 @@ fn untouched(wire: OpenAiWire) -> OpenAiWire {
 
 /// `option` changes what `changes` sends and leaves `unchanged` as it was —
 /// a route without the option is a no-op, not a panic and not a type error.
-fn only_on(changes: OpenAI, unchanged: OpenAI, option: impl Fn(OpenAiWire) -> OpenAiWire + Copy) {
+fn only_on(
+    changes: OpenAIConfig,
+    unchanged: OpenAIConfig,
+    option: impl Fn(OpenAiWire) -> OpenAiWire + Copy,
+) {
     assert_ne!(
         body(changes.clone(), option),
         body(changes, untouched),
@@ -101,12 +83,12 @@ fn only_on(changes: OpenAI, unchanged: OpenAI, option: impl Fn(OpenAiWire) -> Op
     );
 }
 
-fn chat() -> OpenAI {
-    OpenAI::new("sk-test").with_route(Route::Chat)
+fn chat() -> OpenAIConfig {
+    OpenAIConfig::new("sk-test").with_route(Route::Chat)
 }
 
-fn responses() -> OpenAI {
-    OpenAI::new("sk-test").with_route(Route::Responses)
+fn responses() -> OpenAIConfig {
+    OpenAIConfig::new("sk-test").with_route(Route::Responses)
 }
 
 fn tool() -> ResponsesToolDefinition {
@@ -142,61 +124,6 @@ fn map_wire_reaches_tool_result_array_content_on_the_chat_route_only() {
     );
 }
 
-/// Prompt caching is OpenRouter's `cache_control` on the chat body, so that
-/// is the dialect whose request it changes.
-#[test]
-fn map_wire_reaches_prompt_caching_on_the_chat_route_only() {
-    only_on(
-        OpenAI::with_key(&OPENROUTER, "sk-test").with_route(Route::Chat),
-        OpenAI::with_key(&OPENROUTER, "sk-test").with_route(Route::Responses),
-        OpenAiWire::with_prompt_caching,
-    );
-}
-
-#[test]
-fn changed_system_prefix_changes_both_encoded_openai_routes() {
-    for provider in [chat(), responses()] {
-        let original = request();
-        let mut changed = original.clone();
-        *changed.chat_history.first_mut().expect("system message") =
-            Message::system("different task rules");
-        assert_ne!(
-            body_with_request(provider.clone(), untouched, original),
-            body_with_request(provider, untouched, changed)
-        );
-    }
-}
-
-#[test]
-fn encoded_cache_affinity_and_retention_preserve_configured_values() {
-    for provider in [chat(), responses()] {
-        for key in ["first-task-key", "changed-task-key"] {
-            let mut request = request();
-            request.additional_params =
-                Some(serde_json::json!({"prompt_cache_key": key, "prompt_cache_retention": "24h"}));
-            let encoded = body_with_request(provider.clone(), untouched, request);
-            assert_eq!(
-                encoded.get("prompt_cache_key"),
-                Some(&serde_json::json!(key))
-            );
-            assert_eq!(
-                encoded.get("prompt_cache_retention"),
-                Some(&serde_json::json!("24h"))
-            );
-        }
-    }
-}
-
-#[test]
-fn openrouter_cache_controls_do_not_change_openai_requests() {
-    for provider in [chat(), responses()] {
-        assert_eq!(
-            body(provider.clone(), OpenAiWire::with_prompt_caching),
-            body(provider, untouched),
-        );
-    }
-}
-
 #[test]
 fn map_wire_reaches_a_wire_level_tool_on_the_responses_route_only() {
     only_on(responses(), chat(), |wire| wire.with_tool(tool()));
@@ -229,7 +156,44 @@ fn map_wire_reaches_system_instructions_as_messages_on_the_responses_route_only(
     );
 }
 
-/// Synthetic hooks test extension dispatch and precedence, which recorded provider traffic cannot exercise.
+/// Local request encoding must distinguish system instructions before any transport.
+#[test]
+fn changed_system_prefix_changes_both_encoded_openai_routes() {
+    for provider in [chat(), responses()] {
+        let original = request();
+        let mut changed = original.clone();
+        *changed.chat_history.first_mut().expect("system message") =
+            Message::system("different task rules");
+        assert_ne!(
+            body_with_request(provider.clone(), untouched, original),
+            body_with_request(provider, untouched, changed)
+        );
+    }
+}
+
+/// Local encoding preserves caller-supplied cache fields without a provider response.
+#[test]
+fn encoded_cache_affinity_and_retention_preserve_configured_values() {
+    for provider in [chat(), responses()] {
+        for key in ["first-task-key", "changed-task-key"] {
+            let mut request = request();
+            request.additional_params =
+                Some(serde_json::json!({"prompt_cache_key": key, "prompt_cache_retention": "24h"}));
+            let encoded = body_with_request(provider.clone(), untouched, request);
+            assert_eq!(
+                encoded.get("prompt_cache_key"),
+                Some(&serde_json::json!(key))
+            );
+            assert_eq!(
+                encoded.get("prompt_cache_retention"),
+                Some(&serde_json::json!("24h"))
+            );
+        }
+    }
+}
+
+/// Synthetic hooks test extension dispatch and precedence, which recorded
+/// provider traffic cannot exercise.
 #[test]
 fn dialect_hooks_apply_to_both_routes_without_provider_identity() {
     use super::super::{Dialect, DialectHooks, Quirks};
@@ -250,12 +214,13 @@ fn dialect_hooks_apply_to_both_routes_without_provider_identity() {
             assert_eq!(provider.api_key.expose(), "regional");
             assert!(!request.chat_history.is_empty());
             assert_eq!(
-                builder.headers_ref().unwrap()[http::header::AUTHORIZATION],
+                builder.headers_ref().expect("valid authenticated headers")
+                    [http::header::AUTHORIZATION],
                 "Bearer regional"
             );
             builder
                 .headers_mut()
-                .unwrap()
+                .expect("valid authenticated headers")
                 .remove(http::header::AUTHORIZATION);
             builder
                 .header(http::header::AUTHORIZATION, "custom credential")
@@ -271,10 +236,10 @@ fn dialect_hooks_apply_to_both_routes_without_provider_identity() {
         ..Dialect::gateway("custom", "https://default.invalid", "UNUSED_KEY")
     };
     assert_eq!(
-        OpenAI::with_key(&dialect, "other").base_url,
+        OpenAIConfig::with_key(&dialect, "other").base_url,
         "https://default.invalid"
     );
-    let provider = OpenAI::with_key(&dialect, "regional");
+    let provider = OpenAIConfig::with_key(&dialect, "regional");
     assert_eq!(provider.base_url, "https://region.invalid");
     assert!(matches!(
         provider.completion("responses-model"),
@@ -299,12 +264,12 @@ fn dialect_hooks_apply_to_both_routes_without_provider_identity() {
                 },
             ] {
                 for mode in [Mode::Unary, Mode::Streaming] {
-                    let encoded = wire.encode(request(), mode).unwrap();
+                    let encoded = wire
+                        .encode(request(), mode)
+                        .expect("the hooked request encodes");
                     calls += 1;
                     assert_eq!(ENVELOPES.load(Ordering::SeqCst), calls);
-                    let [request] = encoded.requests.as_slice() else {
-                        panic!("one request")
-                    };
+                    let request = &encoded.request;
                     assert_eq!(request.uri().host(), Some("explicit.invalid"));
                     assert_eq!(
                         request.uri().path(),
@@ -336,7 +301,8 @@ fn dialect_hooks_apply_to_both_routes_without_provider_identity() {
     );
 }
 
-/// A synthetic dialect isolates the default capability from provider identity; no server is involved.
+/// A synthetic dialect isolates the default capability from provider identity;
+/// no server is involved.
 #[test]
 fn responses_strict_tools_default_is_an_independent_capability() {
     use super::super::{Dialect, OPENAI, Quirks, ResponsesQuirks};
@@ -350,18 +316,18 @@ fn responses_strict_tools_default_is_an_independent_capability() {
         },
         ..OPENAI
     };
-    let provider = OpenAI::with_key(&dialect, "test");
+    let provider = OpenAIConfig::with_key(&dialect, "test");
     assert!(provider.responses("model").strict_tools);
     assert!(!provider.chat("model").strict_tools);
     let strict = body(provider, untouched);
-    let ordinary = body(OpenAI::new("test"), untouched);
+    let ordinary = body(OpenAIConfig::new("test"), untouched);
     assert_eq!(strict["tools"][0]["strict"], true);
     assert_eq!(
         strict["tools"][0]["parameters"]["additionalProperties"],
         false
     );
     assert_ne!(ordinary["tools"][0]["strict"], true);
-    assert!(!OpenAI::new("test").responses("model").strict_tools);
+    assert!(!OpenAIConfig::new("test").responses("model").strict_tools);
 }
 
 /// Invalid local headers fail before transport, so there is no cassette interaction.
@@ -374,7 +340,7 @@ fn completion_envelope_builder_errors_are_returned_on_both_routes() {
         completion_envelope: Some(|_, _, builder| builder.header("invalid\nname", "value")),
         modality_envelope: None,
     };
-    let provider = OpenAI::with_key(
+    let provider = OpenAIConfig::with_key(
         &Dialect {
             quirks: Quirks {
                 hooks: Some(&HOOKS),
@@ -394,4 +360,110 @@ fn completion_envelope_builder_errors_are_returned_on_both_routes() {
         serde_json::to_value(&provider).is_err(),
         "a registered name cannot hide changed hooks"
     );
+}
+
+/// The document `frames` rebuild on `reassembler`.
+fn rebuilt<R: Reassemble<WireFrame>>(
+    mut reassembler: R,
+    frames: &[serde_json::Value],
+) -> serde_json::Value {
+    for frame in frames {
+        reassembler.absorb(&WireFrame::Text(frame.to_string()));
+    }
+    reassembler.finish()
+}
+
+/// Each route rebuilds a streamed reply with its own wire's reassembler,
+/// and a default one is the chat route's, as the default route is.
+/// The Responses frame carries the `created_at` and `model` the strict
+/// Responses reader requires; without them its reassembler rebuilds nothing.
+#[test]
+fn each_route_rebuilds_its_own_document() {
+    let chunk = serde_json::json!({
+        "id": "chatcmpl-1",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": "model",
+        "choices": [{"index": 0, "delta": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}]
+    });
+    let completed = serde_json::json!({
+        "type": "response.completed",
+        "sequence_number": 0,
+        "response": {
+            "id": "resp_1",
+            "object": "response",
+            "created_at": 1,
+            "model": "model",
+            "status": "completed",
+            "output": []
+        }
+    });
+    for (provider, frame) in [(chat(), &chunk), (responses(), &completed)] {
+        let wire = OpenAiWire::new(provider, "model");
+        let own = match &wire {
+            OpenAiWire::Chat(chat) => rebuilt(chat.reassembler(), std::slice::from_ref(frame)),
+            OpenAiWire::Responses(responses) => {
+                rebuilt(responses.reassembler(), std::slice::from_ref(frame))
+            }
+        };
+        let routed = rebuilt(wire.reassembler(), std::slice::from_ref(frame));
+        assert!(!routed.is_null(), "{routed}");
+        assert_eq!(routed, own);
+    }
+    assert!(matches!(
+        OpenAiReassembler::default(),
+        OpenAiReassembler::Chat(_)
+    ));
+    assert_eq!(
+        rebuilt(OpenAiReassembler::default(), std::slice::from_ref(&chunk)),
+        rebuilt(<Chat as Wire>::Reassembler::default(), &[chunk]),
+    );
+}
+
+/// Each route answers with its own wire's decoder when the driver asks for
+/// one without naming a mode, as it does for its reassembler.
+#[test]
+fn each_route_decodes_with_its_own_decoder() {
+    assert!(matches!(
+        OpenAiWire::new(chat(), "model").decoder(),
+        OpenAiDecoder::Chat(_)
+    ));
+    assert!(matches!(
+        OpenAiWire::new(responses(), "model").decoder(),
+        OpenAiDecoder::Responses(_)
+    ));
+}
+
+/// An event classified by the other route's decoder is not this route's to
+/// read: it neither ends nor fails the reply and writes nothing into it,
+/// even when it is an end or a failure on its own route.
+#[test]
+fn a_decoder_passes_over_the_other_routes_event() {
+    let cases = [
+        (
+            chat(),
+            OpenAiEvent::Responses(ResponsesEvent::Failure("other route".to_owned())),
+        ),
+        (chat(), OpenAiEvent::Responses(ResponsesEvent::Sentinel)),
+        (responses(), OpenAiEvent::Chat(ChatEvent::Done)),
+        (
+            responses(),
+            OpenAiEvent::Chat(ChatEvent::BareText("other route".to_owned())),
+        ),
+    ];
+    for (provider, event) in cases {
+        let wire = OpenAiWire::new(provider, "model");
+        let request = CompletionRequest::new("probe");
+        let shared = std::sync::Mutex::new(crate::wire::Shared::<Completion>::new(
+            crate::test_utils::fold_for(&request, &wire, Mode::Streaming),
+        ));
+        let mut decoder = wire.decoder_in(Mode::Streaming);
+        let flow = decoder
+            .decode(event, Out::new(&shared))
+            .expect("the other route's event is no error on this one");
+        assert!(matches!(flow, Flow::More), "{flow:?}");
+        let shared = shared.lock().expect("reply state");
+        assert!(shared.items.is_empty());
+        assert!(shared.end.is_none());
+    }
 }

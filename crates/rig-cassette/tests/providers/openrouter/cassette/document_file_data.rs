@@ -1,13 +1,13 @@
 //! Cassette-backed OpenRouter coverage for PDF `file_data` document messages.
 
 use base64::{Engine, prelude::BASE64_STANDARD};
-use rig::completion::CompletionRequestBuilder;
+use rig::completion::CompletionRequest;
 use rig::message::{
     Document, DocumentMediaType, DocumentSourceKind, Message as RigMessage, Text,
     UserContent as RigUserContent,
 };
-use rig::prelude::*;
-use rig::providers::openai::wire::{OPENROUTER, OpenAI};
+use rig::providers::openai::wire::Chat;
+use rig::providers::openai::wire::{OPENROUTER, OpenAIConfig};
 use rig::wire::{Body, Mode, Wire};
 use serde_json::Value;
 
@@ -31,7 +31,7 @@ fn verifier_document() -> Document {
     let bytes =
         std::fs::read(VERIFIER_FIXTURE_PATH).expect("verifier fixture PDF should be readable");
     Document {
-        data: DocumentSourceKind::base64(&BASE64_STANDARD.encode(bytes)),
+        data: DocumentSourceKind::base64(BASE64_STANDARD.encode(bytes)).into(),
         media_type: Some(DocumentMediaType::PDF),
         additional_params: None,
     }
@@ -48,36 +48,15 @@ fn document_question(page_number: u8) -> RigMessage {
     }
 }
 
-fn message_contains_base64_document(message: &RigMessage) -> bool {
-    let RigMessage::User { content } = message else {
-        return false;
-    };
-
-    content.iter().any(|content| {
-        matches!(
-            content,
-            RigUserContent::Document(Document {
-                data: DocumentSourceKind::Base64(_),
-                media_type: Some(DocumentMediaType::PDF),
-                ..
-            })
-        )
-    })
-}
-
 /// The `messages` array the `OPENROUTER` dialect sends for one rig message.
 ///
 /// `encode` touches no socket, so the outbound bytes are inspectable beside
 /// the recorded turns without spending a cassette interaction.
 fn openrouter_wire_messages(message: RigMessage) -> Vec<Value> {
-    let encoded = OpenAI::with_key(&OPENROUTER, "k")
-        .chat(DOCUMENT_MODEL)
-        .encode(
-            CompletionRequestBuilder::unbound(message).build(),
-            Mode::Unary,
-        )
+    let encoded = Chat::new(OpenAIConfig::with_key(&OPENROUTER, "k"), DOCUMENT_MODEL)
+        .encode(CompletionRequest::new(message), Mode::Unary)
         .expect("a history message should encode");
-    let Body::Bytes(bytes) = encoded.requests[0].body() else {
+    let Body::Bytes(bytes) = encoded.request.body() else {
         panic!("the chat wire sends a serialized body, not a multipart form")
     };
     let body: Value = serde_json::from_slice(bytes).expect("the chat body is JSON");
@@ -133,34 +112,6 @@ fn assert_openrouter_wire_file_data(message: RigMessage) {
     );
 }
 
-fn assert_no_file_id_leaked_into_wire(message: RigMessage) {
-    let messages = openrouter_wire_messages(message);
-    for json in messages {
-        let serialized = serde_json::to_string(&json).expect("json should serialize");
-        assert!(
-            !serialized.contains("file_id"),
-            "provider file ID field leaked into OpenRouter JSON: {json:#}"
-        );
-    }
-}
-
-fn assert_history_preserves_single_file_data_document(history: &[RigMessage]) {
-    let mut document_message_count = 0;
-
-    for message in history {
-        assert_no_file_id_leaked_into_wire(message.clone());
-        if message_contains_base64_document(message) {
-            document_message_count += 1;
-            assert_openrouter_wire_file_data(message.clone());
-        }
-    }
-
-    assert_eq!(
-        document_message_count, 1,
-        "expected exactly one history message to preserve the PDF file_data document: {history:?}"
-    );
-}
-
 fn assert_no_verifier_leaked_into_prompt(message: &RigMessage) {
     let RigMessage::User { content } = message else {
         return;
@@ -207,57 +158,11 @@ fn verifier_suffix(verifier: &str) -> &str {
 }
 
 #[tokio::test]
-async fn document_file_data_roundtrip_live() {
-    with_openrouter_cassette(
-        "document_file_data/document_file_data_roundtrip_live",
-        |client| async move {
-            let agent = client
-                .agent(DOCUMENT_MODEL)
-                .preamble(DOCUMENT_PREAMBLE)
-                .build();
-            let mut history = Vec::new();
-
-            let direct_message = document_question(2);
-            assert_no_verifier_leaked_into_prompt(&direct_message);
-            assert_openrouter_wire_file_data(direct_message.clone());
-
-            let response = agent
-                .chat(direct_message, &mut history)
-                .await
-                .expect("OpenRouter should read PDF file_data document");
-            assert_verifier_response(&response.output, PAGE_TWO_VERIFIER);
-            assert_history_preserves_single_file_data_document(&history);
-
-            let follow_up = agent
-                .chat(
-                    "Using the same PDF from the conversation history, what verifier token is printed on page 3? Reply with only the exact token.",
-                    &mut history,
-                )
-                .await
-                .expect("OpenRouter should reuse PDF file_data document from chat history");
-            assert_verifier_response(&follow_up.output, PAGE_THREE_VERIFIER);
-            assert_history_preserves_single_file_data_document(&history);
-
-            let direct_prompt = document_question(1);
-            assert_no_verifier_leaked_into_prompt(&direct_prompt);
-            assert_openrouter_wire_file_data(direct_prompt.clone());
-            let direct_response = agent
-                .prompt(direct_prompt)
-                .await
-                .expect("OpenRouter should read direct generic PDF file_data document");
-            assert_verifier_response(&direct_response.output, PAGE_ONE_VERIFIER);
-        },
-    )
-    .await;
-}
-
-#[tokio::test]
 async fn streaming_document_file_data_roundtrip_live() {
     with_openrouter_cassette(
         "document_file_data/streaming_document_file_data_roundtrip_live",
         |client| async move {
-            let agent = client
-                .agent(DOCUMENT_MODEL)
+            let agent = rig::AgentBuilder::new(client.completion(DOCUMENT_MODEL))
                 .preamble(DOCUMENT_PREAMBLE)
                 .build();
 

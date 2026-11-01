@@ -1,7 +1,6 @@
 //! Migrated from `examples/huggingface_subproviders.rs`.
 
-use rig::prelude::*;
-use rig::providers::openai::wire::{HUGGINGFACE, OpenAI, SubRoute};
+use rig::providers::openai::wire::{HUGGINGFACE, OpenAIConfig, SubRoute};
 
 use crate::support::{Adder, Subtract, assert_mentions_expected_number};
 
@@ -18,13 +17,11 @@ async fn tool_prompt_across_subproviders() {
     ];
 
     for (model, sub_route) in cases {
-        let provider = OpenAI::from_env_with(&HUGGINGFACE)
+        let provider = OpenAIConfig::from_env_with(&HUGGINGFACE)
             .expect("config should build from env")
             .with_sub_route(sub_route)
-            .bound()
-            .expect("transport should build");
-        let agent = provider
-            .agent(model)
+            .client();
+        let agent = rig::AgentBuilder::new(provider.completion(model))
             .preamble(
                 "You are a calculator here to help the user perform arithmetic operations. \
                  Use the provided tools to answer the user's question.",
@@ -38,6 +35,6 @@ async fn tool_prompt_across_subproviders() {
             .prompt("Calculate 2 - 5")
             .await
             .expect("prompt should succeed");
-        assert_mentions_expected_number(&response.output, -3);
+        assert_mentions_expected_number(&response.output(), -3);
     }
 }

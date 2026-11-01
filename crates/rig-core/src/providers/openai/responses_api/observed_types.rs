@@ -1,6 +1,7 @@
 //! Typed completion values returned by observed Responses calls.
 
-use crate::message::{AdditionalParams, Image, optional_additional_params};
+use super::observed_values::{AdditionalParams, optional_additional_params};
+use crate::message::Image;
 use serde::{Deserialize, Serialize};
 
 /// Normalized generation ending. Unmapped provider values remain in [`Self::Other`].

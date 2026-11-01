@@ -6,23 +6,22 @@
 //! Capture is always on. Every completion the driver returns carries `raw`:
 //! the route's own reply *document*, set from the reply's bytes
 //! (`driver::call` does `serde_json::from_slice(&body)`), untagged. So it is
-//! not a round trip through whatever type the decoder parsed — it is the body
-//! Copilot sent, and it reads back into the type that route owns
-//! ([`openai::CompletionResponse`] on chat completions,
-//! [`responses_api::CompletionResponse`] on the Responses route). Nothing
+//! not a round trip through whatever the decoder parsed. It is the body
+//! Copilot sent: a chat-completions reply body on chat completions, the
+//! Responses response object on the Responses route. Nothing
 //! about it is sent to Copilot. `raw == Value::Null` means only that a
 //! `CompletionResponse` was built by hand without a provider response behind
 //! it, which no cell here can produce.
 //!
 //! That the document is the body, and not the parse, is what lets a caller
-//! reach the fields rig's shared types do not model: Copilot's chat route
-//! sends a `copilot_usage` block that the shared chat-completions type has no
+//! reach the fields the normalized response does not model: Copilot's chat
+//! route sends a `copilot_usage` block that the normalized response has no
 //! field for, and it reaches the caller through `raw` for exactly that
 //! reason. Cell 1 pins it, so the capability stays stated rather than
 //! rediscovered.
 //!
 //! Which route a turn took is a fact about the wire rather than about `raw`,
-//! so each typed-access cell asserts it on the bound wire itself.
+//! so each body-fidelity cell asserts it on the bound wire itself.
 //!
 //! Provider-only fields per route: the chat route's `system_fingerprint` and
 //! `copilot_usage`; the Responses route's `object`/`status`.
@@ -31,10 +30,10 @@
 //!
 //! | # | Cell | Dimension | expected | Status |
 //! |---|------|-----------|----------|--------|
-//! | 1 | `chat_raw_round_trips_provider_type` | chat route, typed access | the wire is `CopilotWire::Chat`; `raw` is untagged, reads back as `openai::CompletionResponse`, and carries the recorded reply's own keys including the unmodelled `copilot_usage` | unrecorded (no COPILOT credentials in this environment) |
+//! | 1 | `chat_raw_round_trips_provider_type` | chat route, body fidelity | the wire is `CopilotWire::Chat`; `raw` is untagged, is the chat-completions reply document, and carries the recorded reply's own keys including the unmodelled `copilot_usage` | unrecorded (no COPILOT credentials in this environment) |
 //! | 2 | `chat_raw_exposes_system_fingerprint` | chat route, provider-only field | `raw.system_fingerprint` equals the fixture body's | unrecorded (no COPILOT credentials in this environment) |
 //! | 3 | `chat_normalized_fields_equal_raw_renormalized` | chat route, normalized view | every normalized field equals the provider-native field it was mapped from, on `raw` and on the fixture body | unrecorded (no COPILOT credentials in this environment) |
-//! | 4 | `responses_raw_round_trips_provider_type` | responses route, typed access | the wire is `CopilotWire::Responses`; `raw` is untagged, reads back as `responses_api::CompletionResponse`, and carries the recorded reply's own keys | unrecorded (no COPILOT credentials in this environment) |
+//! | 4 | `responses_raw_round_trips_provider_type` | responses route, body fidelity | the wire is `CopilotWire::Responses`; `raw` is untagged, is the Responses response object, and carries the recorded reply's own keys | unrecorded (no COPILOT credentials in this environment) |
 //! | 5 | `responses_raw_exposes_envelope` | responses route, provider-only fields | `raw.object`/`raw.status` equal the fixture body's | unrecorded (no COPILOT credentials in this environment) |
 //! | 6 | `responses_normalized_fields_equal_raw_renormalized` | responses route, normalized view | every normalized field equals the provider-native field it was mapped from, on `raw` and on the fixture body | unrecorded (no COPILOT credentials in this environment) |
 //!
@@ -47,28 +46,23 @@
 //! `RIG_PROVIDER_TEST_MODE=record cargo test -p rig --all-features --test copilot copilot::raw_capture_matrix -- --nocapture --test-threads=1`
 //! and review `crates/rig-cassette/fixtures/cassettes/copilot/raw_capture_matrix/`.
 
-use rig::completion::CompletionModel as _;
-use rig::driver::Bound;
 use rig::providers::copilot;
-use rig::providers::copilot::wire::CopilotWire;
-use rig::providers::openai;
-use rig::providers::openai::responses_api;
 use rig::providers::openai::wire::OpenAiWire;
-use serde::Deserialize;
 use serde_json::Value;
 
 use crate::cassettes::recorded_json_turn;
 use crate::copilot::with_copilot_cassette_result;
 use crate::raw_capture::{assert_normalized_lacks, capture_completion, chat, responses};
 use crate::support::{Observed, assert_wire_value_matches, normalized_without_raw};
+use rig::completion::CompletionRequest;
 
 const COPILOT_PROVIDER: &str = "copilot";
 const CHAT_MODEL: &str = copilot::GPT_4O;
 const RESPONSES_MODEL: &str = copilot::GPT_5_3_CODEX;
 const PROMPT: &str = "Reply with exactly the single word: pong";
 
-fn request(model: &Bound<CopilotWire>) -> rig::completion::CompletionRequest {
-    model.completion_request(PROMPT).max_tokens(64).build()
+fn request() -> rig::completion::CompletionRequest {
+    CompletionRequest::new(PROMPT).max_tokens(64)
 }
 
 /// Chat-route premise: the recorded body is a chat-completions response with
@@ -122,7 +116,7 @@ fn assert_recorded_responses_body(body: &Value, scenario: &str) {
 }
 
 /// `raw` is the reply document: it carries the top-level keys the recorded
-/// reply carried, whatever subset of them rig's wire type models. Scrubbing
+/// reply carried, whatever subset of them rig normalizes. Scrubbing
 /// rewrites values and never keys, so the key set compares exactly in both
 /// cassette modes.
 fn assert_is_reply_document(raw: &Value, body: &Value, scenario: &str) {
@@ -161,7 +155,7 @@ async fn chat_raw_round_trips_provider_type() {
                 matches!(model.wire.wire, OpenAiWire::Chat(_)),
                 "premise: gpt-4o routes through chat completions"
             );
-            capture_completion(model, request, sink).await
+            capture_completion(model, request(), sink).await
         },
     )
     .await
@@ -173,21 +167,17 @@ async fn chat_raw_round_trips_provider_type() {
         raw.get("api").is_none(),
         "raw is the route's own reply document, not a rig-tagged envelope"
     );
-    openai::CompletionResponse::deserialize(raw)
-        .expect("raw must read back as the chat route's own response type");
     assert!(
         raw.get("copilot_usage").is_some(),
         "raw carries Copilot's `copilot_usage` block, which the shared \
          chat-completions type does not model: it reaches the caller \
          because raw is the reply document"
     );
-    assert_eq!(response.provider, COPILOT_PROVIDER);
+    assert_eq!(response.provider(), COPILOT_PROVIDER);
     assert!(!response.choice.is_empty());
 
     let (_, body) = recorded_json_turn(COPILOT_PROVIDER, scenario);
     assert_recorded_chat_body(&body, scenario);
-    openai::CompletionResponse::deserialize(&body)
-        .expect("recorded body must be a chat-completions response");
     assert_is_reply_document(raw, &body, scenario);
     assert_eq!(
         raw.get("copilot_usage"),
@@ -205,7 +195,7 @@ async fn chat_raw_exposes_system_fingerprint() {
     with_copilot_cassette_result(
         "raw_capture_matrix/chat_raw_exposes_system_fingerprint",
         |client| async move {
-            capture_completion(client.completion(CHAT_MODEL), request, sink).await
+            capture_completion(client.completion(CHAT_MODEL), request(), sink).await
         },
     )
     .await
@@ -221,18 +211,16 @@ async fn chat_raw_exposes_system_fingerprint() {
     // A live recording may see a different fingerprint than the fixture.
     assert_wire_value_matches(raw, &body, "system_fingerprint");
     assert_eq!(raw["model"], body["model"]);
-    let typed = openai::CompletionResponse::deserialize(raw)
-        .expect("raw must read back as the chat route's own response type");
     assert!(
-        typed.system_fingerprint.is_some(),
-        "the typed raw carries the fingerprint the wire sent"
+        raw["system_fingerprint"].is_string(),
+        "raw carries the fingerprint the wire sent"
     );
 }
 
 /// `raw` and the normalized response are two views of one reply, produced by
 /// one decoder: so every normalized field must equal the provider-native field
-/// it was mapped from — read off `raw` through the route's own response type,
-/// and again off the recorded wire body.
+/// it was mapped from, read off `raw` as JSON and again off the recorded
+/// wire body.
 #[tokio::test]
 #[ignore = "unrecorded (no COPILOT credentials in this environment)"]
 async fn chat_normalized_fields_equal_raw_renormalized() {
@@ -242,28 +230,23 @@ async fn chat_normalized_fields_equal_raw_renormalized() {
     with_copilot_cassette_result(
         "raw_capture_matrix/chat_normalized_fields_equal_raw_renormalized",
         |client| async move {
-            capture_completion(client.completion(CHAT_MODEL), request, sink).await
+            capture_completion(client.completion(CHAT_MODEL), request(), sink).await
         },
     )
     .await
     .expect("chat_normalized_fields_equal_raw_renormalized should replay from its cassette");
 
     let response = captured.take();
-    let reply = openai::CompletionResponse::deserialize(&response.raw)
-        .expect("raw must read back as the chat route's own response type");
+    let reply = response.raw.clone();
     chat::assert_native_matches_normalized(&response, &reply, "the typed view of raw");
-    assert_eq!(response.provider, COPILOT_PROVIDER);
+    assert_eq!(response.provider(), COPILOT_PROVIDER);
     // Both sides of this comparison come from the same live reply, so the id
     // compares exactly in either cassette mode — stricter than the token
     // comparator the fixture-side check has to use.
-    assert_eq!(
-        response.response_id.as_deref(),
-        Some(reply.id.as_str()),
-        "response id"
-    );
-    let usage = reply.usage.as_ref().expect("the turn must report usage");
+    assert_eq!(response.response_id(), reply["id"].as_str(), "response id");
+    let usage = &reply["usage"];
     assert!(
-        usage.completion_tokens.is_some(),
+        usage["completion_tokens"].is_u64(),
         "Copilot's chat route reports completion tokens"
     );
     assert!(!response.choice.is_empty());
@@ -291,7 +274,7 @@ async fn responses_raw_round_trips_provider_type() {
                 matches!(model.wire.wire, OpenAiWire::Responses(_)),
                 "premise: the codex model routes through the Responses API"
             );
-            capture_completion(model, request, sink).await
+            capture_completion(model, request(), sink).await
         },
     )
     .await
@@ -303,19 +286,19 @@ async fn responses_raw_round_trips_provider_type() {
         raw.get("api").is_none(),
         "raw is the route's own reply document, not a rig-tagged envelope"
     );
-    let typed = responses_api::CompletionResponse::deserialize(raw)
-        .expect("raw must read back as the Responses route's own response type");
     assert!(
-        typed.provider_request_id.is_none(),
+        raw.is_object(),
+        "raw must be the Responses route's own response object"
+    );
+    assert!(
+        raw.get("provider_request_id").is_none(),
         "the transport request id is a reply header, so the document never carries it"
     );
-    assert_eq!(response.provider, COPILOT_PROVIDER);
+    assert_eq!(response.provider(), COPILOT_PROVIDER);
     assert!(!response.choice.is_empty());
 
     let (_, body) = recorded_json_turn(COPILOT_PROVIDER, scenario);
     assert_recorded_responses_body(&body, scenario);
-    responses_api::CompletionResponse::deserialize(&body)
-        .expect("recorded body must be a Responses envelope");
     assert_is_reply_document(raw, &body, scenario);
 }
 
@@ -328,7 +311,7 @@ async fn responses_raw_exposes_envelope() {
     with_copilot_cassette_result(
         "raw_capture_matrix/responses_raw_exposes_envelope",
         |client| async move {
-            capture_completion(client.completion(RESPONSES_MODEL), request, sink).await
+            capture_completion(client.completion(RESPONSES_MODEL), request(), sink).await
         },
     )
     .await
@@ -349,9 +332,7 @@ async fn responses_raw_exposes_envelope() {
         );
     }
     assert_wire_value_matches(raw, &body, "created_at");
-    let typed = responses_api::CompletionResponse::deserialize(raw)
-        .expect("raw must read back as the Responses route's own response type");
-    assert_eq!(typed.status, responses_api::ResponseStatus::Completed);
+    assert_eq!(raw["status"], "completed");
 }
 
 /// The Responses-route twin of `chat_normalized_fields_equal_raw_renormalized`.
@@ -364,24 +345,19 @@ async fn responses_normalized_fields_equal_raw_renormalized() {
     with_copilot_cassette_result(
         "raw_capture_matrix/responses_normalized_fields_equal_raw_renormalized",
         |client| async move {
-            capture_completion(client.completion(RESPONSES_MODEL), request, sink).await
+            capture_completion(client.completion(RESPONSES_MODEL), request(), sink).await
         },
     )
     .await
     .expect("responses_normalized_fields_equal_raw_renormalized should replay from its cassette");
 
     let response = captured.take();
-    let reply = responses_api::CompletionResponse::deserialize(&response.raw)
-        .expect("raw must read back as the Responses route's own response type");
-    responses::assert_native_matches_normalized(&response, &reply, "the typed view of raw");
-    assert_eq!(response.provider, COPILOT_PROVIDER);
+    let reply = &response.raw;
+    responses::assert_native_matches_normalized(&response, reply, "the native view of raw");
+    assert_eq!(response.provider(), COPILOT_PROVIDER);
     // As on the chat route: both ids come from the same live reply here, so
     // the comparison is exact rather than mode-aware.
-    assert_eq!(
-        response.response_id.as_deref(),
-        Some(reply.id.as_str()),
-        "response id"
-    );
+    assert_eq!(response.response_id(), reply["id"].as_str(), "response id");
     assert!(!response.choice.is_empty());
 
     let (_, body) = recorded_json_turn(COPILOT_PROVIDER, scenario);

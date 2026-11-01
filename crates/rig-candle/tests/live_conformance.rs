@@ -8,12 +8,25 @@ use rig_agent::test_utils::{
     sequential_tools, streaming_structured_after_tool, streaming_tool, structured_after_tool,
     structured_extraction, tool_output_serialization, zero_argument_tool,
 };
-use rig_candle::{CandleModel, ModelArtifacts, ModelData};
-use rig_core::completion::CompletionModel;
+use rig_candle::extension::{CandleExt, CandleExtras};
+use rig_candle::{CandleModel, Generation, ModelArtifacts, ModelData};
+use rig_core::Model;
+use rig_core::completion::CompletionRequest;
 
 static MODEL: OnceLock<Result<CandleModel, String>> = OnceLock::new();
 
-fn model() -> Result<CandleModel, Box<dyn std::error::Error + Send + Sync>> {
+/// One unary completion's local generation record, read from its reply extras.
+async fn completion_extras(
+    model: &Model<Generation, CandleModel>,
+    request: CompletionRequest,
+) -> Result<CandleExtras, Box<dyn std::error::Error + Send + Sync>> {
+    let response = model.call(request).await?;
+    Ok(response
+        .extras::<CandleExt>()
+        .ok_or("the reply did not come from Candle")??)
+}
+
+fn model() -> Result<Model<Generation, CandleModel>, Box<dyn std::error::Error + Send + Sync>> {
     let result = MODEL.get_or_init(|| -> Result<CandleModel, String> {
         let directory = PathBuf::from(
             std::env::var_os("RIG_CANDLE_TEST_MODEL_DIR")
@@ -35,7 +48,10 @@ fn model() -> Result<CandleModel, Box<dyn std::error::Error + Send + Sync>> {
             .build()
             .map_err(|error| error.to_string())
     });
-    result.clone().map_err(Into::into)
+    result
+        .clone()
+        .map(|candle| candle.completion())
+        .map_err(Into::into)
 }
 
 fn print_report(report: &rig_agent::test_utils::ScenarioReport) {
@@ -64,36 +80,30 @@ async fn pinned_qwen3_model_contract() -> Result<(), Box<dyn std::error::Error +
     let loaded_model = model()?;
 
     let simple = tokio::time::timeout(Duration::from_secs(300), async {
-        loaded_model
-            .raw_completion(
-                loaded_model
-                    .completion_request("Answer with only the capital of France.")
-                    .temperature(0.0)
-                    .max_tokens(32)
-                    .build(),
-            )
-            .await
+        completion_extras(
+            &loaded_model,
+            CompletionRequest::new("Answer with only the capital of France.")
+                .temperature(0.0)
+                .max_tokens(32),
+        )
+        .await
     })
     .await??;
-    if !simple.text.contains("Paris") {
-        return Err(format!(
-            "model-quality failure in simple completion: {:?}",
-            simple.text
-        )
-        .into());
+    let text = simple.text.unwrap_or_default();
+    if !text.contains("Paris") {
+        return Err(format!("model-quality failure in simple completion: {text:?}").into());
     }
     println!(
-        "PASS simple_buffered prompt_tokens={} generated_tokens={} tool_calls=0 duration={}ms throughput={:?} output={:?}",
+        "PASS simple_buffered prompt_tokens={:?} generated_tokens={:?} tool_calls=0 duration={:?}ms throughput={:?} output={text:?}",
         simple.prompt_tokens,
         simple.generated_tokens,
         simple.generation_duration_ms,
         simple.tokens_per_second,
-        simple.text,
     );
 
     let text_parity = tokio::time::timeout(
         Duration::from_secs(600),
-        buffered_streaming_text_parity(loaded_model.clone()),
+        buffered_streaming_text_parity(loaded_model.clone(), |request| request),
     )
     .await??;
     print_report(&text_parity);
@@ -185,7 +195,7 @@ async fn pinned_qwen3_model_contract() -> Result<(), Box<dyn std::error::Error +
 
     let extraction = tokio::time::timeout(
         Duration::from_secs(900),
-        structured_extraction(loaded_model.clone()),
+        structured_extraction(loaded_model.clone(), None),
     )
     .await??;
     print_report(&extraction);
@@ -228,7 +238,7 @@ async fn pinned_qwen3_model_contract() -> Result<(), Box<dyn std::error::Error +
 
     let choices = tokio::time::timeout(
         Duration::from_secs(900),
-        rig_agent::test_utils::tool_choice_modes(model()?),
+        rig_agent::test_utils::tool_choice_modes(model()?, |request| request),
     )
     .await??;
     print_report(&choices);

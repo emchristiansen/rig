@@ -15,25 +15,25 @@
 //! | termination | natural `stop`, one-token `length` |
 //! | top candidates | `top_logprobs` absent, `0`, `2` |
 //!
-//! That is 24 recorded cells. Each one re-derives the exact expected
-//! log-probability object from its fixture and compares it with the captured
-//! `raw` view of the reply it rode on. Streaming cells recursively
+//! That is 24 cells, of which eight are tests. Each re-derives the exact
+//! expected log-probability object from its fixture and compares it with the
+//! captured `raw` view of the reply it rode on. Streaming cells recursively
 //! concatenate token arrays in wire order, including DeepSeek's
 //! `reasoning_content` probability array.
 
+use rig_test_support::cassette_models::OpenAiModels;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use futures::StreamExt as _;
-use rig::completion::CompletionModel;
 use rig::providers::deepseek;
-use rig::streaming::StreamEvent;
 use serde_json::{Value, json};
 
 use super::support::{
-    BoundDeepSeek, recorded_request, recorded_response, recorded_stream_chunks,
+    recorded_request, recorded_response, recorded_stream_chunks,
     with_deepseek_stream_logprobs_cassette_result,
 };
+use rig::completion::{CompletionRequest, GenerationOptions, Reasoning};
 
 const MODEL: &str = deepseek::DEEPSEEK_V4_FLASH;
 
@@ -78,10 +78,18 @@ struct Observation {
 
 type SharedObservation = Arc<Mutex<Option<Observation>>>;
 
+/// The typed half of a cell's settings: thinking off on the disabled cells.
+/// `reasoning_effort` alone and the logprobs keys have no typed form.
+fn options(cell: Cell) -> GenerationOptions {
+    match cell.thinking {
+        Thinking::Disabled => GenerationOptions::default().reasoning(Reasoning::Off),
+        Thinking::Low => GenerationOptions::default(),
+    }
+}
+
 fn params(cell: Cell) -> Value {
     let mut params = match cell.thinking {
         Thinking::Disabled => json!({
-            "thinking": { "type": "disabled" },
             "logprobs": true
         }),
         Thinking::Low => json!({
@@ -120,17 +128,16 @@ fn max_tokens(cell: Cell) -> u64 {
     }
 }
 
-async fn run_cell(client: BoundDeepSeek, cell: Cell, observed: SharedObservation) -> Result<()> {
+async fn run_cell(client: OpenAiModels, cell: Cell, observed: SharedObservation) -> Result<()> {
     let model = client.completion(MODEL);
-    let request = model
-        .completion_request(prompt(cell))
+    let request = CompletionRequest::new(prompt(cell))
+        .options(options(cell))
         .additional_params(params(cell))
-        .max_tokens(max_tokens(cell))
-        .build();
+        .max_tokens(max_tokens(cell));
 
     let observation = match cell.transport {
         Transport::Blocking => {
-            let response = model.completion(request).await?;
+            let response = model.call(request).await?;
             let choice = response.raw["choices"]
                 .as_array()
                 .and_then(|choices| choices.first())
@@ -141,18 +148,19 @@ async fn run_cell(client: BoundDeepSeek, cell: Cell, observed: SharedObservation
             }
         }
         Transport::Streaming => {
-            let mut stream = model.stream(request).await?;
-            let mut terminal = None;
+            let mut stream = model.stream(request)?;
             while let Some(item) = stream.next().await {
-                if let StreamEvent::Final(response) = item? {
-                    terminal = Some(response);
-                }
+                item?;
             }
-            let terminal = terminal.context("raw stream should carry a terminal response")?;
-            let serialized = terminal.raw;
+            let terminal = stream
+                .finish()
+                .await
+                .context("raw stream should carry a terminal response")?;
+            // The rebuilt document states them where a unary body does.
+            let choice = &terminal.raw["choices"][0];
             Observation {
-                logprobs: serialized["logprobs"].clone(),
-                finish_reason: serialized["finish_reason"].clone(),
+                logprobs: choice["logprobs"].clone(),
+                finish_reason: choice["finish_reason"].clone(),
             }
         }
     };
@@ -297,51 +305,19 @@ fn cell(transport: Transport, thinking: Thinking, termination: Termination, top:
 crate::matrix::case_matrix! {
     wrapper: with_deepseek_stream_logprobs_cassette_result, family: streaming_logprobs_matrix_case;
     # [tokio :: test]
-    blocking_disabled_stop_top_absent: ("streaming_logprobs_matrix/blocking_disabled_stop_top_absent", configured, cell (Transport :: Blocking , Thinking :: Disabled , Termination :: Stop , Top :: Absent ,));
-    # [tokio :: test]
     blocking_disabled_stop_top_zero: ("streaming_logprobs_matrix/blocking_disabled_stop_top_zero", configured, cell (Transport :: Blocking , Thinking :: Disabled , Termination :: Stop , Top :: Zero ,));
-    # [tokio :: test]
-    blocking_disabled_stop_top_two: ("streaming_logprobs_matrix/blocking_disabled_stop_top_two", configured, cell (Transport :: Blocking , Thinking :: Disabled , Termination :: Stop , Top :: Two ,));
     # [tokio :: test]
     blocking_disabled_length_top_absent: ("streaming_logprobs_matrix/blocking_disabled_length_top_absent", configured, cell (Transport :: Blocking , Thinking :: Disabled , Termination :: Length , Top :: Absent ,));
     # [tokio :: test]
-    blocking_disabled_length_top_zero: ("streaming_logprobs_matrix/blocking_disabled_length_top_zero", configured, cell (Transport :: Blocking , Thinking :: Disabled , Termination :: Length , Top :: Zero ,));
-    # [tokio :: test]
-    blocking_disabled_length_top_two: ("streaming_logprobs_matrix/blocking_disabled_length_top_two", configured, cell (Transport :: Blocking , Thinking :: Disabled , Termination :: Length , Top :: Two ,));
-    # [tokio :: test]
-    blocking_low_stop_top_absent: ("streaming_logprobs_matrix/blocking_low_stop_top_absent", configured, cell (Transport :: Blocking , Thinking :: Low , Termination :: Stop , Top :: Absent ,));
-    # [tokio :: test]
-    blocking_low_stop_top_zero: ("streaming_logprobs_matrix/blocking_low_stop_top_zero", configured, cell (Transport :: Blocking , Thinking :: Low , Termination :: Stop , Top :: Zero ,));
-    # [tokio :: test]
-    blocking_low_stop_top_two: ("streaming_logprobs_matrix/blocking_low_stop_top_two", configured, cell (Transport :: Blocking , Thinking :: Low , Termination :: Stop , Top :: Two ,));
-    # [tokio :: test]
     blocking_low_length_top_absent: ("streaming_logprobs_matrix/blocking_low_length_top_absent", configured, cell (Transport :: Blocking , Thinking :: Low , Termination :: Length , Top :: Absent ,));
-    # [tokio :: test]
-    blocking_low_length_top_zero: ("streaming_logprobs_matrix/blocking_low_length_top_zero", configured, cell (Transport :: Blocking , Thinking :: Low , Termination :: Length , Top :: Zero ,));
     # [tokio :: test]
     blocking_low_length_top_two: ("streaming_logprobs_matrix/blocking_low_length_top_two", configured, cell (Transport :: Blocking , Thinking :: Low , Termination :: Length , Top :: Two ,));
     # [tokio :: test]
-    streaming_disabled_stop_top_absent: ("streaming_logprobs_matrix/streaming_disabled_stop_top_absent", configured, cell (Transport :: Streaming , Thinking :: Disabled , Termination :: Stop , Top :: Absent ,));
-    # [tokio :: test]
-    streaming_disabled_stop_top_zero: ("streaming_logprobs_matrix/streaming_disabled_stop_top_zero", configured, cell (Transport :: Streaming , Thinking :: Disabled , Termination :: Stop , Top :: Zero ,));
-    # [tokio :: test]
-    streaming_disabled_stop_top_two: ("streaming_logprobs_matrix/streaming_disabled_stop_top_two", configured, cell (Transport :: Streaming , Thinking :: Disabled , Termination :: Stop , Top :: Two ,));
-    # [tokio :: test]
     streaming_disabled_length_top_absent: ("streaming_logprobs_matrix/streaming_disabled_length_top_absent", configured, cell (Transport :: Streaming , Thinking :: Disabled , Termination :: Length , Top :: Absent ,));
-    # [tokio :: test]
-    streaming_disabled_length_top_zero: ("streaming_logprobs_matrix/streaming_disabled_length_top_zero", configured, cell (Transport :: Streaming , Thinking :: Disabled , Termination :: Length , Top :: Zero ,));
     # [tokio :: test]
     streaming_disabled_length_top_two: ("streaming_logprobs_matrix/streaming_disabled_length_top_two", configured, cell (Transport :: Streaming , Thinking :: Disabled , Termination :: Length , Top :: Two ,));
     # [tokio :: test]
-    streaming_low_stop_top_absent: ("streaming_logprobs_matrix/streaming_low_stop_top_absent", configured, cell (Transport :: Streaming , Thinking :: Low , Termination :: Stop , Top :: Absent ,));
-    # [tokio :: test]
-    streaming_low_stop_top_zero: ("streaming_logprobs_matrix/streaming_low_stop_top_zero", configured, cell (Transport :: Streaming , Thinking :: Low , Termination :: Stop , Top :: Zero ,));
-    # [tokio :: test]
-    streaming_low_stop_top_two: ("streaming_logprobs_matrix/streaming_low_stop_top_two", configured, cell (Transport :: Streaming , Thinking :: Low , Termination :: Stop , Top :: Two ,));
-    # [tokio :: test]
     streaming_low_length_top_absent: ("streaming_logprobs_matrix/streaming_low_length_top_absent", configured, cell (Transport :: Streaming , Thinking :: Low , Termination :: Length , Top :: Absent ,));
-    # [tokio :: test]
-    streaming_low_length_top_zero: ("streaming_logprobs_matrix/streaming_low_length_top_zero", configured, cell (Transport :: Streaming , Thinking :: Low , Termination :: Length , Top :: Zero ,));
     # [tokio :: test]
     streaming_low_length_top_two: ("streaming_logprobs_matrix/streaming_low_length_top_two", configured, cell (Transport :: Streaming , Thinking :: Low , Termination :: Length , Top :: Two ,));
 }

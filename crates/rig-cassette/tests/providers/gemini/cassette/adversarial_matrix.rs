@@ -3,44 +3,35 @@
 
 use rig::providers::gemini::completion::GEMINI_3_FLASH_PREVIEW;
 
-use super::super::support::with_gemini_cassette;
-use crate::history_survival::adversarial::{self, Hop};
-
-#[tokio::test]
-async fn colliding_ids() {
-    const SCENARIO: &str = "adversarial/colliding_ids";
-    with_gemini_cassette("adversarial/colliding_ids", |client| async move {
-        adversarial::colliding_ids(&client.completion(GEMINI_3_FLASH_PREVIEW), "call_dup", None)
-            .await;
-    })
-    .await;
-    adversarial::assert_colliding_recorded("gemini", SCENARIO);
-}
-
-#[tokio::test]
-async fn out_of_order_results() {
-    const SCENARIO: &str = "adversarial/out_of_order_results";
-    with_gemini_cassette("adversarial/out_of_order_results", |client| async move {
-        adversarial::out_of_order_results(&client.completion(GEMINI_3_FLASH_PREVIEW), None).await;
-    })
-    .await;
-    adversarial::assert_carried("gemini", SCENARIO, "thought_signature", 1);
-}
+use super::super::request_witness_support::{
+    NamedCase, model_result, with_gemini_request_witness_cassette,
+};
+use crate::history_survival::adversarial;
+use crate::history_survival::adversarial::Hop;
 
 /// Second foreign hop: Anthropic then Responses history continues on Gemini.
+///
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 5,
+/// mec-rig-schema-route-1 item 1(b)): the recording is unchanged; the hop's
+/// request is the shared driver's (`adversarial::request` over
+/// `Hop::Gemini.history()`, no parameters, 4096 tokens), and its only
+/// difference is the one named in `NamedCase::ThreeProviderRoundTrip`;
+/// replay refuses interaction 0. The recorded round-trip rule
+/// (`assert_round_trip_recorded`) still runs on the fixture. Named loss: the
+/// Gemini hop answering with non-empty text.
 #[tokio::test]
-async fn three_provider_round_trip() {
-    with_gemini_cassette(
+async fn three_provider_round_trip() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
         "adversarial/three_provider_round_trip",
-        |client| async move {
-            adversarial::round_trip_hop(
-                &client.completion(GEMINI_3_FLASH_PREVIEW),
-                Hop::Gemini,
-                None,
-            )
-            .await;
+        NamedCase::ThreeProviderRoundTrip,
+        |client, _clock| async move {
+            let request = adversarial::request(Hop::Gemini.history(), None, 4096);
+            let model: rig::DynModel<rig::operation::Completion> =
+                client.completion(GEMINI_3_FLASH_PREVIEW).into();
+            Ok(model_result(model.call(request).await))
         },
     )
-    .await;
+    .await?;
     adversarial::assert_round_trip_recorded(Hop::Gemini);
+    Ok(())
 }

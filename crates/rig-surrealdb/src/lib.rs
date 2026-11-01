@@ -9,9 +9,10 @@ use std::fmt::Display;
 
 use rig_core::{
     Embed,
-    embeddings::{Embedding, EmbeddingModel},
+    embeddings::Embedding,
     vector_store::{
-        InsertDocuments, VectorStoreError, VectorStoreIndex,
+        InsertDocuments, VectorSearchIdResult, VectorSearchResult, VectorStoreError,
+        VectorStoreIndex,
         request::{DynamicSearchFilter, Filter, FilterError, SearchFilter, VectorSearchRequest},
     },
     wasm_compat::WasmCompatSend,
@@ -27,13 +28,13 @@ pub use surrealdb::engine::remote::ws::{Ws, Wss};
 
 /// Vector store backed by a SurrealDB table.
 ///
-/// Queries are embedded with the same model `M` that populated the table, so
+/// Queries are embedded with the same model that populated the table, so
 /// results are meaningless under another model.
-pub struct SurrealVectorStore<C, M>
+pub struct SurrealVectorStore<C>
 where
     C: Connection,
 {
-    model: M,
+    model: rig_core::DynModel<rig_core::operation::Embedding>,
     surreal: Surreal<C>,
     documents_table: String,
     distance_function: SurrealDistanceFunction,
@@ -41,8 +42,8 @@ where
 
 /// Measure applied to the stored embeddings.
 ///
-/// Results are always thresholded and ordered as if larger values rank better,
-/// which holds for the similarity measures but inverts the distance ones.
+/// Distance measures use a maximum threshold and rank smaller values first.
+/// Similarity measures use a minimum threshold and rank larger values first.
 pub enum SurrealDistanceFunction {
     Knn,
     Hamming,
@@ -86,11 +87,14 @@ pub struct SearchResultOnlyId {
 }
 
 impl SearchResult {
-    pub fn into_result<T: DeserializeOwned>(self) -> Result<(f64, String, T), VectorStoreError> {
-        let document: T =
-            serde_json::from_str(&self.document).map_err(VectorStoreError::JsonError)?;
-
-        Ok((self.distance, record_key_to_string(&self.id.key), document))
+    pub fn into_result<T: DeserializeOwned>(
+        self,
+    ) -> Result<VectorSearchResult<T>, VectorStoreError> {
+        Ok(VectorSearchResult {
+            score: self.distance,
+            id: record_key_to_string(&self.id.key),
+            document: serde_json::from_str(&self.document).map_err(VectorStoreError::JsonError)?,
+        })
     }
 }
 
@@ -103,7 +107,7 @@ fn record_key_to_string(key: &RecordIdKey) -> String {
     }
 }
 
-impl<C, M: EmbeddingModel> InsertDocuments for SurrealVectorStore<C, M>
+impl<C> InsertDocuments for SurrealVectorStore<C>
 where
     C: Connection,
 {
@@ -146,17 +150,9 @@ impl SurrealSearchFilter {
     }
 }
 
-impl TryFrom<Filter<serde_json::Value>> for SurrealSearchFilter {
-    type Error = FilterError;
-
-    fn try_from(value: Filter<serde_json::Value>) -> Result<Self, Self::Error> {
-        value.try_interpret(|v| Ok(Value::from_t(v)))
-    }
-}
-
 impl DynamicSearchFilter for SurrealSearchFilter {
     fn from_dynamic_filter(filter: Filter<serde_json::Value>) -> Result<Self, FilterError> {
-        Self::try_from(filter)
+        filter.try_interpret(|v| Ok(Value::from_t(v)))
     }
 }
 
@@ -256,18 +252,18 @@ impl SurrealSearchFilter {
     }
 }
 
-impl<C, M: EmbeddingModel> SurrealVectorStore<C, M>
+impl<C> SurrealVectorStore<C>
 where
     C: Connection,
 {
     pub fn new(
-        model: M,
+        model: impl Into<rig_core::DynModel<rig_core::operation::Embedding>>,
         surreal: Surreal<C>,
         documents_table: Option<String>,
         distance_function: SurrealDistanceFunction,
     ) -> Self {
         Self {
-            model,
+            model: model.into(),
             surreal,
             documents_table: documents_table.unwrap_or_else(|| String::from("documents")),
             distance_function,
@@ -278,13 +274,16 @@ where
         &self.surreal
     }
 
-    pub fn with_defaults(model: M, surreal: Surreal<C>) -> Self {
+    pub fn with_defaults(
+        model: impl Into<rig_core::DynModel<rig_core::operation::Embedding>>,
+        surreal: Surreal<C>,
+    ) -> Self {
         Self::new(model, surreal, None, SurrealDistanceFunction::Cosine)
     }
 
     /// Embeds the query and runs the search. The request filter is bound as a
-    /// query parameter, defaulting to `true` when absent, and an absent threshold
-    /// binds zero.
+    /// query parameter, defaulting to `true` when absent. An absent threshold
+    /// leaves distance searches unbounded and keeps the similarity minimum at zero.
     async fn run_search_query(
         &self,
         req: &VectorSearchRequest<SurrealSearchFilter>,
@@ -293,7 +292,7 @@ where
         let embedded_query: Vec<f64> = self.model.embed_text(req.query()).await?.vec;
 
         self.surreal
-            .query(self.search_query(with_document).as_str())
+            .query(self.search_query(with_document, req.threshold()).as_str())
             .bind(("vec", embedded_query))
             .bind(("tablename", self.documents_table.clone()))
             .bind(("threshold", req.threshold().unwrap_or(0.)))
@@ -301,49 +300,60 @@ where
             .bind((
                 "filter",
                 req.filter()
-                    .clone()
+                    .cloned()
                     .map_or("true".into(), SurrealSearchFilter::inner),
             ))
             .await
             .map_err(VectorStoreError::datastore)
     }
 
-    fn search_query(&self, with_document: bool) -> String {
+    fn search_query(&self, with_document: bool, threshold: Option<f64>) -> String {
         let document = if with_document { ", document" } else { "" };
         let embedded_text = if with_document { ", embedded_text" } else { "" };
 
         let Self {
             distance_function, ..
         } = self;
+        let (comparison, order) = match distance_function {
+            SurrealDistanceFunction::Knn
+            | SurrealDistanceFunction::Hamming
+            | SurrealDistanceFunction::Euclidean => (threshold.map(|_| "<="), "asc"),
+            SurrealDistanceFunction::Cosine | SurrealDistanceFunction::Jaccard => {
+                (Some(">="), "desc")
+            }
+        };
+        let cutoff = comparison.map_or_else(String::new, |comparison| {
+            format!("{distance_function}($vec, embedding) {comparison} $threshold AND ")
+        });
 
         format!(
             "
             SELECT id {document} {embedded_text}, {distance_function}($vec, embedding) as distance \
               from type::table($tablename) \
-              where {distance_function}($vec, embedding) >= $threshold AND $filter \
-              order by distance desc \
+              where {cutoff}$filter \
+              order by distance {order} \
             LIMIT $limit",
         )
     }
 }
 
-impl<C, M: EmbeddingModel> VectorStoreIndex for SurrealVectorStore<C, M>
+impl<C> VectorStoreIndex for SurrealVectorStore<C>
 where
     C: Connection,
 {
     type Filter = SurrealSearchFilter;
 
-    /// Returns matches as `(distance, record id, document)` ordered by descending
-    /// distance value. Errors when a stored document does not deserialize into `T`.
+    /// Returns matches scored by the configured measure and keyed by record id,
+    /// ordered from best to worst. Errors when a stored document does not deserialize into `T`.
     async fn top_n<T: DeserializeOwned + WasmCompatSend>(
         &self,
         req: VectorSearchRequest<SurrealSearchFilter>,
-    ) -> Result<Vec<(f64, String, T)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchResult<T>>, VectorStoreError> {
         let mut response = self.run_search_query(&req, true).await?;
 
         let rows: Vec<SearchResult> = response.take(0).map_err(VectorStoreError::datastore)?;
 
-        let rows: Vec<(f64, String, T)> = rows
+        let rows: Vec<VectorSearchResult<T>> = rows
             .into_iter()
             .map(SearchResult::into_result)
             .collect::<Result<Vec<_>, _>>()?;
@@ -351,21 +361,24 @@ where
         Ok(rows)
     }
 
-    /// Like `top_n` but returns `(distance, record id)` without deserializing
-    /// documents.
+    /// Like `top_n` but returns only scores and record ids, without
+    /// deserializing documents.
     async fn top_n_ids(
         &self,
         req: VectorSearchRequest<SurrealSearchFilter>,
-    ) -> Result<Vec<(f64, String)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchIdResult>, VectorStoreError> {
         let mut response = self.run_search_query(&req, false).await?;
 
         let rows: Vec<SearchResultOnlyId> = response
             .take::<Vec<SearchResultOnlyId>>(0)
             .map_err(VectorStoreError::datastore)?;
 
-        let rows: Vec<(f64, String)> = rows
+        let rows: Vec<VectorSearchIdResult> = rows
             .into_iter()
-            .map(|row| (row.distance, record_key_to_string(&row.id.key)))
+            .map(|row| VectorSearchIdResult {
+                score: row.distance,
+                id: record_key_to_string(&row.id.key),
+            })
             .collect();
 
         Ok(rows)

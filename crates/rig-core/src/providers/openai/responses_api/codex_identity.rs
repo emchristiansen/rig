@@ -84,7 +84,7 @@ pub struct InvalidCodexIdentity {
 
 impl From<InvalidCodexIdentity> for ProviderError {
     fn from(error: InvalidCodexIdentity) -> Self {
-        ProviderError::Request(Box::new(error))
+        ProviderError::request(error)
     }
 }
 
@@ -184,7 +184,7 @@ pub struct NotACodexWire {
 
 impl From<NotACodexWire> for ProviderError {
     fn from(error: NotACodexWire) -> Self {
-        ProviderError::Request(Box::new(error))
+        ProviderError::request(error)
     }
 }
 

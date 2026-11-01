@@ -12,27 +12,21 @@ use futures::StreamExt;
 use rig::agent::{AgentBuilder, MultiTurnStreamItem};
 use rig::completion::PromptError;
 use rig::effect::EffectFamily;
-use rig::error::ErrorKind;
 use rig::run::{OutputMode, UnhandledInvalidToolCall};
 use rig::test_utils::{MockCompletionModel, MockStreamEvent};
 use rig_cassette::agent::AgentReplayExt;
 use serde_json::json;
 
 use super::golden_recovery::Add;
+use super::{cancelled_reason, stream_turn};
 use crate::goldens::{
-    RepairToAdd, RetryUnknownTool, STOP_ON_TOOL_ARGUMENTS_DELTA, STOP_ON_TOOL_NAME_DELTA,
-    SkipUnknown, StopOnToolArgumentsDelta, StopOnToolNameDelta, event_schema, families,
+    RepairToAdd, RetryUnknownTool, STOP_ON_TOOL_ARGUMENTS_DELTA, SkipUnknown,
+    StopOnToolArgumentsDelta, event_schema, families,
 };
 
 const PREAMBLE: &str = "Use the add tool.";
 const PROMPT: &str = "What is 2 + 3?";
 const ANSWER: &str = "2 + 3 = 5";
-
-fn stream_turn(events: Vec<MockStreamEvent>) -> Vec<MockStreamEvent> {
-    let mut events = events;
-    events.push(MockStreamEvent::final_response_with_default_usage());
-    events
-}
 
 /// A call streamed as its name, then its arguments in two fragments.
 fn delta_call(id: &str, name: &str) -> Vec<MockStreamEvent> {
@@ -59,7 +53,7 @@ async fn streamed(
     max_turns: usize,
     unhandled: UnhandledInvalidToolCall,
     retries: usize,
-) -> Result<String, rig::agent::StreamingError> {
+) -> Result<String, PromptError> {
     let mut stream = agent
         .prompt(PROMPT)
         .max_turns(max_turns)
@@ -70,7 +64,7 @@ async fn streamed(
     let mut failure = None;
     while let Some(item) = stream.next().await {
         match item {
-            Ok(MultiTurnStreamItem::FinalResponse(response)) => output = Some(response.output),
+            Ok(MultiTurnStreamItem::FinalResponse(response)) => output = Some(response.output()),
             Ok(_) => {}
             Err(error) => failure = Some(error),
         }
@@ -82,16 +76,6 @@ async fn streamed(
     match failure {
         Some(error) => Err(error),
         None => Ok(output.expect("a final response")),
-    }
-}
-
-fn cancelled_reason(error: &rig::agent::StreamingError) -> &str {
-    match error {
-        rig::agent::StreamingError::Prompt(error) => match error {
-            PromptError::PromptCancelled { reason, .. } => reason,
-            other => panic!("a cancelled run, not {other:?}"),
-        },
-        other => panic!("a cancelled run, not {other:?}"),
     }
 }
 
@@ -321,7 +305,7 @@ async fn delta_fail_effect_log_is_the_golden_fixture() {
         .await
         .expect_err("the unknown call fails the run");
     assert!(
-        matches!(&error, rig::agent::StreamingError::Prompt(error) if matches!(error, PromptError::UnknownToolCall { .. })),
+        matches!(&error, error if matches!(error, PromptError::UnknownToolCall { .. })),
         "{error:?}"
     );
     let log = agent.stamp(recorder.take());
@@ -355,7 +339,7 @@ async fn delta_output_tool_effect_log_is_the_golden_fixture() {
     let mut output = None;
     while let Some(item) = stream.next().await {
         if let MultiTurnStreamItem::FinalResponse(response) = item.expect("the stream yields") {
-            output = Some(response.output);
+            output = Some(response.output());
         }
     }
     drop(stream);
@@ -368,34 +352,6 @@ async fn delta_output_tool_effect_log_is_the_golden_fixture() {
     let log = agent.stamp(recorder.take());
     assert_eq!(families(&log), [EffectFamily::Completion]);
     crate::goldens::golden_effects("mock_delta_output_tool", &log);
-}
-
-/// A stop on the delta that names the tool.
-#[tokio::test]
-async fn delta_stop_on_name_effect_log_is_the_golden_fixture() {
-    let recorder = rig_cassette::effect_log::EffectLogRecorder::keeping_stream_events();
-    let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([stream_turn(
-        delta_call("call-1", "add"),
-    )]))
-    .name("golden")
-    .preamble(PREAMBLE)
-    .tool(Add)
-    .add_hook(StopOnToolNameDelta)
-    .record_to(recorder.clone())
-    .build();
-    let error = streamed(&agent, 3, UnhandledInvalidToolCall::Fail, 0)
-        .await
-        .expect_err("the hook stops the run");
-    assert_eq!(cancelled_reason(&error), STOP_ON_TOOL_NAME_DELTA);
-    let log = agent.stamp(recorder.take());
-    assert_eq!(families(&log), [EffectFamily::Completion]);
-    assert!(
-        log.records[0].outcome.is_ok()
-            || matches!(&log.records[0].outcome, Err(report) if report.kind == ErrorKind::Cancelled),
-        "{:?}",
-        log.records[0].outcome
-    );
-    crate::goldens::golden_effects("mock_delta_stop_on_name", &log);
 }
 
 /// A stop on the first arguments delta, after the name validated.

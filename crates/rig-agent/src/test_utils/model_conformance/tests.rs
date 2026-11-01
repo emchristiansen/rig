@@ -3,22 +3,24 @@ use crate::{
     completion::Usage,
     test_utils::{MockCompletionModel, MockStreamEvent, MockTurn, mock_final},
 };
+use anyhow::{Context, ensure};
 use rig_core::message::{ToolCall, ToolFunction};
 
 fn tool_call(id: &str, name: &str, arguments: serde_json::Value) -> AssistantContent {
     AssistantContent::ToolCall(ToolCall::from_wire(
         id,
-        ToolFunction::new(name.to_string(), arguments),
+        ToolFunction::new(
+            rig_core::message::ToolName::new(name.to_string()).expect("tool name"),
+            arguments,
+        ),
     ))
 }
 
 fn usage(input: u64, output: u64) -> Usage {
-    Usage {
-        input_tokens: Some(input),
-        output_tokens: Some(output),
-        total_tokens: Some(input + output),
-        ..Usage::default()
-    }
+    Usage::new()
+        .input_tokens(input)
+        .output_tokens(output)
+        .total_tokens(input + output)
 }
 
 fn fixture_contract(condition: bool, details: &str) -> Result<(), ScenarioError> {
@@ -40,7 +42,7 @@ async fn parallel_contract_validates_batch_and_correlation() -> Result<(), Scena
         ),
     ]);
     let report = parallel_tools(
-        MockCompletionModel::new([first, MockTurn::text("7 and 8")]),
+        MockCompletionModel::from_turns([first, MockTurn::text("7 and 8")]),
         |builder| builder,
         Some(1),
     )
@@ -53,7 +55,7 @@ async fn parallel_contract_validates_batch_and_correlation() -> Result<(), Scena
 #[tokio::test]
 async fn zero_argument_and_output_serialization_contracts_pass() -> Result<(), ScenarioError> {
     let zero = zero_argument_tool(
-        MockCompletionModel::new([
+        MockCompletionModel::from_turns([
             MockTurn::tool_call("ping_call", "ping", serde_json::json!({})),
             MockTurn::text(PING_OUTPUT),
         ]),
@@ -67,7 +69,7 @@ async fn zero_argument_and_output_serialization_contracts_pass() -> Result<(), S
         tool_call("config_call", "fetch_config", serde_json::json!({})),
     ]);
     let serialized = tool_output_serialization(
-        MockCompletionModel::new([first, MockTurn::text("summary")]),
+        MockCompletionModel::from_turns([first, MockTurn::text("summary")]),
         |builder| builder,
     )
     .await?;
@@ -84,7 +86,7 @@ async fn complex_arguments_preserve_nested_unicode_and_escapes() -> Result<(), S
         "quote": "path C:\\tmp and \"quoted\""
     });
     let report = complex_tool_arguments(
-        MockCompletionModel::new([
+        MockCompletionModel::from_turns([
             MockTurn::tool_call("profile_call", "store_profile", arguments),
             MockTurn::text("stored"),
         ]),
@@ -97,16 +99,19 @@ async fn complex_arguments_preserve_nested_unicode_and_escapes() -> Result<(), S
 
 #[tokio::test]
 async fn extraction_contract_requires_fields_and_usage() -> Result<(), ScenarioError> {
-    let report = structured_extraction(MockCompletionModel::new([MockTurn::tool_call(
-        "submit_call",
-        "submit",
-        serde_json::json!({
-            "first_name": "Ada",
-            "last_name": "Lovelace",
-            "job": "mathematician"
-        }),
+    let report = structured_extraction(
+        MockCompletionModel::from_turns([MockTurn::tool_call(
+            "submit_call",
+            "submit",
+            serde_json::json!({
+                "first_name": "Ada",
+                "last_name": "Lovelace",
+                "job": "mathematician"
+            }),
+        )
+        .with_usage(usage(20, 5))]),
+        None,
     )
-    .with_usage(usage(20, 5))]))
     .await?;
     fixture_contract(report.prompt_tokens == 20, "extraction input usage")?;
     fixture_contract(report.generated_tokens == 5, "extraction output usage")?;
@@ -134,7 +139,7 @@ async fn streaming_contract_checks_events_history_and_usage() -> Result<(), Scen
 #[tokio::test]
 async fn invalid_recovery_paths_do_not_execute_tools() -> Result<(), ScenarioError> {
     let report = invalid_tool_recovery(
-        MockCompletionModel::new([MockTurn::tool_call(
+        MockCompletionModel::from_turns([MockTurn::tool_call(
             "invalid-add",
             "add",
             serde_json::json!({ "x": 2, "y": 3 }),
@@ -149,7 +154,7 @@ async fn invalid_recovery_paths_do_not_execute_tools() -> Result<(), ScenarioErr
 #[tokio::test]
 async fn hook_rewrites_chain_and_request_patch_is_turn_local() -> Result<(), ScenarioError> {
     let report = hook_rewrites_and_request_patch(
-        MockCompletionModel::new([
+        MockCompletionModel::from_turns([
             MockTurn::tool_call("hook-add", "add", serde_json::json!({ "x": 1, "y": 1 })),
             MockTurn::text("[portable-redacted]"),
         ]),
@@ -163,7 +168,7 @@ async fn hook_rewrites_chain_and_request_patch_is_turn_local() -> Result<(), Sce
 #[tokio::test]
 async fn cancellation_and_max_turn_controls_retain_diagnostics() -> Result<(), ScenarioError> {
     let report = cancellation_and_max_turns(
-        MockCompletionModel::new([
+        MockCompletionModel::from_turns([
             MockTurn::tool_call("cancel-add", "add", serde_json::json!({ "x": 20, "y": 22 })),
             MockTurn::tool_call("budget-add", "add", serde_json::json!({ "x": 20, "y": 22 })),
         ]),
@@ -179,10 +184,11 @@ fn typed_validators_reject_bad_structured_output_and_protocol_leaks() {
     let invalid = decode_structured_output::<ConfigOutput>("invalid_json", "not json");
     assert!(matches!(invalid, Err(ScenarioError::Contract { .. })));
 
-    let messages = vec![Message::Assistant {
-        id: None,
-        content: vec![AssistantContent::text("visible <tool_call>")],
-    }];
+    let messages = vec![Message::Assistant(
+        rig_core::message::AssistantMessage::new(vec![AssistantContent::text(
+            "visible <tool_call>",
+        )]),
+    )];
     let hygiene = validate_protocol_hygiene(
         "protocol_hygiene",
         "visible <tool_call>",
@@ -194,14 +200,13 @@ fn typed_validators_reject_bad_structured_output_and_protocol_leaks() {
 
 #[test]
 fn invalid_tool_diagnostics_require_rejected_call_history() {
-    let history = vec![Message::Assistant {
-        id: None,
-        content: vec![tool_call(
+    let history = vec![Message::Assistant(
+        rig_core::message::AssistantMessage::new(vec![tool_call(
             "bad_call",
             "missing",
             serde_json::json!({"value": 1}),
-        )],
-    }];
+        )]),
+    )];
     let error = PromptError::UnknownToolCall {
         tool_name: "missing".to_string(),
         available_tools: vec!["add".to_string()],
@@ -210,4 +215,353 @@ fn invalid_tool_diagnostics_require_rejected_call_history() {
     };
     assert!(validate_unknown_tool_failure(&error, "missing", &[]).is_ok());
     assert!(validate_unknown_tool_failure(&error, "other", &[]).is_err());
+}
+
+fn ag010_responses_body(answer: Option<&str>) -> serde_json::Value {
+    // Synthetic required envelope fields drive the existing Responses decoder.
+    let output = answer.map_or_else(Vec::new, |answer| {
+        vec![serde_json::json!({
+            "type":"message", "id":"msg_ag010", "role":"assistant",
+            "status":"completed", "phase":"final_answer",
+            "content":[{"type":"output_text", "text":answer, "annotations":[]}]
+        })]
+    });
+    serde_json::json!({
+        "id":"resp_ag010", "object":"response", "created_at":0,
+        "status":"completed", "model":"gpt-4o-mini", "tools":[], "output":output,
+        "usage":{"input_tokens":4, "output_tokens":2, "total_tokens":6},
+        "synthetic_raw_only":{"text":"London"}
+    })
+}
+
+fn ag010_responses_sse(body: &serde_json::Value, with_text: bool) -> String {
+    let mut frames = Vec::new();
+    if with_text {
+        for (sequence, delta) in [(1, "Pa"), (2, "ris")] {
+            frames.push(serde_json::json!({
+                "type":"response.output_text.delta", "sequence_number":sequence,
+                "output_index":0, "content_index":0, "item_id":"msg_ag010", "delta":delta
+            }));
+        }
+        frames.push(serde_json::json!({
+            "type":"response.output_item.done", "sequence_number":3, "output_index":0,
+            "item":body["output"][0]
+        }));
+    }
+    frames.push(serde_json::json!({
+        "type":"response.completed", "sequence_number":4, "response":body
+    }));
+    frames
+        .iter()
+        .map(|frame| format!("data: {frame}\n\n"))
+        .collect()
+}
+
+/// Synthetic conformance control: decoding, not cassette traffic, establishes
+/// that a phased carried answer reaches the generic buffered text consumer.
+#[tokio::test]
+async fn decoded_carried_only_paris_matches_actual_stream_text() -> anyhow::Result<()> {
+    use rig_core::providers::openai::{OpenAIConfig, responses_api::wire::Responses};
+    use rig_core::test_utils::{MockHttpResponse, SequencedHttpClient};
+
+    let body = ag010_responses_body(Some("Paris"));
+    let http = SequencedHttpClient::new([
+        MockHttpResponse::success_typed(body.to_string(), "application/json"),
+        MockHttpResponse::success_typed(body.to_string(), "application/json"),
+        MockHttpResponse::success_typed(ag010_responses_sse(&body, true), "text/event-stream"),
+    ]);
+    let model = rig_core::Model::new(
+        Responses::new(OpenAIConfig::new("synthetic-test-key"), "gpt-4o-mini"),
+        http.clone(),
+    );
+    let buffered = model
+        .call(CompletionRequest::new("probe the synthetic answer"))
+        .await?;
+    ensure!(
+        buffered.raw == body,
+        "buffered raw differs: {:?}",
+        buffered.raw
+    );
+    ensure!(
+        matches!(buffered.choice.as_slice(), [AssistantContent::CarriedText(text)]
+        if text.text() == "Paris" && text.phase.as_deref() == Some("final_answer")
+            && text.payload.item == *body.get("output")
+                .and_then(|value| value.get(0))
+                .and_then(|value| value.get("content"))
+                .and_then(|value| value.get(0))
+                .unwrap_or(&serde_json::Value::Null)
+            && text.payload.provider.as_deref() == Some("openai")),
+        "carried answer differs: {buffered:?}"
+    );
+    ensure!(
+        buffered.text() == "Paris",
+        "buffered answer differs: {buffered:?}"
+    );
+    ensure!(
+        buffered.usage.input_tokens == Some(4),
+        "input usage differs: {:?}",
+        buffered.usage
+    );
+    ensure!(
+        buffered.usage.output_tokens == Some(2),
+        "output usage differs: {:?}",
+        buffered.usage
+    );
+    ensure!(
+        buffered.usage.total_tokens == Some(6),
+        "total usage differs: {:?}",
+        buffered.usage
+    );
+
+    let report = buffered_streaming_text_parity(model, |request| request).await?;
+    ensure!(
+        report.name == "buffered_streaming_text_parity",
+        "scenario differs: {report:?}"
+    );
+    ensure!(
+        report.response == "Paris",
+        "reported answer differs: {report:?}"
+    );
+    ensure!(
+        report.prompt_tokens == 4,
+        "reported input usage differs: {report:?}"
+    );
+    ensure!(
+        report.generated_tokens == 2,
+        "reported output usage differs: {report:?}"
+    );
+    ensure!(
+        report.tool_calls == 0,
+        "tool-call count differs: {report:?}"
+    );
+    ensure!(
+        report.history_messages == 0,
+        "history count differs: {report:?}"
+    );
+    let requests = http.requests();
+    ensure!(requests.len() == 3, "expected three requests: {requests:?}");
+    let remaining = http.remaining_responses();
+    ensure!(remaining == 0, "unconsumed mock responses: {remaining}");
+    Ok(())
+}
+
+fn ag010_gemini_body(signed_prefix: bool) -> serde_json::Value {
+    // Both parts are received data; only the signed prefix becomes carried.
+    let parts = if signed_prefix {
+        serde_json::json!([
+            {"text":"Pa", "thoughtSignature":"synthetic-signed-pa", "futureField":{"text":"London"}},
+            {"text":"ris"}
+        ])
+    } else {
+        serde_json::json!([{"text":"Paris"}])
+    };
+    serde_json::json!({
+        "responseId":"resp_ag010_gemini", "modelVersion":"gemini-2.5-flash",
+        "candidates":[{"index":0, "content":{"role":"model", "parts":parts}, "finishReason":"STOP"}],
+        "usageMetadata":{"promptTokenCount":4, "candidatesTokenCount":2, "totalTokenCount":6}
+    })
+}
+
+/// Synthetic mixed-shape control uses Gemini's existing signed/plain decoder
+/// path; no ordinary Responses part is invented for the phased control.
+#[tokio::test]
+async fn decoded_mixed_carried_and_plain_paris_matches_actual_stream_text() -> anyhow::Result<()> {
+    use rig_core::providers::gemini::{GeminiConfig, completion::GenerateContent};
+    use rig_core::test_utils::{MockHttpResponse, SequencedHttpClient};
+
+    let body = ag010_gemini_body(true);
+    let http = SequencedHttpClient::new([
+        MockHttpResponse::success_typed(body.to_string(), "application/json"),
+        MockHttpResponse::success_typed(body.to_string(), "application/json"),
+        MockHttpResponse::success_typed(format!("data: {body}\n\n"), "text/event-stream"),
+    ]);
+    let model = rig_core::Model::new(
+        GenerateContent::new(GeminiConfig::new("synthetic-test-key"), "gemini-2.5-flash"),
+        http.clone(),
+    );
+    let buffered = model
+        .call(CompletionRequest::new("probe the synthetic answer"))
+        .await?;
+    ensure!(
+        buffered.raw == body,
+        "buffered raw differs: {:?}",
+        buffered.raw
+    );
+    ensure!(
+        matches!(buffered.choice.as_slice(),
+        [AssistantContent::CarriedText(carried), AssistantContent::Text(plain)]
+        if carried.text() == "Pa" && plain.text == "ris"
+            && carried.payload.item == *body.get("candidates")
+                .and_then(|value| value.get(0))
+                .and_then(|value| value.get("content"))
+                .and_then(|value| value.get("parts"))
+                .and_then(|value| value.get(0))
+                .unwrap_or(&serde_json::Value::Null)
+            && carried.payload.provider.as_deref() == Some("gcp.gemini")),
+        "mixed carried/plain answer differs: {buffered:?}"
+    );
+    let first = buffered
+        .choice
+        .first()
+        .with_context(|| format!("first response content is missing: {:?}", buffered.choice))?;
+    let AssistantContent::CarriedText(carried) = first else {
+        anyhow::bail!("the signed received prefix must be carried");
+    };
+    ensure!(
+        carried
+            .signed_answer()
+            .map(|answer| answer.signature.as_str())
+            == Some("synthetic-signed-pa"),
+        "carried signature differs: {carried:?}"
+    );
+    ensure!(
+        buffered.text() == "Paris",
+        "buffered answer differs: {buffered:?}"
+    );
+    ensure!(
+        buffered.usage.input_tokens == Some(4),
+        "input usage differs: {:?}",
+        buffered.usage
+    );
+    ensure!(
+        buffered.usage.output_tokens == Some(2),
+        "output usage differs: {:?}",
+        buffered.usage
+    );
+    ensure!(
+        buffered.usage.total_tokens == Some(6),
+        "total usage differs: {:?}",
+        buffered.usage
+    );
+
+    let report = buffered_streaming_text_parity(model, |request| request).await?;
+    ensure!(
+        report.response == "Paris",
+        "reported answer differs: {report:?}"
+    );
+    ensure!(
+        report.prompt_tokens == 4,
+        "reported input usage differs: {report:?}"
+    );
+    ensure!(
+        report.generated_tokens == 2,
+        "reported output usage differs: {report:?}"
+    );
+    let requests = http.requests();
+    ensure!(requests.len() == 3, "expected three requests: {requests:?}");
+    let remaining = http.remaining_responses();
+    ensure!(remaining == 0, "unconsumed mock responses: {remaining}");
+    Ok(())
+}
+
+/// Synthetic ordinary-text control keeps the existing Paris normalization
+/// and reported-usage premise on a real decoder with no carried answer.
+#[tokio::test]
+async fn decoded_plain_paris_keeps_the_existing_conformance_premise() -> anyhow::Result<()> {
+    use rig_core::providers::gemini::{GeminiConfig, completion::GenerateContent};
+    use rig_core::test_utils::{MockHttpResponse, SequencedHttpClient};
+
+    let body = ag010_gemini_body(false);
+    let http = SequencedHttpClient::new([
+        MockHttpResponse::success_typed(body.to_string(), "application/json"),
+        MockHttpResponse::success_typed(body.to_string(), "application/json"),
+        MockHttpResponse::success_typed(format!("data: {body}\n\n"), "text/event-stream"),
+    ]);
+    let model = rig_core::Model::new(
+        GenerateContent::new(GeminiConfig::new("synthetic-test-key"), "gemini-2.5-flash"),
+        http.clone(),
+    );
+    let buffered = model
+        .call(CompletionRequest::new("probe the synthetic answer"))
+        .await?;
+    ensure!(
+        buffered.raw == body,
+        "buffered raw differs: {:?}",
+        buffered.raw
+    );
+    ensure!(
+        matches!(buffered.choice.as_slice(), [AssistantContent::Text(text)] if text.text == "Paris"),
+        "plain answer differs: {buffered:?}"
+    );
+    ensure!(
+        buffered.text() == "Paris",
+        "buffered answer differs: {buffered:?}"
+    );
+    let report = buffered_streaming_text_parity(model, |request| request).await?;
+    ensure!(
+        report.response == "Paris",
+        "reported answer differs: {report:?}"
+    );
+    ensure!(
+        report.prompt_tokens == 4,
+        "reported input usage differs: {report:?}"
+    );
+    ensure!(
+        report.generated_tokens == 2,
+        "reported output usage differs: {report:?}"
+    );
+    let requests = http.requests();
+    ensure!(requests.len() == 3, "expected three requests: {requests:?}");
+    let remaining = http.remaining_responses();
+    ensure!(remaining == 0, "unconsumed mock responses: {remaining}");
+    Ok(())
+}
+
+/// Synthetic empty control proves raw-only text is not promoted and an
+/// empty canonical answer fails the unchanged Paris premise.
+#[tokio::test]
+async fn an_empty_decoded_answer_stays_empty_and_refuses_the_paris_premise() -> anyhow::Result<()> {
+    use rig_core::providers::openai::{OpenAIConfig, responses_api::wire::Responses};
+    use rig_core::test_utils::{MockHttpResponse, SequencedHttpClient};
+
+    let mut body = ag010_responses_body(None);
+    body["synthetic_raw_only"]["text"] = serde_json::json!("Paris");
+    let http = SequencedHttpClient::new([
+        MockHttpResponse::success_typed(body.to_string(), "application/json"),
+        MockHttpResponse::success_typed(body.to_string(), "application/json"),
+        MockHttpResponse::success_typed(ag010_responses_sse(&body, false), "text/event-stream"),
+    ]);
+    let model = rig_core::Model::new(
+        Responses::new(OpenAIConfig::new("synthetic-test-key"), "gpt-4o-mini"),
+        http.clone(),
+    );
+    let buffered = model
+        .call(CompletionRequest::new("probe the synthetic empty answer"))
+        .await?;
+    ensure!(
+        buffered.raw == body,
+        "buffered raw differs: {:?}",
+        buffered.raw
+    );
+    ensure!(
+        buffered.choice.is_empty(),
+        "empty answer gained content: {:?}",
+        buffered.choice
+    );
+    ensure!(
+        buffered.text().is_empty(),
+        "empty answer gained text: {buffered:?}"
+    );
+    ensure!(
+        buffered.usage.is_reported(),
+        "usage is missing: {:?}",
+        buffered.usage
+    );
+    let error = buffered_streaming_text_parity(model, |request| request).await;
+    let Err(ScenarioError::Contract { scenario, details }) = error else {
+        anyhow::bail!("empty canonical text must fail the existing Paris premise");
+    };
+    ensure!(
+        scenario == "buffered_streaming_text_parity",
+        "scenario differs: {scenario}"
+    );
+    ensure!(
+        details.starts_with("buffered=\"\", streamed=\"\", buffered_usage="),
+        "contract details differ: {details}"
+    );
+    let requests = http.requests();
+    ensure!(requests.len() == 3, "expected three requests: {requests:?}");
+    let remaining = http.remaining_responses();
+    ensure!(remaining == 0, "unconsumed mock responses: {remaining}");
+    Ok(())
 }

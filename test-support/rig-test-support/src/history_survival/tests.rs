@@ -77,6 +77,52 @@ data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"rea
     );
 }
 
+/// A Responses message's `phase` is delivered by its `done` item (or the
+/// whole reply) and must come back on the assistant item with the same id,
+/// not merely somewhere in the request. A `null` phase delivers nothing.
+#[test]
+fn responses_message_phase_must_return_on_its_own_item() {
+    let body = "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"phase\":\"commentary\",\"content\":[]}}\n\n\
+data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"phase\":\"commentary\",\"content\":[]}}\n\n\
+data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"id\":\"msg_2\",\"phase\":\"final_answer\",\"content\":[]}}\n\n\
+data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"id\":\"msg_3\",\"phase\":null,\"content\":[]}}\n\n";
+    assert_eq!(
+        kinds(&response_tokens(Dialect::OpenAiResponses, body)),
+        [("phase", "commentary"), ("phase", "final_answer")]
+    );
+    let item = |id: &str, phase: Option<&str>| {
+        let mut item = json!({ "type": "message", "role": "assistant", "id": id, "content": [] });
+        if let Some(phase) = phase {
+            item["phase"] = json!(phase);
+        }
+        item
+    };
+    let carried = json!({ "input": [item("msg_1", Some("commentary")), item("msg_2", Some("final_answer"))] });
+    assert!(lost_tokens(Dialect::OpenAiResponses, body, &carried).is_empty());
+    let dropped = json!({ "input": [item("msg_1", Some("commentary")), item("msg_2", None)] });
+    assert_eq!(
+        kinds(&lost_tokens(Dialect::OpenAiResponses, body, &dropped)),
+        [("phase", "final_answer")]
+    );
+    // Swapped between items, or re-sent on a user message, it is lost.
+    let swapped = json!({ "input": [
+        item("msg_1", Some("final_answer")),
+        item("msg_2", Some("commentary")),
+    ]});
+    assert_eq!(
+        kinds(&lost_tokens(Dialect::OpenAiResponses, body, &swapped)),
+        [("phase", "commentary"), ("phase", "final_answer")]
+    );
+    let on_user = json!({ "input": [
+        item("msg_1", Some("commentary")),
+        { "type": "message", "role": "user", "id": "msg_2", "phase": "final_answer", "content": [] },
+    ]});
+    assert_eq!(
+        kinds(&lost_tokens(Dialect::OpenAiResponses, body, &on_user)),
+        [("phase", "final_answer")]
+    );
+}
+
 #[test]
 fn chat_completion_streams_deliver_tool_ids_once() {
     let body = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"f\",\"arguments\":\"\"}}]}}]}\n\n\
@@ -89,7 +135,18 @@ data: [DONE]\n\n";
 }
 
 #[test]
-fn gemini_and_ollama_records_deliver_their_opaque_fields() {
+fn ollama_records_deliver_their_tool_ids() {
+    assert_eq!(Dialect::from_path("/api/chat"), Dialect::ChatCompletions);
+    let ollama = "{\"message\":{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_o\",\"function\":{\"name\":\"f\",\"arguments\":{}}}]},\"done\":false}\n\
+{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true}\n";
+    assert_eq!(
+        kinds(&response_tokens(Dialect::ChatCompletions, ollama)),
+        [("tool_call_id", "call_o")]
+    );
+}
+
+#[test]
+fn gemini_records_deliver_their_opaque_fields() {
     let gemini = json!({ "candidates": [{ "content": { "parts": [
         { "text": "t", "thoughtSignature": "ts-1" },
         { "functionCall": { "name": "f", "args": {}, "id": "call_g" } },
@@ -98,12 +155,6 @@ fn gemini_and_ollama_records_deliver_their_opaque_fields() {
     assert_eq!(
         kinds(&response_tokens(Dialect::GeminiGenerateContent, &gemini)),
         [("thought_signature", "ts-1"), ("tool_call_id", "call_g")]
-    );
-    let ollama = "{\"message\":{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_o\",\"function\":{\"name\":\"f\",\"arguments\":{}}}]},\"done\":false}\n\
-{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true}\n";
-    assert_eq!(
-        kinds(&response_tokens(Dialect::OllamaChat, ollama)),
-        [("tool_call_id", "call_o")]
     );
 }
 
@@ -162,18 +213,7 @@ fn responses_parallel_calls_form_one_assistant_run() {
 }
 
 #[test]
-fn ollama_and_gemini_pair_by_name_in_order() {
-    let ollama = json!({ "messages": [
-        { "role": "assistant", "content": "", "tool_calls": [
-            { "function": { "name": "add", "arguments": {} } },
-            { "function": { "name": "multiply", "arguments": {} } },
-        ]},
-        { "role": "tool", "tool_name": "add", "content": "10" },
-    ]});
-    let unpaired = unpaired_tool_calls(Dialect::OllamaChat, &ollama);
-    assert_eq!(unpaired.len(), 1);
-    assert_eq!(unpaired[0].label, "multiply");
-
+fn gemini_pairs_by_name_in_order() {
     let gemini = json!({ "contents": [
         { "role": "model", "parts": [{ "functionCall": { "name": "f", "args": {} } }] },
         { "role": "user", "parts": [{ "functionResponse": { "name": "f", "response": {} } }] },

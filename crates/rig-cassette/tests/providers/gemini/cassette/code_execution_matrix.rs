@@ -24,28 +24,8 @@
 //!
 //! | # | cell | transport | surface | dimension pinned |
 //! |---|------|-----------|---------|------------------|
-//! | 1 | `blocking_raw_model_answers_after_code_execution` | blocking | `CompletionModel::completion` | baseline: code parts skipped, text survives |
-//! | 2 | `streaming_raw_model_answers_after_code_execution` | streaming | `CompletionModel::stream` | parity twin of 1 |
-//! | 3 | `blocking_agent_prompt_answers_after_code_execution` | blocking | `Agent::prompt` | agent surface |
-//! | 4 | `streaming_agent_prompt_answers_after_code_execution` | streaming | `Agent::prompt` | parity twin of 3 |
-//! | 5 | `blocking_raw_completion_keeps_native_code_parts` | blocking | `CompletionResponse::raw` | escape hatch still exposes the parts |
-//! | 6 | `blocking_failed_code_execution_outcome` | blocking | `completion` | `OUTCOME_FAILED` result part |
-//! | 7 | `streaming_failed_code_execution_outcome` | streaming | `stream` | parity twin of 6 |
-//! | 8 | `blocking_multiple_code_execution_rounds` | blocking | `completion` | several code/result pairs in one turn |
-//! | 9 | `streaming_multiple_code_execution_rounds` | streaming | `stream` | parity twin of 8 |
-//! | 10 | `blocking_code_execution_with_visible_thoughts` | blocking | `completion` | thought parts adjacent to code parts |
 //! | 11 | `streaming_code_execution_with_visible_thoughts` | streaming | `stream` | parity twin of 10 |
-//! | 12 | `blocking_code_execution_with_preamble` | blocking | `completion` | `systemInstruction` + `codeExecution` |
-//! | 13 | `streaming_code_execution_with_preamble` | streaming | `stream` | parity twin of 12 |
-//! | 14 | `blocking_code_execution_unicode_output` | blocking | `completion` | non-ASCII stdout in the result part |
-//! | 15 | `streaming_code_execution_unicode_output` | streaming | `stream` | parity twin of 14; multi-byte chunk splitting |
-//! | 16 | `blocking_code_execution_large_stdout` | blocking | `completion` | long `codeExecutionResult.output` |
-//! | 17 | `streaming_code_execution_large_stdout` | streaming | `stream` | parity twin of 16 |
-//! | 18 | `blocking_code_execution_capped_by_max_tokens` | blocking | `completion` | sampling knobs alongside the tool |
-//! | 19 | `streaming_code_execution_capped_by_max_tokens` | streaming | `stream` | parity twin of 18 |
-//! | 20 | `blocking_code_execution_on_gemini_3_flash` | blocking | `completion` | second model family |
-//! | 21 | `streaming_code_execution_on_gemini_3_flash` | streaming | `stream` | parity twin of 20 |
-//! | 22 | `blocking_code_execution_replayed_in_chat_history` | blocking | `Agent::chat` | a code-execution turn replayed as history |
+//! | 22 | `blocking_code_execution_replayed_in_chat_history` | blocking | `Agent::chat` | a code-execution turn replayed as history; an exact named mismatch witness, the port replays it without its code parts |
 //! | 23 | `code_execution_only_turn_is_an_empty_response` | — | unit | see below |
 //! | 24 | `code_execution_parts_are_skipped_in_every_position` | — | unit | see below |
 //! | 25 | `unmodeled_part_kinds_still_fail_loudly` | — | unit | see below |
@@ -64,18 +44,19 @@
 //! `RIG_PROVIDER_TEST_MODE=record GEMINI_API_KEY=... cargo test -p rig --all-features --test gemini code_execution_matrix -- --test-threads=1`
 
 use futures::StreamExt;
-use rig::completion::CompletionModel;
-use rig::message::{AssistantContent, Message};
-use rig::prelude::*;
+use rig::message::AssistantContent;
 use rig::providers::gemini;
-use rig::providers::gemini::completion::gemini_api_types::GenerateContentResponse;
-use rig::streaming::{Delta, StreamEvent};
-use serde::Deserialize;
+use rig::streaming::Item;
+use rig::streaming::StreamEvent;
 use serde_json::{Value, json};
 
+use anyhow::Context;
+
+use super::super::request_witness_support::{NamedCase, with_gemini_request_witness_cassette};
 use super::super::support::{
-    BoundGemini, assert_recorded_response_contains, with_gemini_code_execution_cassette,
+    assert_recorded_response_contains, with_gemini_code_execution_cassette,
 };
+use rig::completion::CompletionRequest;
 
 /// Wire markers of the two code-execution part kinds, as Gemini spells them.
 pub(super) const CODE_PART_MARKERS: &[&str] = &["executableCode", "codeExecutionResult"];
@@ -144,442 +125,41 @@ pub(super) fn states(text: &str, value: &str) -> bool {
     })
 }
 
-fn text_of(choice: &[AssistantContent]) -> String {
-    choice
-        .iter()
-        .filter_map(|content| match content {
-            AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
-        .collect()
-}
-
 /// Drain a normalized stream into its text and terminal record.
 async fn drain(
-    mut stream: rig::streaming::StreamingCompletionResponse,
+    mut stream: rig::streaming::CompletionStream,
 ) -> (String, Vec<AssistantContent>, bool) {
     let mut text = String::new();
-    let mut saw_terminal = false;
     while let Some(item) = stream.next().await {
-        match item.expect("no stream item should be an error") {
-            StreamEvent::BlockDelta {
-                delta: Delta::Text { text: chunk },
-                ..
-            } => text.push_str(&chunk),
-            StreamEvent::Final(_) => saw_terminal = true,
-            _ => {}
+        if let Item::Event(StreamEvent::Text { text: chunk, .. }) =
+            item.expect("no stream item should be an error")
+        {
+            text.push_str(&chunk)
         }
     }
-    (text, stream.snapshot(), saw_terminal)
-}
-
-/// One blocking cell: run the prompt with code execution enabled and assert
-/// the turn survived with its answer intact.
-async fn blocking_body(
-    client: BoundGemini,
-    scenario: &'static str,
-    model_id: &'static str,
-    prompt: &'static str,
-    params: Value,
-    max_tokens: Option<u64>,
-    expected_substring: &'static str,
-) {
-    let model = client.completion(model_id);
-    let mut request = model
-        .completion_request(prompt)
-        .temperature(0.0)
-        .additional_params(params);
-    if let Some(max_tokens) = max_tokens {
-        request = request.max_tokens(max_tokens);
-    }
-
-    let response = CompletionModel::completion(&model, request.build())
-        .await
-        .expect("a turn carrying code-execution parts must still convert");
-
-    let text = text_of(&response.choice);
-    assert!(
-        states(&text, expected_substring),
-        "{scenario}: the model's answer must survive the code-execution parts; \
-             expected {expected_substring:?} in {text:?}"
-    );
-}
-
-/// The streaming twin of [`blocking_body`], over the same request.
-async fn streaming_body(
-    client: BoundGemini,
-    scenario: &'static str,
-    model_id: &'static str,
-    prompt: &'static str,
-    params: Value,
-    max_tokens: Option<u64>,
-    expected_substring: &'static str,
-) {
-    let model = client.completion(model_id);
-    let mut request = model
-        .completion_request(prompt)
-        .temperature(0.0)
-        .additional_params(params);
-    if let Some(max_tokens) = max_tokens {
-        request = request.max_tokens(max_tokens);
-    }
-
-    let stream = CompletionModel::stream(&model, request.build())
-        .await
-        .expect("stream should open");
-    let (streamed, choice, saw_terminal) = drain(stream).await;
-
-    assert!(
-        states(&streamed, expected_substring),
-        "{scenario}: streamed text must carry the answer; expected \
-             {expected_substring:?} in {streamed:?}"
-    );
-    assert_eq!(
-        text_of(&choice),
-        streamed,
-        "{scenario}: the aggregated choice must equal the streamed deltas"
-    );
-    assert!(
+    let response = stream.finish().await;
+    let saw_terminal = response.is_ok();
+    (
+        text,
+        response.map(|response| response.choice).unwrap_or_default(),
         saw_terminal,
-        "{scenario}: a completed code-execution turn must yield a terminal record"
-    );
+    )
 }
 
 // --- 1/2: baseline, raw model, blocking and streaming ---------------------
 
-#[tokio::test]
-async fn blocking_raw_model_answers_after_code_execution() {
-    const SCENARIO: &str = "code_execution_matrix/blocking_raw_model_answers_after_code_execution";
-    // The literal is repeated here on purpose: the cassette safety
-    // scan reads each scenario out of this call site's AST.
-    with_gemini_code_execution_cassette("code_execution_matrix/blocking_raw_model_answers_after_code_execution", |client| {
-        blocking_body(
-            client,
-            SCENARIO,
-            gemini::completion::GEMINI_2_5_FLASH,
-            "Use the code execution tool to compute 7 factorial. State the number in your answer.",
-            code_execution_params(),
-            Some(2000),
-            "5040",
-        )
-    })
-    .await;
-
-    assert_recorded_response_contains(SCENARIO, CODE_PART_MARKERS);
-}
-
-#[tokio::test]
-async fn streaming_raw_model_answers_after_code_execution() {
-    const SCENARIO: &str = "code_execution_matrix/streaming_raw_model_answers_after_code_execution";
-    // The literal is repeated here on purpose: the cassette safety
-    // scan reads each scenario out of this call site's AST.
-    with_gemini_code_execution_cassette("code_execution_matrix/streaming_raw_model_answers_after_code_execution", |client| {
-        streaming_body(
-            client,
-            SCENARIO,
-            gemini::completion::GEMINI_2_5_FLASH,
-            "Use the code execution tool to compute 7 factorial. State the number in your answer.",
-            code_execution_params(),
-            Some(2000),
-            "5040",
-        )
-    })
-    .await;
-
-    assert_recorded_response_contains(SCENARIO, CODE_PART_MARKERS);
-}
-
 // --- 3/4: agent surface ---------------------------------------------------
-
-#[tokio::test]
-async fn blocking_agent_prompt_answers_after_code_execution() {
-    with_gemini_code_execution_cassette(
-        "code_execution_matrix/blocking_agent_prompt_answers_after_code_execution",
-        |client| async move {
-            let agent = client
-                .agent(gemini::completion::GEMINI_2_5_FLASH)
-                .temperature(0.0)
-                .max_tokens(2000)
-                .additional_params(code_execution_params())
-                .build();
-
-            let answer = agent
-                .prompt("Use the code execution tool to compute 2 to the power of 20. State the number in your answer.")
-                .await
-                .expect("agent prompt must survive code-execution parts");
-
-            assert!(
-                states(&answer.output, "1048576"),
-                "agent answer should carry the computed value, got {answer:?}"
-            );
-        },
-    )
-    .await;
-
-    assert_recorded_response_contains(
-        "code_execution_matrix/blocking_agent_prompt_answers_after_code_execution",
-        CODE_PART_MARKERS,
-    );
-}
-
-#[tokio::test]
-async fn streaming_agent_prompt_answers_after_code_execution() {
-    with_gemini_code_execution_cassette(
-        "code_execution_matrix/streaming_agent_prompt_answers_after_code_execution",
-        |client| async move {
-            let agent = client
-                .agent(gemini::completion::GEMINI_2_5_FLASH)
-                .temperature(0.0)
-                .max_tokens(2000)
-                .additional_params(code_execution_params())
-                .build();
-
-            let mut stream = agent
-                .prompt("Use the code execution tool to compute 2 to the power of 20. State the number in your answer.")
-                .stream();
-
-            let mut answer = String::new();
-            while let Some(item) = stream.next().await {
-                if let rig::agent::MultiTurnStreamItem::StreamAssistantItem(
-                    StreamEvent::BlockDelta {
-                        delta: Delta::Text { text },
-                        ..
-                    },
-                ) = item.expect("no stream item should be an error")
-                {
-                    answer.push_str(&text);
-                }
-            }
-
-            assert!(
-                states(&answer, "1048576"),
-                "streamed agent answer should carry the computed value, got {answer:?}"
-            );
-        },
-    )
-    .await;
-
-    assert_recorded_response_contains(
-        "code_execution_matrix/streaming_agent_prompt_answers_after_code_execution",
-        CODE_PART_MARKERS,
-    );
-}
 
 // --- 5: provider-native escape hatch --------------------------------------
 
-#[tokio::test]
-async fn blocking_raw_completion_keeps_native_code_parts() {
-    const SCENARIO: &str = "code_execution_matrix/blocking_raw_completion_keeps_native_code_parts";
-
-    with_gemini_code_execution_cassette(
-        "code_execution_matrix/blocking_raw_completion_keeps_native_code_parts",
-        |client| async move {
-            use rig::providers::gemini::completion::gemini_api_types::PartKind;
-
-            let model = client.completion(gemini::completion::GEMINI_2_5_FLASH);
-            let request = model
-                .completion_request(
-                    "Use the code execution tool to sum the integers from 1 to 100. \
-                 State the number in your answer.",
-                )
-                .temperature(0.0)
-                .max_tokens(2000)
-                .additional_params(code_execution_params())
-                .build();
-
-            let response = model
-                .completion(request)
-                .await
-                .expect("a turn carrying code-execution parts must still convert");
-
-            let document = GenerateContentResponse::deserialize(&response.raw)
-                .expect("raw is Gemini's own generateContent document");
-            let parts = document
-                .candidates
-                .first()
-                .and_then(|candidate| candidate.content.as_ref())
-                .map(|content| content.parts.as_slice())
-                .expect("the recorded candidate carries content");
-
-            // `raw` is the supported way to reach what the normalized choice
-            // cannot represent: the code and its output are still here,
-            // verbatim, on the document the reply arrived as.
-            assert!(
-                parts
-                    .iter()
-                    .any(|part| matches!(part.part, PartKind::ExecutableCode(_))),
-                "`raw` must expose the executableCode part verbatim"
-            );
-            assert!(
-                parts
-                    .iter()
-                    .any(|part| matches!(part.part, PartKind::CodeExecutionResult(_))),
-                "`raw` must expose the codeExecutionResult part verbatim"
-            );
-
-            // And the same bytes reached the caller as an answer rather than
-            // an error — the bug this matrix is about.
-            assert!(
-                states(&text_of(&response.choice), "5050"),
-                "normalized answer should carry the computed value"
-            );
-        },
-    )
-    .await;
-
-    assert_recorded_response_contains(SCENARIO, CODE_PART_MARKERS);
-}
-
 // --- 6/7: failed code outcome ---------------------------------------------
 
-const FAILING_CODE_PROMPT: &str = "Use the code execution tool to run exactly `print(1/0)` first. After it fails, \
-     say the word DIVISIONERROR in your answer.";
-
-#[tokio::test]
-async fn blocking_failed_code_execution_outcome() {
-    const SCENARIO: &str = "code_execution_matrix/blocking_failed_code_execution_outcome";
-    // The literal is repeated here on purpose: the cassette safety
-    // scan reads each scenario out of this call site's AST.
-    with_gemini_code_execution_cassette(
-        "code_execution_matrix/blocking_failed_code_execution_outcome",
-        |client| {
-            blocking_body(
-                client,
-                SCENARIO,
-                gemini::completion::GEMINI_2_5_FLASH,
-                FAILING_CODE_PROMPT,
-                code_execution_params(),
-                Some(2000),
-                "DIVISIONERROR",
-            )
-        },
-    )
-    .await;
-
-    assert_recorded_response_contains(SCENARIO, CODE_PART_MARKERS);
-}
-
-#[tokio::test]
-async fn streaming_failed_code_execution_outcome() {
-    const SCENARIO: &str = "code_execution_matrix/streaming_failed_code_execution_outcome";
-    // The literal is repeated here on purpose: the cassette safety
-    // scan reads each scenario out of this call site's AST.
-    with_gemini_code_execution_cassette(
-        "code_execution_matrix/streaming_failed_code_execution_outcome",
-        |client| {
-            streaming_body(
-                client,
-                SCENARIO,
-                gemini::completion::GEMINI_2_5_FLASH,
-                FAILING_CODE_PROMPT,
-                code_execution_params(),
-                Some(2000),
-                "DIVISIONERROR",
-            )
-        },
-    )
-    .await;
-
-    assert_recorded_response_contains(SCENARIO, CODE_PART_MARKERS);
-}
-
 // --- 8/9: several code rounds in one turn ---------------------------------
-
-const MULTI_ROUND_PROMPT: &str = "Use the code execution tool twice, in two separate runs: first compute 6*7, \
-     then in a second run compute 6*7 plus 100. State both numbers in your answer.";
-
-#[tokio::test]
-async fn blocking_multiple_code_execution_rounds() {
-    const SCENARIO: &str = "code_execution_matrix/blocking_multiple_code_execution_rounds";
-    // The literal is repeated here on purpose: the cassette safety
-    // scan reads each scenario out of this call site's AST.
-    with_gemini_code_execution_cassette(
-        "code_execution_matrix/blocking_multiple_code_execution_rounds",
-        |client| {
-            blocking_body(
-                client,
-                SCENARIO,
-                gemini::completion::GEMINI_2_5_FLASH,
-                MULTI_ROUND_PROMPT,
-                code_execution_params(),
-                Some(2000),
-                "142",
-            )
-        },
-    )
-    .await;
-
-    assert_recorded_response_contains(SCENARIO, CODE_PART_MARKERS);
-}
-
-#[tokio::test]
-async fn streaming_multiple_code_execution_rounds() {
-    const SCENARIO: &str = "code_execution_matrix/streaming_multiple_code_execution_rounds";
-    // The literal is repeated here on purpose: the cassette safety
-    // scan reads each scenario out of this call site's AST.
-    with_gemini_code_execution_cassette(
-        "code_execution_matrix/streaming_multiple_code_execution_rounds",
-        |client| {
-            streaming_body(
-                client,
-                SCENARIO,
-                gemini::completion::GEMINI_2_5_FLASH,
-                MULTI_ROUND_PROMPT,
-                code_execution_params(),
-                Some(2000),
-                "142",
-            )
-        },
-    )
-    .await;
-
-    assert_recorded_response_contains(SCENARIO, CODE_PART_MARKERS);
-}
 
 // --- 10/11: thought parts adjacent to code parts --------------------------
 
 const THINKING_PROMPT: &str = "Use the code execution tool to compute the 20th Fibonacci number. \
      State the number in your answer.";
-
-#[tokio::test]
-async fn blocking_code_execution_with_visible_thoughts() {
-    const SCENARIO: &str = "code_execution_matrix/blocking_code_execution_with_visible_thoughts";
-
-    with_gemini_code_execution_cassette(
-        "code_execution_matrix/blocking_code_execution_with_visible_thoughts",
-        |client| async move {
-            let model = client.completion(gemini::completion::GEMINI_2_5_FLASH);
-            let request = model
-                .completion_request(THINKING_PROMPT)
-                .temperature(0.0)
-                .max_tokens(2500)
-                .additional_params(code_execution_params_with_thoughts())
-                .build();
-
-            let response = CompletionModel::completion(&model, request)
-                .await
-                .expect("code-execution parts next to thought parts must still convert");
-
-            assert!(
-                states(&text_of(&response.choice), "6765"),
-                "the answer must survive, got {:?}",
-                text_of(&response.choice)
-            );
-            // Thought parts stay reasoning; they are never folded into the text.
-            assert!(
-                response
-                    .choice
-                    .iter()
-                    .any(|content| matches!(content, AssistantContent::Reasoning(_))),
-                "includeThoughts should surface reasoning blocks"
-            );
-        },
-    )
-    .await;
-
-    assert_recorded_response_contains(SCENARIO, CODE_PART_MARKERS);
-    assert_recorded_response_contains(SCENARIO, &["\"thought\""]);
-}
 
 #[tokio::test]
 async fn streaming_code_execution_with_visible_thoughts() {
@@ -589,26 +169,21 @@ async fn streaming_code_execution_with_visible_thoughts() {
         "code_execution_matrix/streaming_code_execution_with_visible_thoughts",
         |client| async move {
             let model = client.completion(gemini::completion::GEMINI_2_5_FLASH);
-            let request = model
-                .completion_request(THINKING_PROMPT)
+            let request = CompletionRequest::new(THINKING_PROMPT)
                 .temperature(0.0)
                 .max_tokens(2500)
-                .additional_params(code_execution_params_with_thoughts())
-                .build();
+                .additional_params(code_execution_params_with_thoughts());
 
-            let stream = CompletionModel::stream(&model, request)
-                .await
-                .expect("stream should open");
+            let stream = model.stream(request).expect("stream should open");
             let (streamed, choice, saw_terminal) = drain(stream).await;
 
             assert!(
                 states(&streamed, "6765"),
                 "streamed answer must carry the value, got {streamed:?}"
             );
+            // The port aggregates a Gemini thought run as carried reasoning.
             assert!(
-                choice
-                    .iter()
-                    .any(|content| matches!(content, AssistantContent::Reasoning(_))),
+                choice.iter().any(rig_test_support::support::is_reasoning),
                 "streamed reasoning must aggregate as reasoning, not text"
             );
             assert!(saw_terminal, "the turn must produce a terminal record");
@@ -622,358 +197,83 @@ async fn streaming_code_execution_with_visible_thoughts() {
 
 // --- 12/13: system instruction alongside the tool -------------------------
 
-const PREAMBLE: &str = "You are a calculator. Always use the code execution tool, then \
-                        state the numeric result in plain text.";
-const PREAMBLE_PROMPT: &str = "What is 123 multiplied by 456?";
-
-#[tokio::test]
-async fn blocking_code_execution_with_preamble() {
-    const SCENARIO: &str = "code_execution_matrix/blocking_code_execution_with_preamble";
-
-    with_gemini_code_execution_cassette(
-        "code_execution_matrix/blocking_code_execution_with_preamble",
-        |client| async move {
-            let model = client.completion(gemini::completion::GEMINI_2_5_FLASH);
-            let request = model
-                .completion_request(PREAMBLE_PROMPT)
-                .preamble(PREAMBLE.to_string())
-                .temperature(0.0)
-                .max_tokens(2000)
-                .additional_params(code_execution_params())
-                .build();
-
-            let response = CompletionModel::completion(&model, request)
-                .await
-                .expect("systemInstruction + codeExecution must still convert");
-            assert!(
-                states(&text_of(&response.choice), "56088"),
-                "answer should carry the product, got {:?}",
-                text_of(&response.choice)
-            );
-        },
-    )
-    .await;
-
-    assert_recorded_response_contains(SCENARIO, CODE_PART_MARKERS);
-}
-
-#[tokio::test]
-async fn streaming_code_execution_with_preamble() {
-    const SCENARIO: &str = "code_execution_matrix/streaming_code_execution_with_preamble";
-
-    with_gemini_code_execution_cassette(
-        "code_execution_matrix/streaming_code_execution_with_preamble",
-        |client| async move {
-            let model = client.completion(gemini::completion::GEMINI_2_5_FLASH);
-            let request = model
-                .completion_request(PREAMBLE_PROMPT)
-                .preamble(PREAMBLE.to_string())
-                .temperature(0.0)
-                .max_tokens(2000)
-                .additional_params(code_execution_params())
-                .build();
-
-            let stream = CompletionModel::stream(&model, request)
-                .await
-                .expect("stream should open");
-            let (streamed, _, saw_terminal) = drain(stream).await;
-
-            assert!(
-                states(&streamed, "56088"),
-                "streamed answer should carry the product, got {streamed:?}"
-            );
-            assert!(saw_terminal, "the turn must produce a terminal record");
-        },
-    )
-    .await;
-
-    assert_recorded_response_contains(SCENARIO, CODE_PART_MARKERS);
-}
-
 // --- 14/15: non-ASCII stdout ----------------------------------------------
-
-const UNICODE_PROMPT: &str = "Use the code execution tool to run exactly \
-     `print('θερμοκρασία 🌡️ 25°C')` and then repeat its output verbatim in your answer.";
-
-#[tokio::test]
-async fn blocking_code_execution_unicode_output() {
-    const SCENARIO: &str = "code_execution_matrix/blocking_code_execution_unicode_output";
-    // The literal is repeated here on purpose: the cassette safety
-    // scan reads each scenario out of this call site's AST.
-    with_gemini_code_execution_cassette(
-        "code_execution_matrix/blocking_code_execution_unicode_output",
-        |client| {
-            blocking_body(
-                client,
-                SCENARIO,
-                gemini::completion::GEMINI_2_5_FLASH,
-                UNICODE_PROMPT,
-                code_execution_params(),
-                Some(2000),
-                "θερμοκρασία",
-            )
-        },
-    )
-    .await;
-
-    assert_recorded_response_contains(SCENARIO, CODE_PART_MARKERS);
-}
-
-#[tokio::test]
-async fn streaming_code_execution_unicode_output() {
-    // The cassette replay server fragments SSE bodies on byte boundaries that
-    // fall inside multi-byte characters, so this cell also pins that a code
-    // round's non-ASCII output survives chunk splitting.
-    const SCENARIO: &str = "code_execution_matrix/streaming_code_execution_unicode_output";
-    // The literal is repeated here on purpose: the cassette safety
-    // scan reads each scenario out of this call site's AST.
-    with_gemini_code_execution_cassette(
-        "code_execution_matrix/streaming_code_execution_unicode_output",
-        |client| {
-            streaming_body(
-                client,
-                SCENARIO,
-                gemini::completion::GEMINI_2_5_FLASH,
-                UNICODE_PROMPT,
-                code_execution_params(),
-                Some(2000),
-                "θερμοκρασία",
-            )
-        },
-    )
-    .await;
-
-    assert_recorded_response_contains(SCENARIO, CODE_PART_MARKERS);
-}
 
 // --- 16/17: long stdout ---------------------------------------------------
 
-const LARGE_OUTPUT_PROMPT: &str = "Use the code execution tool to run exactly `print(list(range(200)))`. \
-     Then say the word PRINTED in your answer.";
-
-#[tokio::test]
-async fn blocking_code_execution_large_stdout() {
-    const SCENARIO: &str = "code_execution_matrix/blocking_code_execution_large_stdout";
-    // The literal is repeated here on purpose: the cassette safety
-    // scan reads each scenario out of this call site's AST.
-    with_gemini_code_execution_cassette(
-        "code_execution_matrix/blocking_code_execution_large_stdout",
-        |client| {
-            blocking_body(
-                client,
-                SCENARIO,
-                gemini::completion::GEMINI_2_5_FLASH,
-                LARGE_OUTPUT_PROMPT,
-                code_execution_params(),
-                Some(2000),
-                "PRINTED",
-            )
-        },
-    )
-    .await;
-
-    assert_recorded_response_contains(SCENARIO, CODE_PART_MARKERS);
-}
-
-#[tokio::test]
-async fn streaming_code_execution_large_stdout() {
-    const SCENARIO: &str = "code_execution_matrix/streaming_code_execution_large_stdout";
-    // The literal is repeated here on purpose: the cassette safety
-    // scan reads each scenario out of this call site's AST.
-    with_gemini_code_execution_cassette(
-        "code_execution_matrix/streaming_code_execution_large_stdout",
-        |client| {
-            streaming_body(
-                client,
-                SCENARIO,
-                gemini::completion::GEMINI_2_5_FLASH,
-                LARGE_OUTPUT_PROMPT,
-                code_execution_params(),
-                Some(2000),
-                "PRINTED",
-            )
-        },
-    )
-    .await;
-
-    assert_recorded_response_contains(SCENARIO, CODE_PART_MARKERS);
-}
-
 // --- 18/19: sampling knobs alongside the tool -----------------------------
-
-const CAPPED_PROMPT: &str =
-    "Use the code execution tool to compute 999 times 999. State the number in your answer.";
-
-/// The caller's sampling knobs must ride the same request as the tool: an
-/// `additional_params` payload carrying `tools` is merged into the request
-/// beside `generationConfig`, and this asserts the merge kept both.
-fn assert_capped_request_carried_both_knobs(scenario: &str) {
-    super::super::support::assert_recorded_sampling_fields(
-        scenario,
-        &[
-            ("maxOutputTokens", serde_json::json!(1500)),
-            ("temperature", serde_json::json!(0.0)),
-        ],
-    );
-}
-
-#[tokio::test]
-async fn blocking_code_execution_capped_by_max_tokens() {
-    const SCENARIO: &str = "code_execution_matrix/blocking_code_execution_capped_by_max_tokens";
-    with_gemini_code_execution_cassette(
-        "code_execution_matrix/blocking_code_execution_capped_by_max_tokens",
-        |client| {
-            blocking_body(
-                client,
-                SCENARIO,
-                gemini::completion::GEMINI_2_5_FLASH,
-                CAPPED_PROMPT,
-                code_execution_params(),
-                Some(1500),
-                "998001",
-            )
-        },
-    )
-    .await;
-
-    assert_recorded_response_contains(SCENARIO, CODE_PART_MARKERS);
-    assert_capped_request_carried_both_knobs(SCENARIO);
-}
-
-#[tokio::test]
-async fn streaming_code_execution_capped_by_max_tokens() {
-    const SCENARIO: &str = "code_execution_matrix/streaming_code_execution_capped_by_max_tokens";
-    with_gemini_code_execution_cassette(
-        "code_execution_matrix/streaming_code_execution_capped_by_max_tokens",
-        |client| {
-            streaming_body(
-                client,
-                SCENARIO,
-                gemini::completion::GEMINI_2_5_FLASH,
-                CAPPED_PROMPT,
-                code_execution_params(),
-                Some(1500),
-                "998001",
-            )
-        },
-    )
-    .await;
-
-    assert_recorded_response_contains(SCENARIO, CODE_PART_MARKERS);
-    assert_capped_request_carried_both_knobs(SCENARIO);
-}
 
 // --- 20/21: a second model family -----------------------------------------
 
-const SECOND_MODEL_PROMPT: &str =
-    "Use the code execution tool to compute 17 squared. State the number in your answer.";
-
-#[tokio::test]
-async fn blocking_code_execution_on_gemini_3_flash() {
-    const SCENARIO: &str = "code_execution_matrix/blocking_code_execution_on_gemini_3_flash";
-    // The literal is repeated here on purpose: the cassette safety
-    // scan reads each scenario out of this call site's AST.
-    with_gemini_code_execution_cassette(
-        "code_execution_matrix/blocking_code_execution_on_gemini_3_flash",
-        |client| {
-            blocking_body(
-                client,
-                SCENARIO,
-                gemini::completion::GEMINI_3_FLASH_PREVIEW,
-                SECOND_MODEL_PROMPT,
-                json!({ "tools": [{ "codeExecution": {} }] }),
-                Some(2000),
-                "289",
-            )
-        },
-    )
-    .await;
-
-    assert_recorded_response_contains(SCENARIO, CODE_PART_MARKERS);
-}
-
-#[tokio::test]
-async fn streaming_code_execution_on_gemini_3_flash() {
-    const SCENARIO: &str = "code_execution_matrix/streaming_code_execution_on_gemini_3_flash";
-    // The literal is repeated here on purpose: the cassette safety
-    // scan reads each scenario out of this call site's AST.
-    with_gemini_code_execution_cassette(
-        "code_execution_matrix/streaming_code_execution_on_gemini_3_flash",
-        |client| {
-            streaming_body(
-                client,
-                SCENARIO,
-                gemini::completion::GEMINI_3_FLASH_PREVIEW,
-                SECOND_MODEL_PROMPT,
-                json!({ "tools": [{ "codeExecution": {} }] }),
-                Some(2000),
-                "289",
-            )
-        },
-    )
-    .await;
-
-    assert_recorded_response_contains(SCENARIO, CODE_PART_MARKERS);
-}
-
 // --- 22: a code-execution turn replayed as chat history -------------------
 
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 5 pattern,
+/// Q-GEMINI-CODE-PARTS): the recording is unchanged. Turn one replays
+/// interaction 0 exactly and its answer still states 169. The port keeps no
+/// code-execution part of that turn (they are skipped, not modelled), so
+/// interaction 1, which replays turn one as history, equals the recording
+/// except that `/contents/1/parts` omits exactly the recorded
+/// `executableCode` and `codeExecutionResult` parts; replay refuses it.
+/// Named loss: the second answer stating the doubled value, 338. The
+/// recording itself still replays both code parts in its continuation and
+/// carries them in a reply.
 #[tokio::test]
-async fn blocking_code_execution_replayed_in_chat_history() {
+async fn blocking_code_execution_replayed_in_chat_history() -> anyhow::Result<()> {
     const SCENARIO: &str = "code_execution_matrix/blocking_code_execution_replayed_in_chat_history";
 
-    with_gemini_code_execution_cassette(
+    with_gemini_request_witness_cassette(
         "code_execution_matrix/blocking_code_execution_replayed_in_chat_history",
-        |client| async move {
-            let agent = client
-                .agent(gemini::completion::GEMINI_2_5_FLASH)
-                .temperature(0.0)
-                .max_tokens(2000)
-                .additional_params(code_execution_params())
-                .build();
+        NamedCase::CodeExecutionHistory,
+        |client, _clock| async move {
+            let agent =
+                rig::AgentBuilder::new(client.completion(gemini::completion::GEMINI_2_5_FLASH))
+                    .temperature(0.0)
+                    .max_tokens(2000)
+                    .additional_params(code_execution_params())
+                    .build();
 
-            // Turn one produces the code-execution turn; turn two replays the
-            // normalized assistant message back to Gemini as history. The
-            // normalized message holds only the text — the code parts have no
-            // slot — so this cell pins that the trimmed history is still a legal
-            // request.
+            // Turn one produces the code-execution turn; turn two replays it
+            // to the same model.
+            let mut history = Vec::new();
             let first = agent
-                .prompt("Use the code execution tool to compute 13 times 13. State the number.")
+                .chat(
+                    "Use the code execution tool to compute 13 times 13. State the number.",
+                    &mut history,
+                )
                 .await
-                .expect("first code-execution turn should convert");
-            assert!(
-                states(&first.output, "169"),
+                .context("first code-execution turn should convert")?;
+            anyhow::ensure!(
+                states(&first.output(), "169"),
                 "first answer should carry 169, got {first:?}"
             );
-
-            let mut history = vec![
-                Message::user(
-                    "Use the code execution tool to compute 13 times 13. State the number.",
-                ),
-                Message::assistant(first.output),
-            ];
             let second = agent
                 .chat("Now double that number and state the result.", &mut history)
                 .await
-                .expect("history replay after a code-execution turn should succeed");
-            assert!(
-                states(&second.output, "338"),
-                "second answer should carry the doubled value, got {second:?}"
-            );
+                .map(|_| ());
+            drop(agent);
+            Ok(second)
         },
     )
-    .await;
+    .await?;
 
+    let bodies = crate::cassettes::recorded_interaction_bodies("gemini", SCENARIO);
+    let replayed = &bodies.last().expect("a continuation").0;
+    for marker in CODE_PART_MARKERS {
+        anyhow::ensure!(
+            replayed.contains(marker),
+            "the continuation replays the turn's {marker} part"
+        );
+    }
     assert_recorded_response_contains(SCENARIO, CODE_PART_MARKERS);
+    Ok(())
 }
 
 // --- 23-25: states a live turn cannot be made to produce ------------------
 
 mod unit {
-    use rig::completion::{CompletionModel, CompletionResponse};
+    use rig::completion::CompletionResponse;
     use rig::error::ProviderError;
-    use rig::prelude::*;
-    use rig::providers::gemini::Gemini;
+    use rig::providers::gemini::GeminiConfig;
     use rig::test_utils::RecordingHttpClient;
     use serde_json::{Value, json};
 
@@ -1017,11 +317,11 @@ mod unit {
     /// stated here and carried by the real wire, driver and decoder — the
     /// same path every recorded cell above runs, with the reply substituted.
     async fn completion_of(parts: Vec<Value>) -> Result<CompletionResponse, ProviderError> {
-        let model = Gemini::new("unit-key")
-            .bind(RecordingHttpClient::new(reply_with(parts)))
+        let model = GeminiConfig::new("unit-key")
+            .connect(RecordingHttpClient::new(reply_with(parts)))
             .completion("gemini-2.5-flash");
-        let request = model.completion_request("unit").build();
-        model.completion(request).await
+        let request = rig::completion::CompletionRequest::new("unit");
+        model.call(request).await
     }
 
     /// Not a recording: Gemini always narrates a code round, so a candidate

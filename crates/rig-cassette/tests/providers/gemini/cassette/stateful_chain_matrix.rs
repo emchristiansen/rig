@@ -5,6 +5,8 @@
 //! committed chain replays but cannot seed a live call later. Record a chain
 //! in one session.
 
+use rig_test_support::cassette_models::GeminiModels;
+use rig_test_support::cassette_models::MapWire;
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, resume_unwind};
 use std::sync::{Arc, Mutex};
@@ -12,18 +14,19 @@ use std::time::Duration;
 
 use futures::FutureExt;
 
-use rig::completion::{CompletionModel, CompletionRequest, ToolDefinition};
+use rig::completion::ToolDefinition;
+use rig::completion::{CompletionRequest, GenerationOptions, ProviderOptions, Reasoning};
 use rig::message::{
-    AssistantContent, Document, DocumentMediaType, DocumentSourceKind, Message, ToolCall,
-    ToolResultContent, UserContent,
+    AssistantContent, Document, DocumentMediaType, DocumentSourceKind, Message, UserContent,
 };
+use rig::message::{ToolCall, ToolResultContent};
 use rig::providers::gemini;
 use rig::providers::gemini::cached_content::{CacheExpiry, NewCachedContent};
-use rig::providers::gemini::interactions_api::AdditionalParameters;
+use rig::providers::gemini::extension::{GeminiOptions, InteractionsOptions};
 use serde_json::{Value, json};
 
 use super::super::support::{
-    BoundGemini, always_deleting_cached_contents, with_gemini_interactions_cassette,
+    always_deleting_cached_contents, with_gemini_interactions_cassette,
     with_gemini_prompt_caching_cassette,
 };
 
@@ -60,35 +63,17 @@ const FILE_TEXT: &str =
     "Warehouse note. The ordering token is violet-needle. The shelf code is K-4471.";
 
 fn ask_with(history: Vec<Message>) -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        chat_history: history,
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: Some(1024),
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    }
+    let mut request = CompletionRequest::from(history);
+    request.max_tokens = Some(1024);
+    request
 }
 
 fn ask(prompt: &str) -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        chat_history: vec![Message::user(prompt)],
-        documents: vec![],
-        tools: vec![],
-        temperature: Some(0.0),
-        max_tokens: Some(64),
-        tool_choice: None,
-        additional_params: Some(json!({
-            "generationConfig": { "thinkingConfig": { "thinkingBudget": 0 } }
-        })),
-        output_schema: None,
-        record_telemetry_content: false,
-    }
+    let mut request = CompletionRequest::from(vec![Message::user(prompt)]);
+    request.temperature = Some(0.0);
+    request.max_tokens = Some(64);
+    request.options = GenerationOptions::default().reasoning(Reasoning::Off);
+    request
 }
 
 /// One cache through its whole life: create, generate against it, extend its
@@ -101,7 +86,7 @@ async fn cached_content_lifecycle_chain() {
     const SCENARIO: &str = "stateful_chain_matrix/cached_content_lifecycle_chain";
     with_gemini_prompt_caching_cassette(
         "stateful_chain_matrix/cached_content_lifecycle_chain",
-        |client: BoundGemini| async move {
+        |client: GeminiModels| async move {
             let caches = client.cached_contents();
             let created = caches
                 .create(
@@ -141,7 +126,7 @@ async fn cached_content_lifecycle_chain() {
                     .completion(CACHE_MODEL)
                     .map_wire(|wire| wire.with_cached_content(name.clone()));
                 let reply = model
-                    .completion(ask(
+                    .call(ask(
                         "What is the code of record alpha? Reply with the code only.",
                     ))
                     .await
@@ -152,7 +137,13 @@ async fn cached_content_lifecycle_chain() {
                     .update_expiry(&name, CacheExpiry::ttl(Duration::from_secs(240)))
                     .await
                     .expect("extend the TTL");
-                let listed = caches.list_with_page_size(1).await.expect("paged list");
+                let listed = rig::Model::new(
+                    caches.clone().wire.with_page_size(1),
+                    caches.clone().transport,
+                )
+                .list()
+                .await
+                .expect("paged list");
                 assert!(
                     listed.iter().any(|entry| entry.name == name),
                     "the cache is listed"
@@ -163,7 +154,7 @@ async fn cached_content_lifecycle_chain() {
             let refused = client
                 .completion(CACHE_MODEL)
                 .map_wire(|wire| wire.with_cached_content(created.name.clone()))
-                .completion(ask("What is the code of record alpha?"))
+                .call(ask("What is the code of record alpha?"))
                 .await;
             let refused = refused.expect_err("a deleted cache handle must be refused");
             let report = rig::error::ErrorReport::from(&refused);
@@ -253,7 +244,7 @@ async fn cached_content_lifecycle_chain() {
 
 fn lookup_tool() -> ToolDefinition {
     ToolDefinition {
-        name: "lookup_code".to_owned(),
+        name: rig_core::message::ToolName::new("lookup_code").expect("tool name"),
         description: "Return the code stored for a record.".to_owned(),
         parameters: json!({
             "type": "object",
@@ -277,7 +268,7 @@ fn only_call(choice: &[AssistantContent]) -> ToolCall {
 /// session, whether it passed or panicked. Every delete is attempted;
 /// failures are reported after the body's own panic, which is never hidden.
 async fn deleting_interactions<F: Future<Output = ()>>(
-    client: &BoundGemini,
+    client: &GeminiModels,
     stored: &Arc<Mutex<Vec<String>>>,
     body: F,
 ) {
@@ -293,9 +284,9 @@ async fn deleting_interactions<F: Future<Output = ()>>(
         let sent = http
             .delete(format!(
                 "{}/v1beta/interactions/{id}",
-                client.wire.base_url.trim_end_matches('/')
+                client.config.base_url.trim_end_matches('/')
             ))
-            .header("x-goog-api-key", client.wire.api_key.expose())
+            .header("x-goog-api-key", client.config.api_key.expose())
             .send()
             .await;
         match sent {
@@ -334,65 +325,63 @@ async fn interactions_chain_with_tool_call() {
                     .push(id.to_owned());
             };
             deleting_interactions(&client, &stored, async {
-                let model = client
-                    .clone()
-                    .map_wire(|config| config.interactions(INTERACTIONS_MODEL));
+                let model = client.clone().interactions(INTERACTIONS_MODEL);
                 let params = |previous: Option<String>| {
-                    serde_json::to_value(AdditionalParameters {
-                        store: Some(true),
-                        previous_interaction_id: previous,
-                        ..Default::default()
-                    })
-                    .expect("params serialize")
+                    let mut options = GeminiOptions::new().store(true);
+                    if let Some(previous) = previous {
+                        options = options.interactions(
+                            InteractionsOptions::new().previous_interaction_id(previous),
+                        );
+                    }
+                    ProviderOptions::new().set(options)
                 };
 
                 let first = model
-                    .completion(
-                        model
-                            .completion_request(
-                                "Use lookup_code to get the code of record alpha. Do not guess.",
-                            )
-                            .tool(lookup_tool())
-                            .additional_params(params(None))
-                            .build(),
+                    .call(
+                        CompletionRequest::new(
+                            "Use lookup_code to get the code of record alpha. Do not guess.",
+                        )
+                        .tool(lookup_tool())
+                        .provider_options(params(None)),
                     )
                     .await
                     .expect("turn one");
-                let first_id = first.response_id.clone().expect("an interaction id");
+                let first_id = first
+                    .response_id()
+                    .map(str::to_owned)
+                    .expect("an interaction id");
                 keep(&first_id);
                 let call = only_call(&first.choice);
 
                 let second = model
-                    .completion(
-                        model
-                            .completion_request(Message::from(UserContent::tool_result_for(
-                                call.id.clone(),
-                                call.provider.clone(),
-                                call.function.name.clone(),
-                                vec![ToolResultContent::text(format!(
-                                    "record alpha: code {CODE}"
-                                ))],
-                            )))
-                            .additional_params(params(Some(first_id)))
-                            .build(),
+                    .call(
+                        CompletionRequest::new(Message::from(UserContent::tool_result(
+                            call.id.clone(),
+                            call.function.name.clone(),
+                            vec![ToolResultContent::text(format!(
+                                "record alpha: code {CODE}"
+                            ))],
+                        )))
+                        .provider_options(params(Some(first_id))),
                     )
                     .await
                     .expect("turn two answers the call");
-                let second_id = second.response_id.clone().expect("an interaction id");
+                let second_id = second
+                    .response_id()
+                    .map(str::to_owned)
+                    .expect("an interaction id");
                 keep(&second_id);
 
                 let third = model
-                    .completion(
-                        model
-                            .completion_request(
-                                "Repeat the code you reported, exactly, and nothing else.",
-                            )
-                            .additional_params(params(Some(second_id)))
-                            .build(),
+                    .call(
+                        CompletionRequest::new(
+                            "Repeat the code you reported, exactly, and nothing else.",
+                        )
+                        .provider_options(params(Some(second_id))),
                     )
                     .await
                     .expect("turn three continues");
-                keep(third.response_id.as_deref().expect("an interaction id"));
+                keep(third.response_id().expect("an interaction id"));
                 assert!(text(&third.choice).contains(CODE), "{:?}", third.choice);
             })
             .await;
@@ -440,8 +429,8 @@ async fn file_uri_chain() {
     with_gemini_interactions_cassette(
         "stateful_chain_matrix/file_uri_chain",
         |client| async move {
-            let base = client.wire.base_url.trim_end_matches('/').to_owned();
-            let key = client.wire.api_key.expose().to_owned();
+            let base = client.config.base_url.trim_end_matches('/').to_owned();
+            let key = client.config.api_key.expose().to_owned();
             let http = reqwest::Client::new();
             let uploaded: Value = http
                 .post(format!("{base}/upload/v1beta/files?uploadType=media"))
@@ -465,20 +454,17 @@ async fn file_uri_chain() {
 
             let body = async {
                 let document = Message::User {
-                    content: vec![
-                        UserContent::Document(Document {
-                            data: DocumentSourceKind::Url(uri.clone()),
+                    content: vec![UserContent::Document(Document {
+                            data: DocumentSourceKind::Url(uri.clone()).into(),
                             media_type: Some(DocumentMediaType::TXT),
                             additional_params: None,
-                        }),
-                        UserContent::text(
+                        }),UserContent::text(
                             "What is the ordering token in the attached file? Reply with the token only.",
-                        ),
-                    ],
+                        )],
                 };
                 let model = client.completion(gemini::completion::GEMINI_2_5_FLASH);
                 let first = model
-                    .completion(ask_with(vec![document.clone()]))
+                    .call(ask_with(vec![document.clone()]))
                     .await
                     .expect("turn one reads the file by uri");
                 assert!(
@@ -488,16 +474,13 @@ async fn file_uri_chain() {
                 );
                 let history = vec![
                     document,
-                    Message::Assistant {
-                        id: first.message_id.clone(),
-                        content: first.choice.clone(),
-                    },
+                    Message::Assistant(first.head().with_content(first.choice.clone())),
                     Message::user(
                         "What is the shelf code in the same attached file? Reply with the code only.",
                     ),
                 ];
                 let second = model
-                    .completion(ask_with(history))
+                    .call(ask_with(history))
                     .await
                     .expect("turn two still reads the file by uri");
                 assert!(

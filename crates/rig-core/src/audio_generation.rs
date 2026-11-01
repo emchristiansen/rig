@@ -1,21 +1,20 @@
 //! Text-to-speech requests and normalized audio responses.
 //!
 //! ```no_run
-//! use rig_core::audio_generation::{AudioGenerationModel, AudioGenerationRequestBuilder};
+//! use rig_core::DynModel;
+//! use rig_core::audio_generation::AudioGenerationRequestBuilder;
+//! use rig_core::operation::AudioGeneration;
 //!
-//! # async fn example(model: impl AudioGenerationModel, voice: &str) -> Result<(), Box<dyn std::error::Error>> {
-//! let response = AudioGenerationRequestBuilder::new(model, "Hello", voice)
-//!     .send().await?;
+//! # async fn example(model: DynModel<AudioGeneration>, voice: &str) -> Result<(), Box<dyn std::error::Error>> {
+//! let request = AudioGenerationRequestBuilder::new("Hello", voice).build();
+//! let response = model.call(request).await?;
 //! # let _ = response;
 //! # Ok(())
 //! # }
 //! ```
-use crate::completion::{ResponseIdentity, Usage};
-use crate::error::ProviderError;
-use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
+use crate::completion::Usage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::Arc;
 
 /// Generated audio and normalized provider metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,72 +44,19 @@ pub struct AudioGenerationResponse {
 }
 
 impl AudioGenerationResponse {
-    /// Create a response from its required parts; optional metadata starts
-    /// unset and is filled in with the `with_*` helpers.
-    pub fn new(audio: Vec<u8>, provider: impl Into<String>) -> Self {
+    /// A response carrying `audio`. The driver writes the provider, the
+    /// transport request id and the reply document; decoders set what the
+    /// provider reported.
+    pub fn new(audio: Vec<u8>) -> Self {
         Self {
             audio,
             usage: Usage::default(),
-            provider: provider.into(),
+            provider: String::new(),
             model: None,
             response_id: None,
             provider_request_id: None,
             raw: serde_json::Value::Null,
         }
-    }
-
-    /// This response's identity metadata as one [`ResponseIdentity`] carrier.
-    /// `message_id` is always `None`: nothing here is replayed as an
-    /// assistant message.
-    pub fn identity(&self) -> ResponseIdentity {
-        ResponseIdentity {
-            message_id: None,
-            response_id: self.response_id.clone(),
-            provider_request_id: self.provider_request_id.clone(),
-        }
-    }
-}
-
-crate::provider_response::modality_response_metadata_setters!(AudioGenerationResponse);
-
-/// Normalizes provider audio payloads, attributing the response to the supplied
-/// provider name.
-pub trait NormalizeAudioGenerationResponse {
-    /// Normalize this payload, attributing it to `provider`.
-    fn normalize(self, provider: &str) -> Result<AudioGenerationResponse, ProviderError>;
-}
-
-/// Generates speech from text. Only [`Self::audio_generation_request`] requires
-/// cloning; `Arc<M>` forwards generation calls.
-pub trait AudioGenerationModel: WasmCompatSend + WasmCompatSync {
-    fn audio_generation(
-        &self,
-        request: AudioGenerationRequest,
-    ) -> impl std::future::Future<Output = Result<AudioGenerationResponse, ProviderError>> + WasmCompatSend;
-
-    /// Creates a request builder to speak `text` in `voice`.
-    fn audio_generation_request(
-        &self,
-        text: impl Into<String>,
-        voice: impl Into<String>,
-    ) -> AudioGenerationRequestBuilder<Self>
-    where
-        Self: Sized + Clone,
-    {
-        AudioGenerationRequestBuilder::new(self.clone(), text, voice)
-    }
-}
-
-impl<M> AudioGenerationModel for Arc<M>
-where
-    M: AudioGenerationModel,
-{
-    fn audio_generation(
-        &self,
-        request: AudioGenerationRequest,
-    ) -> impl std::future::Future<Output = Result<AudioGenerationResponse, ProviderError>> + WasmCompatSend
-    {
-        (**self).audio_generation(request)
     }
 }
 
@@ -122,16 +68,14 @@ pub struct AudioGenerationRequest {
 }
 
 /// Builds a speech request for a text and voice. The speed defaults to 1.0.
-pub struct AudioGenerationRequestBuilder<M> {
-    model: M,
+pub struct AudioGenerationRequestBuilder {
     request: AudioGenerationRequest,
 }
 
-impl<M> AudioGenerationRequestBuilder<M> {
+impl AudioGenerationRequestBuilder {
     /// A request to speak `text` in `voice`.
-    pub fn new(model: M, text: impl Into<String>, voice: impl Into<String>) -> Self {
+    pub fn new(text: impl Into<String>, voice: impl Into<String>) -> Self {
         Self {
-            model,
             request: AudioGenerationRequest {
                 text: text.into(),
                 voice: voice.into(),
@@ -158,13 +102,6 @@ impl<M> AudioGenerationRequestBuilder<M> {
     /// Builds the audio generation request.
     pub fn build(self) -> AudioGenerationRequest {
         self.request
-    }
-}
-
-impl<M: AudioGenerationModel> AudioGenerationRequestBuilder<M> {
-    /// Sends the request to the model and returns the generated audio.
-    pub async fn send(self) -> Result<AudioGenerationResponse, ProviderError> {
-        self.model.audio_generation(self.request).await
     }
 }
 

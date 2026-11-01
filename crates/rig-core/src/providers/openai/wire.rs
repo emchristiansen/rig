@@ -1,67 +1,53 @@
 //! OpenAI-compatible configurations, dialect policies, and endpoint wires.
-//! A [`Dialect`](crate::providers::openai::wire::Dialect) selects request and response policies; [`OpenAI`] holds
-//! credentials and overrides. Bind an endpoint wire to a transport to execute it.
+//! A [`Dialect`](crate::providers::openai::wire::Dialect) selects request
+//! and response policies; [`OpenAIConfig`](crate::providers::openai::OpenAIConfig)
+//! holds credentials and overrides. An
+//! [`OpenAI`](crate::providers::openai::OpenAI) client puts
+//! the configuration on a transport and builds each endpoint's model.
 //!
 //! ```
-//! use rig_core::providers::openai::{OpenAI, Route, wire::OpenAiWire};
-//! let provider = OpenAI::new("key").with_route(Route::Chat);
-//! assert!(matches!(provider.completion("gpt-5.2"), OpenAiWire::Chat(_)));
+//! use rig_core::providers::openai::{OpenAIConfig, Route, wire::OpenAiWire};
+//!
+//! let openai = OpenAIConfig::new("key").with_route(Route::Chat).client();
+//! assert!(matches!(openai.completion("gpt-5.2").wire, OpenAiWire::Chat(_)));
 //! ```
 
 use serde::{Deserialize, Serialize};
 
 use crate::client::env::{self, EnvError};
-use crate::driver::{Bound, HasEmbedding, HasModelListing, HasRerank, HasTranscription, HasVerify};
-use crate::error::{EncodeError, ProviderError};
-use crate::wire::{
-    CredentialPlacement, CredentialSource, CredentialSourceHandle, CredentialStamp, HasCompletion,
-    Secret, TokenPlacement,
-};
+use crate::error::EncodeError;
+use crate::wire::{CredentialSourceHandle, Secret};
 
 use super::responses_api::SystemInstructionsPlacement;
 use super::responses_api::wire::Responses;
 
-mod chat;
+mod auth;
+pub(crate) mod chat;
 mod dialects;
-/// Shared Chat Completions response shapes.
+/// The merge that assembles a streamed provider object from its fragments.
 pub(crate) mod dto;
 mod modality;
 mod route;
 
-pub use chat::{Chat, ChatDecoder, ChatEvent};
-pub use dialects::*;
-pub use dto::{ChatChoice, ChatFrame, ChatUsage, FinishReason, StreamingCompletionResponse};
-pub use modality::{
-    Embeddings, EmbeddingsDecoder, ModelEntry, Models, ModelsDecoder, ModelsReply, Rerank,
-    RerankDecoder, RerankReply, RerankResultEntry, RerankUsage, Transcriptions,
-    TranscriptionsDecoder, Verify, VerifyDecoder,
+use auth::identity_from_env;
+pub use auth::{
+    Auth, AuthAlternative, CallerIdentity, ConfiguredIdentity, Identity, InvalidCallerIdentity,
+    MissingCallerIdentity, VERSION_HEADER,
 };
-pub use route::{OpenAiDecoder, OpenAiEvent, OpenAiWire, Route};
+pub use chat::Chat;
+pub use dialects::*;
+pub use modality::{
+    AcceptedWidths, DimensionsField, EmbeddingQuirks, Embeddings, EmbeddingsDecoder, ImageBody,
+    ModelEntry, ModelWidth, Models, ModelsDecoder, ModelsReply, Rerank, RerankDecoder,
+    RerankQuirks, RerankReply, RerankResultEntry, RerankUsage, SpeechBody, TranscriptionBody,
+    Transcriptions, TranscriptionsDecoder, Verify, VerifyDecoder,
+};
+pub use route::{OpenAiDecoder, OpenAiEvent, OpenAiReassembler, OpenAiWire, Route};
 
 #[cfg(feature = "image")]
 pub use modality::{ImageDatum, Images, ImagesDecoder, ImagesEvent, ImagesReply};
 #[cfg(feature = "audio")]
 pub use modality::{Speech, SpeechDecoder};
-
-/// Credential header policy, including omission of empty optional tokens.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Auth {
-    /// `Authorization: Bearer <key>`.
-    Bearer,
-    /// `Authorization: Bearer <key>`, omitted entirely when the key is empty.
-    OptionalBearer,
-    /// Azure's `api-key: <key>`.
-    ApiKeyHeader,
-}
-
-/// Alternative credential environment variable and its authentication policy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AuthAlternative {
-    /// The variable holding this credential.
-    pub api_key_env: &'static str,
-    /// How it is sent.
-    pub auth: Auth,
-}
 
 /// Backend selected through the Hugging Face router.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,12 +98,6 @@ impl SubRoute {
             _ => model.to_owned(),
         }
     }
-
-    /// Whether this sub-provider serves the endpoints that address the model
-    /// through the URL (transcription, image generation).
-    pub fn serves_model_routed_endpoints(&self) -> bool {
-        matches!(self, Self::HFInference)
-    }
 }
 
 impl std::fmt::Display for SubRoute {
@@ -136,54 +116,6 @@ impl From<String> for SubRoute {
     fn from(route: String) -> Self {
         Self::Custom(route)
     }
-}
-
-/// Paired request and response formats for image generation.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ImageBody {
-    /// `{model, prompt, size}`, answered with `data[].b64_json`.
-    #[default]
-    OpenAi,
-    /// xAI: `{model, prompt, response_format, aspect_ratio}` and no `size`,
-    /// answered with `data[].b64_json` and no `created`.
-    Xai,
-    /// `{model_name, prompt, height, width}`, answered with `images[].image`.
-    Hyperbolic,
-    /// `{model, prompt, width, height}`, answered with base64 strings in `images`.
-    Venice,
-    /// `{inputs, parameters: {width, height}}`, answered with raw image bytes.
-    /// The model is addressed through the URL path.
-    HuggingFace,
-}
-
-/// Which body a speech endpoint takes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum SpeechBody {
-    /// OpenAI: `{model, input, voice, speed}`.
-    #[default]
-    OpenAi,
-    /// xAI: `{text, voice_id, language}`, with `eve` as the default voice.
-    Xai,
-    /// Hyperbolic: `{language, speaker, text, speed}`, answered with
-    /// `{"audio": "<base64>"}` rather than the audio bytes themselves.
-    ///
-    /// It addresses this endpoint by *language*, so the identifier a caller
-    /// passes as the model is the language tag (`"EN"`).
-    Hyperbolic,
-}
-
-/// Which body a transcription endpoint takes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TranscriptionBody {
-    /// OpenAI: a `multipart/form-data` upload with the audio as a file part
-    /// beside `model`, `language`, `prompt` and `temperature`.
-    Multipart,
-    /// OpenRouter: a JSON body whose audio rides base64-encoded under
-    /// `input_audio`, with its container format beside it
-    /// (`{"input_audio": {"data": "…", "format": "mp3"}, "model": …}`).
-    /// The gateway's speech-to-text route serves only this shape, and has no
-    /// top-level `prompt` field at all.
-    InputAudioJson,
 }
 
 /// How a dialect addresses a model.
@@ -209,99 +141,28 @@ pub enum OutputCap {
     OpenAiReasoningFamilies,
 }
 
-/// Which field a dialect takes an embedding width in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DimensionsField {
-    /// The OpenAI-compatible `dimensions` field.
-    Dimensions,
-    /// Mistral's `output_dimension`.
-    OutputDimension,
-    /// The server ignores any width field, so none is sent (`llama-server`
-    /// reads no such field and would answer 200 with the native width).
-    Ignored,
-}
-
-impl DimensionsField {
-    /// The body field a requested width goes in, or `None` when the dialect
-    /// reads no width field at all.
-    ///
-    /// The encoder puts a width in this field and a refusal names it, so
-    /// both spell it from here rather than from two matching literals.
-    pub const fn name(self) -> Option<&'static str> {
-        match self {
-            Self::Dimensions => Some("dimensions"),
-            Self::OutputDimension => Some("output_dimension"),
-            Self::Ignored => None,
-        }
-    }
-}
-
-/// Which widths a request may name for one embedding model.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AcceptedWidths {
-    /// The model emits one width and reads no width field, so any value but
-    /// its own native width is a request for a parameter the provider does
-    /// not accept there, and is refused as a request error.
-    Fixed,
-    /// The model truncates to any width in `min..=max`, and anything else is
-    /// refused with [`requirement`](Self::Range::requirement).
-    Range {
-        /// Narrowest width the provider honours.
-        min: usize,
-        /// Widest width the provider honours.
-        max: usize,
-        /// Static error clause describing the accepted bounds.
-        /// Must agree with `min` and `max`.
-        requirement: &'static str,
-    },
-}
-
-/// One embedding model's width contract: the width it returns unasked, and
-/// the widths it will honour when asked.
-///
-/// Stated per model rather than per dialect because a dialect serves models
-/// of different widths, and a model's default is not always its maximum.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct ModelWidth {
-    /// The model identifier, as the `model` field spells it.
-    pub model: &'static str,
-    /// Default width reported when no width is requested, or `None` if unknown.
-    /// Unknown widths report zero through [`crate::embeddings::EmbeddingModel::ndims`].
-    pub default: Option<usize>,
-    /// The widths a request may name.
-    pub accepted: AcceptedWidths,
-}
-
 /// Dialect-specific transformation of the serialized chat request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BodyRewrite {
     /// Send the OpenAI-compatible body unchanged.
     None,
-    /// Groq: fold `additional_params.tools` (its compound-system native
-    /// tools) into `compound_custom.enabled_tools` so they do not clobber
-    /// the function-tool array on serialization, and replay assistant turns
-    /// without `reasoning_content`, which Groq rejects.
-    GroqCompoundTools,
     /// Hugging Face's router: qualify the model identifier for sub-providers
     /// that demand one (Fireworks).
     HuggingFaceRouter,
-    /// DeepSeek: string-flattened content, `content: ""` on tool-call-only
-    /// assistant turns, `index` on echoed tool calls, and forced tool
-    /// choices suppressed unless thinking is explicitly disabled.
+    /// DeepSeek: forced tool choices dropped while the model thinks. Its
+    /// reasoning field is [`Quirks::reasoning_field`].
     DeepSeek,
-    /// Mira's gateway: plain `{role, content}` history, names stripped,
-    /// content-part arrays flattened.
-    Mira,
-    /// Perplexity: plain text history with strict user/assistant
-    /// alternation, text-only arrays flattened.
-    Perplexity,
-    /// Hyperbolic: tool-exchange remnants stripped, content-part arrays kept
-    /// (its vision models need them).
+    /// Groq compound models carry their built-in tools and omit assistant reasoning.
+    GroqCompoundTools,
+    /// Hyperbolic omits tool exchange fields while retaining image arrays.
     Hyperbolic,
-    /// Mistral: `any` for a forced tool choice, the choice relaxed to `auto`
-    /// beside a structured response format, `prefix` on assistant turns and
-    /// `reasoning_content` removed.
+    /// Mira's gateway: content-part arrays flattened to strings.
+    Mira,
+    /// Perplexity: text-only content arrays sent as one string.
+    Perplexity,
+    /// Mistral: the forced tool choice relaxed to `auto` beside a structured
+    /// response format, and its own content chunks.
     Mistral,
     /// llama.cpp: refuse a specific-function tool choice, which
     /// `llama-server` silently treats as `auto`.
@@ -309,339 +170,12 @@ pub enum BodyRewrite {
     /// Moonshot: refuse a specific-function tool choice and coerce
     /// `required` to `auto` with a steering message.
     Moonshot,
-    /// OpenRouter: ephemeral `cache_control` on the system prompt when
-    /// prompt caching is on, and `reasoning_content` respelled `reasoning`.
+    /// OpenRouter: model ids name the upstream vendor (`anthropic/...`),
+    /// which decides what a request carries.
     OpenRouter,
-}
-
-/// Reranking endpoint policy. An empty [`Self::path`] disables reranking.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct RerankQuirks {
-    /// The rerank path, or empty when the dialect offers none.
-    pub path: &'static str,
-    /// Most documents the provider accepts in one request.
-    pub max_documents: usize,
-    /// Whether the model is a body field.
-    pub sends_model_field: bool,
-}
-
-impl RerankQuirks {
-    /// The signal for a dialect with no reranking endpoint.
-    pub const fn unsupported() -> Self {
-        Self {
-            path: "",
-            max_documents: 0,
-            sends_model_field: true,
-        }
-    }
-}
-
-/// What a dialect's embeddings endpoint accepts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct EmbeddingQuirks {
-    /// Most inputs the provider embeds in one request.
-    pub max_documents: usize,
-    /// Whether a successful reply must carry usage.
-    pub requires_usage: bool,
-    /// Whether the provider accepts `encoding_format`.
-    pub supports_encoding_format: bool,
-    /// Whether the provider accepts `user`.
-    pub supports_user: bool,
-    /// Whether the model is a body field (false for Azure, which addresses a
-    /// deployment through the URL).
-    pub sends_model_field: bool,
-    /// Which field a requested width goes in.
-    pub dimensions: DimensionsField,
-    /// Model width contracts used for capability reporting and request validation.
-    /// Consulted before the shared OpenAI model-width table.
-    pub widths: &'static [ModelWidth],
-    /// The `requirement` clause refusing a declared width of zero, or
-    /// `None` for a dialect that lets zero through as rig's own "unknown"
-    /// sentinel rather than a claim.
-    pub refuse_zero_width: Option<&'static str>,
-}
-
-impl EmbeddingQuirks {
-    /// OpenAI's own embeddings contract, which most dialects inherit.
-    pub const fn openai() -> Self {
-        Self {
-            max_documents: 1024,
-            requires_usage: true,
-            supports_encoding_format: true,
-            supports_user: true,
-            sends_model_field: true,
-            dimensions: DimensionsField::Dimensions,
-            // Shared OpenAI model widths are resolved separately.
-            widths: &[],
-            // Zero represents an unknown width, not a requested dimension.
-            refuse_zero_width: None,
-        }
-    }
-}
-
-/// The caller identity a gateway requires on every request.
-///
-/// The gateway has no default identity: the caller supplies one exactly
-/// ([`OpenAI::with_caller_identity`], or both of the environment variables
-/// below), and every request refuses with [`MissingCallerIdentity`] until
-/// it does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Identity {
-    /// The environment variable carrying `originator`. It is read only
-    /// together with [`Self::user_agent_env`].
-    pub originator_env: &'static str,
-    /// The environment variable carrying `user-agent`. It is read only
-    /// together with [`Self::originator_env`].
-    pub user_agent_env: &'static str,
-    /// Whether every request carries a fresh `session_id` header.
-    pub session_ids: bool,
-}
-
-/// The identity a gateway requires on every request, resolved: the
-/// `originator` and `user-agent` headers, and optionally a `version` header.
-///
-/// Every value is a non-empty, header-safe string, sent exactly as given.
-/// [`Self::new`], deserialization and the dialect's environment variables
-/// refuse anything else.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "CallerIdentityValues", into = "CallerIdentityValues")]
-pub struct CallerIdentity {
-    originator: String,
-    user_agent: String,
-    version: Option<String>,
-}
-
-/// The serialized form of a [`CallerIdentity`], validated on the way back in.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CallerIdentityValues {
-    originator: String,
-    user_agent: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    version: Option<String>,
-}
-
-impl TryFrom<CallerIdentityValues> for CallerIdentity {
-    type Error = InvalidCallerIdentity;
-
-    fn try_from(values: CallerIdentityValues) -> Result<Self, Self::Error> {
-        Self::new(values.originator, values.user_agent, values.version)
-    }
-}
-
-impl From<CallerIdentity> for CallerIdentityValues {
-    fn from(identity: CallerIdentity) -> Self {
-        Self {
-            originator: identity.originator,
-            user_agent: identity.user_agent,
-            version: identity.version,
-        }
-    }
-}
-
-/// The `version` header a [`CallerIdentity`] carries when it names one.
-pub const VERSION_HEADER: &str = "version";
-
-/// A caller identity value no request could carry: empty, or not a valid
-/// HTTP header value.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("a caller identity's {field} must be a non-empty, header-safe string; `{value}` is not")]
-pub struct InvalidCallerIdentity {
-    /// Which value: `originator`, `user_agent` or `version`.
-    pub field: &'static str,
-    /// The value as supplied.
-    pub value: String,
-}
-
-/// Refuse a caller identity value no request could carry.
-fn checked_identity_value(
-    field: &'static str,
-    value: String,
-) -> Result<String, InvalidCallerIdentity> {
-    if value.is_empty() || http::HeaderValue::from_str(&value).is_err() {
-        Err(InvalidCallerIdentity { field, value })
-    } else {
-        Ok(value)
-    }
-}
-
-impl CallerIdentity {
-    /// An identity sending `originator`, `user_agent` and, when given,
-    /// `version`, each exactly as given. Refuses an empty or header-unsafe
-    /// value, naming which.
-    pub fn new(
-        originator: impl Into<String>,
-        user_agent: impl Into<String>,
-        version: Option<String>,
-    ) -> Result<Self, InvalidCallerIdentity> {
-        Ok(Self {
-            originator: checked_identity_value("originator", originator.into())?,
-            user_agent: checked_identity_value("user_agent", user_agent.into())?,
-            version: version
-                .map(|version| checked_identity_value("version", version))
-                .transpose()?,
-        })
-    }
-
-    /// Add the `originator`, `user-agent` and, when this identity names one,
-    /// `version` headers, each exactly as given: what a model request
-    /// carries.
-    pub(crate) fn stamp(&self, builder: http::request::Builder) -> http::request::Builder {
-        let builder = self.stamp_client(builder);
-        match &self.version {
-            Some(version) => builder.header(VERSION_HEADER, version),
-            None => builder,
-        }
-    }
-
-    /// Add only the `originator` and `user-agent` headers, exactly as given:
-    /// what the official client's own HTTP client carries on every request,
-    /// its sign-in service's token refresh included. `version` is a model
-    /// request header, so it is not added here.
-    pub(crate) fn stamp_client(&self, builder: http::request::Builder) -> http::request::Builder {
-        builder
-            .header(ORIGINATOR_HEADER, &self.originator)
-            .header(http::header::USER_AGENT, &self.user_agent)
-    }
-
-    /// The `originator` header.
-    #[must_use]
-    pub fn originator(&self) -> &str {
-        &self.originator
-    }
-
-    /// The `user-agent` header.
-    #[must_use]
-    pub fn user_agent(&self) -> &str {
-        &self.user_agent
-    }
-
-    /// The `version` header, when this identity names one.
-    #[must_use]
-    pub fn version(&self) -> Option<&str> {
-        self.version.as_deref()
-    }
-}
-
-/// The caller identity a configuration sends, and whether its user agent is
-/// the caller's own.
-///
-/// Serialized with a `kind` tag, so a configuration serialized before the
-/// distinction existed does not deserialize at all rather than turning a
-/// derived user agent into an exact one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ConfiguredIdentity {
-    /// Exactly the caller's values, from [`OpenAI::with_caller_identity`] or
-    /// from both of a dialect's identity environment variables.
-    Exact(CallerIdentity),
-    /// Only an originator, from [`OpenAI::with_originator`]. Rig sends a
-    /// `rig/…` user agent naming it, so a dialect that requires a caller
-    /// identity refuses to send this one ([`MissingCallerIdentity`]).
-    Originator {
-        /// The `originator` header, taken as given: one a header cannot
-        /// carry fails when the request is built.
-        originator: String,
-    },
-}
-
-/// A request refused before it was sent, because its dialect requires the
-/// caller's exact identity ([`Identity`]) and the configuration has none.
-///
-/// Such a dialect has no default identity, and Rig never derives a user
-/// agent for it: the request carries exactly the caller's values or is not
-/// sent.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum MissingCallerIdentity {
-    /// No caller identity is configured.
-    #[error(
-        "`{dialect}` requires the caller's exact identity (`OpenAI::with_caller_identity`); none is configured, so the request is not sent"
-    )]
-    Unset {
-        /// The dialect's name.
-        dialect: &'static str,
-    },
-    /// Only an originator is configured ([`OpenAI::with_originator`]), whose
-    /// user agent Rig would derive.
-    #[error(
-        "`{dialect}` requires the caller's exact identity (`OpenAI::with_caller_identity`); only the originator `{originator}` is configured, and Rig derives no user agent for it, so the request is not sent"
-    )]
-    OriginatorOnly {
-        /// The dialect's name.
-        dialect: &'static str,
-        /// The configured originator.
-        originator: String,
-    },
-}
-
-impl From<MissingCallerIdentity> for EncodeError {
-    fn from(error: MissingCallerIdentity) -> Self {
-        EncodeError::request(error)
-    }
-}
-
-impl From<MissingCallerIdentity> for ProviderError {
-    fn from(error: MissingCallerIdentity) -> Self {
-        ProviderError::Request(Box::new(error))
-    }
-}
-
-/// The header carrying a caller identity's originator.
-const ORIGINATOR_HEADER: &str = "originator";
-
-/// The user agent sent with an originator-only identity on a dialect that
-/// requires no caller identity: the crate, the host, and who is calling.
-fn default_user_agent(originator: &str) -> String {
-    format!(
-        "rig/{} ({} {}; {originator})",
-        env!("CARGO_PKG_VERSION"),
-        std::env::consts::OS,
-        std::env::consts::ARCH,
-    )
-}
-
-/// The exact caller identity a dialect's environment variables name, read
-/// through `lookup`: both variables set (non-empty) give one, neither gives
-/// none, and one without the other is refused, since Rig derives no half of
-/// an identity.
-fn identity_from_env(
-    identity: Identity,
-    lookup: impl Fn(&'static str) -> Result<Option<String>, EnvError>,
-) -> Result<Option<CallerIdentity>, EnvError> {
-    let read = |name: &'static str| -> Result<Option<String>, EnvError> {
-        Ok(lookup(name)?.filter(|value| !value.is_empty()))
-    };
-    let originator = read(identity.originator_env)?;
-    let user_agent = read(identity.user_agent_env)?;
-    let (originator, user_agent) = match (originator, user_agent) {
-        (None, None) => return Ok(None),
-        (Some(originator), Some(user_agent)) => (originator, user_agent),
-        (set, _) => {
-            let (present, missing) = if set.is_some() {
-                (identity.originator_env, identity.user_agent_env)
-            } else {
-                (identity.user_agent_env, identity.originator_env)
-            };
-            return Err(EnvError::Invalid {
-                name: missing,
-                detail: format!(
-                    "`{present}` is set, so `{missing}` must be set too: this gateway takes the caller's exact identity, never half of one"
-                ),
-            });
-        }
-    };
-    CallerIdentity::new(originator, user_agent, None)
-        .map(Some)
-        .map_err(|error| EnvError::Invalid {
-            name: if error.field == "originator" {
-                identity.originator_env
-            } else {
-                identity.user_agent_env
-            },
-            detail: error.to_string(),
-        })
+    /// Ollama's OpenAI-compatible API: a refusal of `num_ctx` and
+    /// `options`, which only the native route can send.
+    Ollama,
 }
 
 /// Request restrictions and response handling for a Responses dialect.
@@ -716,11 +250,11 @@ pub struct DialectHooks {
 
 /// A dialect's modality-request headers, applied to the built request.
 pub type ModalityEnvelope =
-    fn(&OpenAI, &mut http::Request<crate::wire::Body>) -> Result<(), http::Error>;
+    fn(&OpenAIConfig, &mut http::Request<crate::wire::Body>) -> Result<(), http::Error>;
 
 /// A dialect's completion headers, applied to the authenticated request builder.
 pub type CompletionEnvelope = fn(
-    &OpenAI,
+    &OpenAIConfig,
     &crate::completion::CompletionRequest,
     http::request::Builder,
 ) -> http::request::Builder;
@@ -747,7 +281,8 @@ pub struct Quirks {
     pub auth: Auth,
     /// How the dialect addresses a model.
     pub routing: Routing,
-    /// Which completion endpoint [`OpenAI::completion`] builds: the
+    /// Which completion endpoint
+    /// [`OpenAI::completion`](crate::providers::openai::OpenAI::completion) builds: the
     /// dialect's flagship. Chat Completions is the one endpoint every
     /// dialect serves, so it is the baseline; OpenAI itself, xAI and ChatGPT
     /// serve `/responses` as their primary API and say so.
@@ -776,21 +311,40 @@ pub struct Quirks {
     pub response_format_with_tools: bool,
     /// Whether this server honours an image inside a `role:"tool"` message.
     pub supports_image_tool_results: bool,
+    /// Where the server takes `system` messages that come after the
+    /// conversation begins.
+    pub later_system: crate::completion::LaterSystem,
     /// Whether a streaming request asks for the usage chunk through
     /// `stream_options`.
     pub stream_include_usage: bool,
-    /// Whether the backend can emit a whole tool call in one chunk.
+    /// Whether a stream's `[DONE]` ends the turn when no finish reason
+    /// arrived, as a tool call when the reply holds one and a stop otherwise.
+    /// Off, such a stream is truncated.
+    pub done_without_finish_reason: bool,
+    /// Whether one streamed chunk can contain a complete tool call.
     pub emits_complete_single_chunk_tool_calls: bool,
     /// How the dialect spells the output-token cap.
     pub output_cap: OutputCap,
     /// Whether to consult upstream-native finish reasons when normalized ones are absent.
     pub native_finish_reason: bool,
-    /// Whether the dialect emits `reasoning_details` entries (OpenRouter's
-    /// encrypted reasoning blobs and replay signatures).
+    /// The finish reasons the dialect documents beyond the ones every Chat
+    /// dialect shares (`stop`, `length`, `tool_calls`, `content_filter` and
+    /// their compatible spellings). Any other reason fails the turn.
+    pub finishes: &'static [(&'static str, crate::completion::FinishReason)],
+    /// The field rebuilt reasoning goes under, which every assistant message
+    /// then carries, empty when the turn has none (pi's
+    /// `requiresReasoningContentOnAssistantMessages`). `None` sends
+    /// reasoning only under the field it arrived in.
+    pub reasoning_field: Option<&'static str>,
+    /// Whether `completion_tokens_details.reasoning_tokens` can be trusted as
+    /// a part of `completion_tokens`, as OpenAI documents it. A dialect whose
+    /// replies report more reasoning than completion leaves the count
+    /// unreported, so [`Usage`](crate::completion::Usage) never reports more
+    /// reasoning than output.
+    pub reliable_reasoning_count: bool,
+    /// Whether to retain structured reasoning details and signatures.
     pub reasoning_details: bool,
-    /// Whether reasoning belongs to the upstream model's family rather than
-    /// to this dialect: a gateway relays each upstream's own reasoning state,
-    /// valid only for that family ([`upstream_reasoning_issuer`]).
+    /// Whether reasoning belongs to the upstream model family carried by a gateway.
     pub upstream_reasoning_issuer: bool,
     /// Whether a bare JSON string is accepted as a text-only completion reply.
     pub accepts_bare_string_reply: bool,
@@ -851,10 +405,15 @@ impl Quirks {
             supports_response_format: true,
             response_format_with_tools: false,
             supports_image_tool_results: false,
+            later_system: crate::completion::LaterSystem::InPlace,
             stream_include_usage: true,
+            done_without_finish_reason: false,
             emits_complete_single_chunk_tool_calls: false,
             output_cap: OutputCap::Legacy,
             native_finish_reason: false,
+            finishes: &[],
+            reasoning_field: None,
+            reliable_reasoning_count: true,
             reasoning_details: false,
             upstream_reasoning_issuer: false,
             accepts_bare_string_reply: false,
@@ -876,6 +435,39 @@ impl Quirks {
             identity: None,
             responses: ResponsesQuirks::openai(),
         }
+    }
+
+    /// These quirks without the streamed usage chunk: a streaming request
+    /// sends no `stream_options`, so streamed usage reports `None`.
+    pub const fn without_stream_usage(mut self) -> Self {
+        self.stream_include_usage = false;
+        self
+    }
+
+    /// These quirks for a gateway whose streams omit `finish_reason`: a
+    /// `[DONE]` after at least one chunk ends the turn as
+    /// [`FinishReason::ToolCalls`](crate::completion::FinishReason::ToolCalls)
+    /// when the reply holds a tool call, and
+    /// [`FinishReason::Stop`](crate::completion::FinishReason::Stop)
+    /// otherwise. A cut-off stream that still sends `[DONE]` then reads as
+    /// complete, so set this only for a gateway known to omit the field.
+    pub const fn done_without_finish_reason(mut self) -> Self {
+        self.done_without_finish_reason = true;
+        self
+    }
+
+    /// These quirks without structured output: `output_schema` does not map
+    /// to `response_format`.
+    pub const fn without_response_format(mut self) -> Self {
+        self.supports_response_format = false;
+        self
+    }
+}
+
+impl Default for Quirks {
+    /// [`Quirks::openai`].
+    fn default() -> Self {
+        Self::openai()
     }
 }
 
@@ -923,6 +515,12 @@ impl Dialect {
             quirks: Quirks::openai(),
         }
     }
+
+    /// This dialect with `quirks`.
+    pub const fn with_quirks(mut self, quirks: Quirks) -> Self {
+        self.quirks = quirks;
+        self
+    }
 }
 
 /// Serialize the registered dialect name, rejecting unregistered or modified definitions.
@@ -944,12 +542,12 @@ impl<'de> Deserialize<'de> for Dialect {
     }
 }
 
-/// Serializable provider configuration without a transport.
-/// Credentials are redacted and omitted from serialization. Construct endpoint
-/// wires and bind them through [`Bound`] to execute requests.
+/// The settings of an OpenAI-shaped provider: serializable, and the
+/// credential is never serialized. [`connect`](Self::connect) puts it on a
+/// transport as an [`OpenAI`](super::OpenAI) client.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OpenAI {
+pub struct OpenAIConfig {
     /// The credential. Never serialized (see [`Secret`]).
     pub api_key: Secret,
     /// The base URL every path resolves against.
@@ -1003,7 +601,7 @@ pub struct OpenAI {
     pub credential_source: Option<CredentialSourceHandle>,
 }
 
-impl OpenAI {
+impl OpenAIConfig {
     /// Official OpenAI, with `api_key`.
     pub fn new(api_key: impl Into<Secret>) -> Self {
         Self::with_key(&OPENAI, api_key)
@@ -1042,23 +640,6 @@ impl OpenAI {
         }
     }
 
-    /// `dialect` with the credential it accepts through its
-    /// [`alternate_auth`](Dialect::alternate_auth) variable, sent with that
-    /// alternative's header.
-    ///
-    /// Azure's account key and its Entra bearer token are both credentials
-    /// for the same account but go out under different headers, so which one
-    /// is held has to be recorded rather than guessed from the value.
-    pub fn with_alternate_key(dialect: &Dialect, api_key: impl Into<Secret>) -> Self {
-        let auth = dialect
-            .alternate_auth
-            .map_or(dialect.quirks.auth, |alternative| alternative.auth);
-        Self {
-            auth,
-            ..Self::with_key(dialect, api_key)
-        }
-    }
-
     /// Read `OPENAI_API_KEY` and the optional `OPENAI_BASE_URL` override.
     /// Return an environment error for missing credentials or invalid values.
     pub fn from_env() -> Result<Self, EnvError> {
@@ -1073,26 +654,17 @@ impl OpenAI {
     /// route carries it and there is no default that would not silently
     /// address the wrong API.
     pub fn from_env_with(dialect: &Dialect) -> Result<Self, EnvError> {
+        let (api_key, auth) = Self::credential_from_env(dialect)?;
+        Self::from_env_with_credential(dialect, api_key, auth)
+    }
+
+    /// [`Self::from_env_with`] with the credential already read.
+    pub(crate) fn from_env_with_credential(
+        dialect: &Dialect,
+        api_key: String,
+        auth: Auth,
+    ) -> Result<Self, EnvError> {
         let quirks = &dialect.quirks;
-        // Alternative credentials require their own header policy; prefer the primary.
-        let (api_key, auth) = match dialect.alternate_auth {
-            Some(alternative) => match env::optional(dialect.api_key_env)? {
-                Some(api_key) => (api_key, quirks.auth),
-                None => match env::optional(alternative.api_key_env)? {
-                    Some(api_key) => (api_key, alternative.auth),
-                    None => {
-                        return Err(EnvError::Invalid {
-                            name: dialect.api_key_env,
-                            detail: format!(
-                                "either `{}` or `{}` must be set",
-                                dialect.api_key_env, alternative.api_key_env
-                            ),
-                        });
-                    }
-                },
-            },
-            None => (env::required(dialect.api_key_env)?, quirks.auth),
-        };
         let mut provider = Self::with_key(dialect, api_key);
         provider.auth = auth;
         for name in [dialect.base_url_env, quirks.base_url_env_alias]
@@ -1142,12 +714,6 @@ impl OpenAI {
         self
     }
 
-    /// Send the credential with `auth`'s header.
-    pub fn with_auth(mut self, auth: Auth) -> Self {
-        self.auth = auth;
-        self
-    }
-
     /// Override the base URL.
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
@@ -1160,95 +726,9 @@ impl OpenAI {
         self
     }
 
-    /// Set the `api-version` Azure's speech endpoint is versioned by.
-    pub fn with_audio_api_version(mut self, api_version: impl Into<String>) -> Self {
-        self.audio_api_version = Some(api_version.into());
-        self
-    }
-
-    /// Name the account the credential belongs to (`ChatGPT-Account-Id`).
-    pub fn with_account_id(mut self, account_id: impl Into<String>) -> Self {
-        self.account_id = Some(account_id.into());
-        self
-    }
-
-    /// Read the credential from `source` each time a request is sent,
-    /// instead of sending [`Self::api_key`].
-    ///
-    /// The source is read once per send attempt (every request, every page
-    /// of a paged reply, every managed websocket connect), so a credential
-    /// rotated by its owner reaches the next request without rebuilding
-    /// anything. Its credential replaces the header [`Self::auth`] names
-    /// (`Authorization: Bearer …` or `api-key`), and it is authoritative for
-    /// the account too: a credential naming an account sends
-    /// `ChatGPT-Account-Id`, and one naming none sends no account header,
-    /// even when [`Self::account_id`] is set. A source that fails refuses the
-    /// request with [`crate::wire::CredentialUnavailable`] before anything is
-    /// sent.
-    pub fn with_credential_source(mut self, source: impl CredentialSource + 'static) -> Self {
-        self.credential_source = Some(CredentialSourceHandle::new(source));
-        self
-    }
-
-    /// This configuration's send-time credential: `None` unless a
-    /// [credential source](Self::with_credential_source) is set. Its token
-    /// goes in the header [`Self::auth`] names, the one
-    /// [`Self::authenticate`] writes, and it is authoritative for
-    /// `ChatGPT-Account-Id`.
-    pub(crate) fn credential_stamp(&self) -> Option<CredentialStamp> {
-        self.credential_source
-            .as_ref()
-            .map(|source| CredentialStamp {
-                source: source.clone(),
-                placement: CredentialPlacement {
-                    token: match self.auth {
-                        Auth::Bearer => TokenPlacement::Bearer,
-                        Auth::OptionalBearer => TokenPlacement::OptionalBearer,
-                        Auth::ApiKeyHeader => {
-                            TokenPlacement::Header(http::HeaderName::from_static(API_KEY_HEADER))
-                        }
-                    },
-                    account: Some(http::HeaderName::from_static(ACCOUNT_ID_HEADER)),
-                },
-            })
-    }
-
     /// Merge these instructions ahead of every Responses turn's preamble.
     pub fn with_instructions(mut self, instructions: impl Into<String>) -> Self {
         self.instructions = Some(instructions.into());
-        self
-    }
-
-    /// Send `originator` as the `originator` header, with a `rig/…`
-    /// `user-agent` naming it.
-    ///
-    /// A dialect whose gateway asks for no caller identity gains one, so
-    /// both headers are sent. A dialect that requires the caller's exact
-    /// identity ([`Quirks::identity`]) refuses every request with
-    /// [`MissingCallerIdentity::OriginatorOnly`] instead: use
-    /// [`Self::with_caller_identity`] there.
-    pub fn with_originator(mut self, originator: impl Into<String>) -> Self {
-        self.identity = Some(ConfiguredIdentity::Originator {
-            originator: originator.into(),
-        });
-        self
-    }
-
-    /// Send exactly `identity` as the caller identity: its `originator`,
-    /// its `user-agent` as given (no default is derived), and its `version`
-    /// header when it names one. Every transport that stamps the caller
-    /// identity carries it: each HTTP request and the Codex websocket
-    /// handshake.
-    ///
-    /// Replaces any identity the dialect's environment variables or
-    /// [`Self::with_originator`] configured. A dialect whose gateway asks for
-    /// no caller identity gains this one; a dialect that requires one
-    /// ([`Quirks::identity`]) sends nothing without it.
-    /// [`CallerIdentity::new`] has already refused any value a request could
-    /// not carry.
-    #[must_use]
-    pub fn with_caller_identity(mut self, identity: CallerIdentity) -> Self {
-        self.identity = Some(ConfiguredIdentity::Exact(identity));
         self
     }
 
@@ -1278,7 +758,8 @@ impl OpenAI {
             .unwrap_or(self.dialect.quirks.responses.system_instructions)
     }
 
-    /// Override dialect and model-specific routing for [`Self::completion`].
+    /// Override dialect and model-specific routing for the client's
+    /// [`completion`](crate::providers::openai::OpenAI::completion).
     pub fn with_route(mut self, route: Route) -> Self {
         self.route = Some(route);
         self
@@ -1295,55 +776,19 @@ impl OpenAI {
     /// xAI and ChatGPT, model-dependent routing when a dialect supplies it, and
     /// Chat Completions for other compatible gateways, unless
     /// [`with_route`](Self::with_route) chose the other one.
-    pub fn completion(&self, model: impl Into<String>) -> OpenAiWire {
+    pub(crate) fn completion(&self, model: impl Into<String>) -> OpenAiWire {
         OpenAiWire::new(self.clone(), model)
     }
 
     /// The Responses wire for `model`: `POST /responses`.
-    pub fn responses(&self, model: impl Into<String>) -> Responses {
+    pub(crate) fn responses(&self, model: impl Into<String>) -> Responses {
         Responses::new(self.clone(), model)
     }
 
-    /// The chat-completions wire for `model`.
+    /// The chat-completions wire for `model`, whatever the dialect's
+    /// [`completion_route`](Quirks::completion_route).
     pub fn chat(&self, model: impl Into<String>) -> Chat {
         Chat::new(self.clone(), model)
-    }
-
-    /// The embeddings wire for `model`.
-    pub fn embeddings(&self, model: impl Into<String>, ndims: Option<usize>) -> Embeddings {
-        Embeddings::new(self.clone(), model, ndims)
-    }
-
-    /// The rerank wire for `model`.
-    pub fn reranker(&self, model: impl Into<String>) -> Rerank {
-        Rerank::new(self.clone(), model)
-    }
-
-    /// The transcription wire for `model`.
-    pub fn transcriptions(&self, model: impl Into<String>) -> Transcriptions {
-        Transcriptions::new(self.clone(), model)
-    }
-
-    /// The model-listing wire.
-    pub fn models(&self) -> Models {
-        Models::new(self.clone())
-    }
-
-    /// The credential-check wire.
-    pub fn verify_wire(&self) -> Verify {
-        Verify::new(self.clone())
-    }
-
-    /// The image-generation wire for `model`.
-    #[cfg(feature = "image")]
-    pub fn images(&self, model: impl Into<String>) -> Images {
-        Images::new(self.clone(), model)
-    }
-
-    /// The speech wire for `model`.
-    #[cfg(feature = "audio")]
-    pub fn speech(&self, model: impl Into<String>) -> Speech {
-        Speech::new(self.clone(), model)
     }
 
     pub(crate) fn completion_headers(
@@ -1401,14 +846,6 @@ impl OpenAI {
         base
     }
 
-    /// The `api-version` a speech request carries.
-    #[cfg(feature = "audio")]
-    pub(crate) fn speech_api_version(&self) -> Option<&str> {
-        self.audio_api_version
-            .as_deref()
-            .or(self.api_version.as_deref())
-    }
-
     /// The sub-provider the Hugging Face router forwards to. `None` on the
     /// configuration means the router's own default.
     pub(crate) fn route(&self) -> std::borrow::Cow<'_, SubRoute> {
@@ -1424,196 +861,6 @@ impl OpenAI {
             Routing::AzureDeployment => Some(model),
             Routing::Path => None,
         }
-    }
-
-    /// Resolve a fixed or model-addressed modality URL.
-    /// Return an error if the selected sub-route does not serve model-routed endpoints.
-    pub(crate) fn modality_uri(
-        &self,
-        endpoint: &str,
-        fixed: &'static str,
-        model: &str,
-    ) -> Result<String, String> {
-        if !self.dialect.quirks.model_is_modality_path {
-            return Ok(self.uri(fixed, self.deployment(model)));
-        }
-        let route = self.route();
-        if !route.serves_model_routed_endpoints() {
-            return Err(format!(
-                "{endpoint} endpoint is not supported yet for {route}"
-            ));
-        }
-        Ok(format!(
-            "{}/{}",
-            self.base_url.trim_end_matches('/'),
-            model.trim_start_matches('/')
-        ))
-    }
-
-    /// Apply the dialect's authentication to a request builder.
-    pub(crate) fn authenticate(&self, builder: http::request::Builder) -> http::request::Builder {
-        match self.auth {
-            Auth::Bearer => {
-                builder.header("Authorization", format!("Bearer {}", self.api_key.expose()))
-            }
-            Auth::OptionalBearer if self.api_key.is_empty() => builder,
-            Auth::OptionalBearer => {
-                builder.header("Authorization", format!("Bearer {}", self.api_key.expose()))
-            }
-            Auth::ApiKeyHeader => builder.header("api-key", self.api_key.expose()),
-        }
-    }
-
-    /// Stamp the configured caller identity, `originator`, `user-agent` and,
-    /// when it names one, `version`; with none configured, leave the request
-    /// as is.
-    ///
-    /// The one source of caller identity for every transport: the HTTP
-    /// requests and the websocket handshakes all stamp it here. A dialect
-    /// that requires the caller's exact identity ([`Quirks::identity`])
-    /// refuses here, before anything is sent, when there is none or only an
-    /// originator.
-    pub(crate) fn identify(
-        &self,
-        builder: http::request::Builder,
-    ) -> Result<http::request::Builder, MissingCallerIdentity> {
-        Ok(match self.sendable_identity()? {
-            Some(ConfiguredIdentity::Exact(identity)) => identity.stamp(builder),
-            Some(ConfiguredIdentity::Originator { originator }) => builder
-                .header(ORIGINATOR_HEADER, originator)
-                .header(http::header::USER_AGENT, default_user_agent(originator)),
-            None => builder,
-        })
-    }
-
-    /// The identity this configuration may send with, refusing a dialect
-    /// that requires the caller's exact identity when there is none or only
-    /// an originator. The one rule every send checks: [`Self::identify`]
-    /// before stamping a request, and a websocket session before writing a
-    /// frame, whoever opened its connection.
-    pub(crate) fn sendable_identity(
-        &self,
-    ) -> Result<Option<&ConfiguredIdentity>, MissingCallerIdentity> {
-        let required = self.dialect.quirks.identity.is_some();
-        match &self.identity {
-            Some(ConfiguredIdentity::Originator { originator }) if required => {
-                Err(MissingCallerIdentity::OriginatorOnly {
-                    dialect: self.dialect.name,
-                    originator: originator.clone(),
-                })
-            }
-            None if required => Err(MissingCallerIdentity::Unset {
-                dialect: self.dialect.name,
-            }),
-            identity => Ok(identity.as_ref()),
-        }
-    }
-
-    /// Apply authentication, configured identity, account, and per-request
-    /// session headers. Refuses as [`Self::identify`] does.
-    pub(crate) fn headers(
-        &self,
-        builder: http::request::Builder,
-    ) -> Result<http::request::Builder, MissingCallerIdentity> {
-        let mut builder = self.identify(self.authenticate(builder))?;
-        if self
-            .dialect
-            .quirks
-            .identity
-            .is_some_and(|identity| identity.session_ids)
-        {
-            // Session identity must be fresh for each request.
-            builder = builder.header("session_id", crate::providers::chatgpt::session_id());
-        }
-        if let Some(account_id) = &self.account_id {
-            builder = builder.header("ChatGPT-Account-Id", account_id);
-        }
-        Ok(builder)
-    }
-}
-
-/// The header `Auth::ApiKeyHeader` sends the credential in.
-const API_KEY_HEADER: &str = "api-key";
-/// The header naming the account a credential belongs to.
-const ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
-
-/// Build completion wires using configured, model-specific, or dialect routing.
-impl HasCompletion for OpenAI {
-    type Wire = OpenAiWire;
-
-    fn completion(&self, model: impl Into<String>) -> OpenAiWire {
-        self.completion(model)
-    }
-}
-
-/// Explicit endpoint constructors that retain the bound transport.
-impl<H: Clone> Bound<OpenAI, H> {
-    /// The chat-completions wire for `model`, on this socket.
-    pub fn chat(&self, model: impl Into<String>) -> Bound<Chat, H> {
-        Bound::new(self.wire.chat(model), self.http.clone())
-    }
-
-    /// The Responses wire for `model`, on this socket.
-    pub fn responses(&self, model: impl Into<String>) -> Bound<Responses, H> {
-        Bound::new(self.wire.responses(model), self.http.clone())
-    }
-}
-
-impl HasEmbedding for OpenAI {
-    type Wire = Embeddings;
-
-    fn embedding(&self, model: impl Into<String>, ndims: Option<usize>) -> Embeddings {
-        self.embeddings(model, ndims)
-    }
-}
-
-impl HasRerank for OpenAI {
-    type Wire = Rerank;
-
-    fn rerank(&self, model: impl Into<String>) -> Rerank {
-        self.reranker(model)
-    }
-}
-
-impl HasTranscription for OpenAI {
-    type Wire = Transcriptions;
-
-    fn transcription(&self, model: impl Into<String>) -> Transcriptions {
-        self.transcriptions(model)
-    }
-}
-
-impl HasModelListing for OpenAI {
-    type Wire = Models;
-
-    fn model_listing(&self) -> Models {
-        self.models()
-    }
-}
-
-impl HasVerify for OpenAI {
-    type Wire = Verify;
-
-    fn verify(&self) -> Verify {
-        self.verify_wire()
-    }
-}
-
-#[cfg(feature = "image")]
-impl crate::driver::HasImageGeneration for OpenAI {
-    type Wire = Images;
-
-    fn image_generation(&self, model: impl Into<String>) -> Images {
-        self.images(model)
-    }
-}
-
-#[cfg(feature = "audio")]
-impl crate::driver::HasAudioGeneration for OpenAI {
-    type Wire = Speech;
-
-    fn audio_generation(&self, model: impl Into<String>) -> Speech {
-        self.speech(model)
     }
 }
 

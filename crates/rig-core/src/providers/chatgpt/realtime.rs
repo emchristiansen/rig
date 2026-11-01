@@ -14,16 +14,17 @@
 //!
 //! ```no_run
 //! use rig_core::providers::chatgpt::{self, realtime::{LiveCalls, SessionConfig}};
-//! use rig_core::providers::openai::OpenAI;
+//! use rig_core::providers::openai::OpenAIConfig;
 //!
 //! # async fn example(
 //! #     http: &impl rig_core::http_client::HttpClientExt,
 //! #     identity: rig_core::providers::openai::wire::CallerIdentity,
 //! #     offer_sdp: &str,
 //! # ) -> Result<(), rig_core::error::ProviderError> {
-//! let provider = OpenAI::with_key(&chatgpt::DIALECT, "access-token")
+//! let provider = OpenAIConfig::with_key(&chatgpt::DIALECT, "access-token")
 //!     .with_caller_identity(identity)
-//!     .with_account_id("account-id");
+//!     .with_account_id("account-id")
+//!     .client();
 //! let calls = LiveCalls::new(provider)?;
 //! let call = calls
 //!     .create_call(http, offer_sdp, &SessionConfig::new("Answer briefly."))

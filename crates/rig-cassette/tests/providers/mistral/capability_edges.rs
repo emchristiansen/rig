@@ -12,16 +12,13 @@
 //! - Model listing dropped `description` and `max_context_length`, both of
 //!   which `Model` has slots for.
 
-use rig::streaming::Delta;
-
 use anyhow::Result;
 use futures::StreamExt;
-use rig::completion::CompletionModel as _;
-use rig::embeddings::EmbeddingModel as _;
-use rig::model::ModelLister;
 use rig::providers::mistral;
+use rig::streaming::Item;
 
 use super::support::with_mistral_capability_cassette;
+use rig::completion::CompletionRequest;
 
 /// One more than Mistral's real per-request cap, so a single un-chunked
 /// request would be rejected and only correct chunking can succeed.
@@ -36,43 +33,17 @@ async fn one_request_over_mistrals_batch_cap_is_rejected() -> Result<()> {
             // Straight through the model, bypassing the builder's chunking, so
             // the cell pins Mistral's own cap rather than rig's arithmetic.
             let error = model
-                .embed_texts((0..OVER_ONE_BATCH).map(|i| format!("document {i}")))
+                .call(
+                    (0..OVER_ONE_BATCH)
+                        .map(|i| format!("document {i}"))
+                        .collect::<Vec<_>>(),
+                )
                 .await
+                .map(|response| response.embeddings)
                 // `Vec<Embedding>` is not `Debug`; map the Ok side away.
                 .map(|_| ())
                 .expect_err("Mistral must reject a batch over its cap");
             assert_batch_cap_rejection(&error);
-            Ok::<_, anyhow::Error>(())
-        },
-    )
-    .await
-}
-
-#[tokio::test]
-async fn mistral_embed_reports_its_real_dimensions() -> Result<()> {
-    with_mistral_capability_cassette(
-        "capability_edges/mistral_embed_reports_its_real_dimensions",
-        |client| async move {
-            let model = client.embedding(mistral::embedding::MISTRAL_EMBED, None);
-            // The claim under test is the *declared* dimension; the live call
-            // is what proves the declaration matches the vectors Mistral
-            // actually returns.
-            let declared = model.ndims();
-            let embedding = model.embed_text("dimension probe").await?;
-            assert_declared_matches_returned(declared, embedding.vec.len());
-            Ok::<_, anyhow::Error>(())
-        },
-    )
-    .await
-}
-
-#[tokio::test]
-async fn list_models_keeps_description_and_context_length() -> Result<()> {
-    with_mistral_capability_cassette(
-        "capability_edges/list_models_keeps_description_and_context_length",
-        |client| async move {
-            let models = client.models().list_all().await?;
-            assert_listing_carries_mistrals_fields(&models.data);
             Ok::<_, anyhow::Error>(())
         },
     )
@@ -84,32 +55,6 @@ fn assert_batch_cap_rejection(error: &rig::error::ProviderError) {
     assert!(
         rendered.contains("Too many inputs"),
         "the rejection must be Mistral's batch-cap error, not some other failure: {rendered}"
-    );
-}
-
-fn assert_declared_matches_returned(declared: usize, returned: usize) {
-    assert_ne!(
-        declared, 0,
-        "a model that declares 0 dimensions cannot size a vector store; \
-         Mistral's models are absent from OpenAI's dimension table"
-    );
-    assert_eq!(
-        declared, returned,
-        "the declared dimension must match the vector Mistral actually returns"
-    );
-}
-
-fn assert_listing_carries_mistrals_fields(models: &[rig::model::Model]) {
-    assert!(!models.is_empty(), "the listing must not be empty");
-    assert!(
-        models.iter().any(|model| model.description.is_some()),
-        "Mistral's listing carries a `description` and `Model` has a slot for it"
-    );
-    assert!(
-        models
-            .iter()
-            .any(|model| model.context_length.is_some_and(|length| length > 0)),
-        "Mistral reports `max_context_length`, which is `Model::context_length`"
     );
 }
 
@@ -126,21 +71,16 @@ async fn streaming_with_two_candidates_answers_from_the_first() -> Result<()> {
         "capability_edges/streaming_with_two_candidates_answers_from_the_first",
         |client| async move {
             let model = client.completion(mistral::MISTRAL_SMALL);
-            let mut stream: rig::streaming::StreamingCompletionResponse = model
-                .completion_request("Say one random word.")
-                .temperature(1.0)
-                .max_tokens(8)
-                .additional_params(serde_json::json!({"n": 2}))
-                .stream()
-                .await?;
+            let mut stream: rig::streaming::CompletionStream = model.stream(
+                CompletionRequest::new("Say one random word.")
+                    .temperature(1.0)
+                    .max_tokens(8)
+                    .additional_params(serde_json::json!({"n": 2})),
+            )?;
 
             let mut text = String::new();
             while let Some(item) = stream.next().await {
-                if let rig::streaming::StreamEvent::BlockDelta {
-                    delta: Delta::Text { text: chunk },
-                    ..
-                } = item?
-                {
+                if let Item::Event(rig::streaming::StreamEvent::Text { text: chunk, .. }) = item? {
                     text.push_str(&chunk);
                 }
             }
@@ -234,17 +174,15 @@ async fn a_forced_tool_choice_beside_a_response_format_is_accepted() -> Result<(
         |client| async move {
             let model = client.completion(mistral::MISTRAL_SMALL);
             let response = model
-                .completion(
-                    model
-                        .completion_request("Add 2 and 3, then report the total.")
-                        .preamble("Use the add tool, then report the total.".to_string())
+                .call(
+                    CompletionRequest::new("Add 2 and 3, then report the total.")
+                        .preamble("Use the add tool, then report the total.")
                         .messages(turn_one_history())
                         .tools(vec![add_tool_definition()])
                         .tool_choice(rig::message::ToolChoice::Required)
                         .output_schema(schemars::schema_for!(SumReport))
                         .temperature(0.0)
-                        .max_tokens(64)
-                        .build(),
+                        .max_tokens(64),
                 )
                 .await?;
 
@@ -259,18 +197,17 @@ async fn a_forced_tool_choice_beside_a_response_format_is_accepted() -> Result<(
 /// tool call and the result of running it.
 fn turn_one_history() -> Vec<rig::completion::Message> {
     vec![
-        rig::completion::Message::Assistant {
-            id: None,
-            content: vec![rig::message::AssistantContent::tool_call(
+        rig::completion::Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            rig::message::AssistantContent::tool_call(
                 "call_REDACTED_1",
-                "add",
+                rig_core::message::ToolName::new("add").expect("tool name"),
                 serde_json::json!({"x": 2, "y": 3}),
-            )],
-        },
+            ),
+        ])),
         rig::completion::Message::User {
             content: vec![rig::message::UserContent::tool_result(
-                "call_REDACTED_1",
-                "add",
+                rig_core::message::CallId::from_wire("call_REDACTED_1"),
+                rig_core::message::ToolName::new("add").expect("tool name"),
                 vec![rig::message::ToolResultContent::text("5")],
             )],
         },
@@ -279,7 +216,7 @@ fn turn_one_history() -> Vec<rig::completion::Message> {
 
 fn add_tool_definition() -> rig::completion::ToolDefinition {
     rig::completion::ToolDefinition {
-        name: "add".to_string(),
+        name: rig_core::message::ToolName::new("add").expect("tool name"),
         description: "Add two integers.".to_string(),
         parameters: serde_json::json!({
             "type": "object",

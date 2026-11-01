@@ -23,7 +23,7 @@ pub struct NotOfficialOpenAi {
 
 impl From<NotOfficialOpenAi> for ProviderError {
     fn from(error: NotOfficialOpenAi) -> Self {
-        ProviderError::Request(Box::new(error))
+        ProviderError::request(error)
     }
 }
 
@@ -352,9 +352,9 @@ impl PublicLiveSessions {
     /// OpenAI-shaped gateway. The base URL is the provider's own, so a custom
     /// one is kept.
     pub fn new(provider: OpenAI) -> Result<Self, NotOfficialOpenAi> {
-        if provider.dialect.name != OPENAI.name {
+        if provider.config().dialect.name != OPENAI.name {
             return Err(NotOfficialOpenAi {
-                dialect: provider.dialect.name,
+                dialect: provider.config().dialect.name,
             });
         }
         Ok(Self { provider })
@@ -386,9 +386,10 @@ impl PublicLiveSessions {
         if offer_sdp.is_empty() {
             return Err(EncodeError::request(EmptyOffer));
         }
+        let config = self.provider.config();
         let url = format!(
             "{}/{LIVE_SESSIONS_PATH}",
-            self.provider.base_url.trim_end_matches('/')
+            config.base_url.trim_end_matches('/')
         );
         let body = serde_json::to_vec(&Body {
             session,
@@ -397,9 +398,8 @@ impl PublicLiveSessions {
                 sdp: offer_sdp,
             },
         })?;
-        Ok(self
-            .provider
-            .identify(self.provider.authenticate(http::Request::post(url)))?
+        Ok(config
+            .identify(config.authenticate(http::Request::post(url)))?
             .header(http::header::CONTENT_TYPE, "application/json")
             .body(body)?)
     }
@@ -408,13 +408,13 @@ impl PublicLiveSessions {
     /// the provider has one.
     #[must_use]
     pub fn credential_stamp(&self) -> Option<CredentialStamp> {
-        self.provider.credential_stamp()
+        self.provider.config().credential_stamp()
     }
 
     /// The reply header naming the provider's request id.
     #[must_use]
     pub fn request_id_header(&self) -> Option<&'static str> {
-        self.provider.dialect.request_id_header
+        self.provider.config().dialect.request_id_header
     }
 
     /// Decode the reply to [`Self::create_request`] after the driver has read

@@ -1,6 +1,7 @@
 //! Local CPU inference from caller-supplied, validated model artifacts.
-//! Supports selected Llama, SmolLM2, and Qwen3 checkpoints without performing
-//! filesystem or network access. WASM inference is synchronous; use a worker.
+//! Supports selected Llama, SmolLM2, and Qwen3 completion checkpoints and
+//! YOLOv8 pose checkpoints ([`pose`]) without performing filesystem or
+//! network access. WASM inference is synchronous; use a worker.
 //!
 //! ```
 //! use rig_candle::ConversationProtocol;
@@ -9,9 +10,11 @@
 //! ```
 
 mod artifacts;
+pub mod extension;
 mod generation;
 mod loader;
 mod model;
+pub mod pose;
 mod profile;
 mod protocol;
 mod runtime;
@@ -20,7 +23,9 @@ mod validation;
 
 pub use artifacts::{GgufModelData, ModelArtifacts, ModelData};
 pub use generation::{GenerationConfig, GenerationEvent};
-pub use model::{CandleModel, CandleModelBuilder, stream_from_events};
+pub use model::{
+    CandleAdapter, CandleFrame, CandleModel, CandleModelBuilder, CandleRequest, Generation,
+};
 pub use profile::{ConversationProtocol, ModelArchitecture, Quantization};
 pub use types::{CandleCompletionResponse, CandleError, FinishReason};
 

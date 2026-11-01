@@ -112,3 +112,10 @@ fn unrelated_text_is_untouched() {
     let body = r#"{"model":"gpt-4o-mini","choices":[]}"#;
     assert_eq!(scrub(body), body);
 }
+
+/// A home prefix with no component after it leaves no basename to keep:
+/// the whole path becomes the bare placeholder.
+#[test]
+fn a_bare_home_prefix_keeps_no_basename() {
+    assert_eq!(scrub(r#""/home/""#), r#""/REDACTED_PATH""#);
+}

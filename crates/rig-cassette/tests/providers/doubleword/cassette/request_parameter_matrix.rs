@@ -14,11 +14,11 @@
 //! | additional params | `stop` | `["BANANA"]` |
 //! | additional params | `response_format` | `{"type":"json_object"}` |
 
-use rig::completion::CompletionModel;
 use rig::providers::doubleword;
 use serde_json::{Value, json};
 
 use super::super::support::{recorded_chat_calls, with_doubleword_cassette};
+use rig::completion::CompletionRequest;
 
 const MODEL: &str = doubleword::QWEN3_5_9B;
 const PROMPT: &str = "Reply briefly with the word parameter-ok.";
@@ -38,46 +38,6 @@ fn assert_recorded_parameter(scenario: &str, field: &str, expected: Value) {
 }
 
 #[tokio::test]
-async fn temperature_from_the_typed_builder() {
-    const SCENARIO: &str = "request_parameter_matrix/temperature_from_the_typed_builder";
-    with_doubleword_cassette(
-        "request_parameter_matrix/temperature_from_the_typed_builder",
-        |client| async move {
-            let model = client.completion(MODEL);
-            model
-                .completion(
-                    model
-                        .completion_request(PROMPT)
-                        .temperature(0.0)
-                        .max_tokens(32)
-                        .build(),
-                )
-                .await
-                .expect("Doubleword should accept temperature");
-        },
-    )
-    .await;
-    assert_recorded_parameter(SCENARIO, "temperature", json!(0.0));
-}
-
-#[tokio::test]
-async fn max_tokens_from_the_typed_builder() {
-    const SCENARIO: &str = "request_parameter_matrix/max_tokens_from_the_typed_builder";
-    with_doubleword_cassette(
-        "request_parameter_matrix/max_tokens_from_the_typed_builder",
-        |client| async move {
-            let model = client.completion(MODEL);
-            model
-                .completion(model.completion_request(PROMPT).max_tokens(7).build())
-                .await
-                .expect("Doubleword should accept max_tokens");
-        },
-    )
-    .await;
-    assert_recorded_parameter(SCENARIO, "max_tokens", json!(7));
-}
-
-#[tokio::test]
 async fn top_p_from_additional_params() {
     const SCENARIO: &str = "request_parameter_matrix/top_p_from_additional_params";
     with_doubleword_cassette(
@@ -85,12 +45,10 @@ async fn top_p_from_additional_params() {
         |client| async move {
             let model = client.completion(MODEL);
             model
-                .completion(
-                    model
-                        .completion_request(PROMPT)
+                .call(
+                    CompletionRequest::new(PROMPT)
                         .additional_params(json!({ "top_p": 0.25 }))
-                        .max_tokens(32)
-                        .build(),
+                        .max_tokens(32),
                 )
                 .await
                 .expect("Doubleword should accept top_p");
@@ -108,12 +66,10 @@ async fn seed_from_additional_params() {
         |client| async move {
             let model = client.completion(MODEL);
             model
-                .completion(
-                    model
-                        .completion_request(PROMPT)
+                .call(
+                    CompletionRequest::new(PROMPT)
                         .additional_params(json!({ "seed": 31_415 }))
-                        .max_tokens(32)
-                        .build(),
+                        .max_tokens(32),
                 )
                 .await
                 .expect("Doubleword should accept seed");
@@ -131,12 +87,10 @@ async fn stop_sequence_from_additional_params() {
         |client| async move {
             let model = client.completion(MODEL);
             model
-                .completion(
-                    model
-                        .completion_request("Write alpha BANANA omega.")
+                .call(
+                    CompletionRequest::new("Write alpha BANANA omega.")
                         .additional_params(json!({ "stop": ["BANANA"] }))
-                        .max_tokens(64)
-                        .build(),
+                        .max_tokens(64),
                 )
                 .await
                 .expect("Doubleword should accept stop sequences");
@@ -155,14 +109,12 @@ async fn json_object_response_format_from_additional_params() {
         |client| async move {
             let model = client.completion(MODEL);
             model
-                .completion(
-                    model
-                        .completion_request("Return a JSON object with ok set to true.")
+                .call(
+                    CompletionRequest::new("Return a JSON object with ok set to true.")
                         .additional_params(json!({
                             "response_format": { "type": "json_object" }
                         }))
-                        .max_tokens(96)
-                        .build(),
+                        .max_tokens(96),
                 )
                 .await
                 .expect("Doubleword should accept JSON-object response format");

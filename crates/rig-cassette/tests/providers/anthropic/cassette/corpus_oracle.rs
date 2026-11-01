@@ -10,7 +10,6 @@ use rig::agent::AgentBuilder;
 use rig::bus::Bus;
 use rig::completion::PromptError;
 use rig::effect::{EffectFamily, HandlerKey};
-use rig::prelude::*;
 use rig::providers::anthropic::completion::CLAUDE_SONNET_4_6;
 use rig_cassette::agent::AgentReplayExt;
 
@@ -36,7 +35,7 @@ async fn concurrent_notes_effect_log_is_the_golden_fixture() {
         driver
             .register_erased(
                 model_key.clone(),
-                rig::serve::ErasedHandler::new(rig::serve::adapters::CompletionAdapter::new(
+                rig::serve::ErasedHandler::new(rig::serve::adapters::ModelAdapter::new(
                     "default",
                     client.completion(CLAUDE_SONNET_4_6),
                 )),
@@ -66,7 +65,7 @@ async fn concurrent_notes_effect_log_is_the_golden_fixture() {
             .tool_concurrency(2)
             .await
             .expect("the agent answers")
-            .output;
+            .output();
         assert!(!output.is_empty());
         let log = agent.stamp(recorder.take());
         drop((agent, dispatcher, registrar));
@@ -95,8 +94,7 @@ async fn stop_after_turn_two_effect_log_is_the_golden_fixture() {
         "corpus_oracle/stop_after_turn_two",
         |client| async move {
             let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
-            let agent = client
-                .agent(CLAUDE_SONNET_4_6)
+            let agent = rig::AgentBuilder::new(client.completion(CLAUDE_SONNET_4_6))
                 .name("golden")
                 .preamble(TOOLS_PREAMBLE)
                 .temperature(0.0)
@@ -108,7 +106,7 @@ async fn stop_after_turn_two_effect_log_is_the_golden_fixture() {
                 .await
                 .expect_err("the hook stops the run");
             assert!(
-                matches!(&error, PromptError::PromptCancelled { reason, .. } if *reason == stop_after_turn_reason(2)),
+                matches!(&error, PromptError::Cancelled { reason, .. } if *reason == stop_after_turn_reason(2)),
                 "{error:?}"
             );
             let log = agent.stamp(recorder.take());

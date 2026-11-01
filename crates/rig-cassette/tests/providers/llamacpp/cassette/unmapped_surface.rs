@@ -8,7 +8,6 @@
 //! | --- | --- | --- |
 //! | `POST /v1/chat/completions` | implement | the whole suite |
 //! | `POST /v1/embeddings` | implement | `embeddings.rs`, `error_matrix.rs` |
-//! | `GET /v1/models` | implement | [`the_model_listing_reads_the_openai_half_of_a_hybrid_body`] |
 //! | `POST /v1/rerank` (+ `/rerank`, `/reranking`, `/v1/reranking`) | implement | `rerank_matrix.rs` |
 //! | `GET /props` | implement, as the dialect's `verify_path` | [`props_states_which_model_and_modalities_produced_this_corpus`] |
 //! | `POST /v1/responses` | **exclude** | [`the_responses_api_is_reachable_but_rig_does_not_route_to_it`] |
@@ -28,7 +27,7 @@
 //! * **`POST /v1/messages`** — llama.cpp also speaks the *Anthropic* Messages
 //!   wire, converting it to chat completions internally. Rig has an Anthropic
 //!   wire, so this is reachable today with
-//!   `anthropic::wire::Anthropic::new(key).with_base_url(url).bound()?`. It is
+//!   `anthropic::wire::Anthropic::new(key).with_base_url(url)`. It is
 //!   excluded from *this* provider because a
 //!   provider that spoke two wires would have to pick one for every capability,
 //!   and the OpenAI wire is the one llama.cpp's own documentation leads with.
@@ -48,91 +47,12 @@
 //!   `verify_path` for this dialect, and it reports the build tag and
 //!   modalities that say what produced a fixture.
 
-use rig::model::ModelLister;
 use serde_json::Value;
 
 use crate::cassettes::{recorded_request_paths, recorded_statuses_and_bodies};
 
 use super::super::cassette_support::*;
-
-/// `GET /v1/models` returns a **hybrid** body, and rig reads the right half.
-///
-/// One response carries an Ollama-style `models: [...]` array *and* OpenAI's
-/// `object: "list"` with `data: [...]`, describing the same models twice in
-/// different shapes. Rig's shared OpenAI-style lister reads `data`, which is
-/// the half that carries `id`, `created` and `owned_by`; the `models` half has
-/// `name`/`model` and a `details` object rig has no home for.
-///
-/// The cell asserts the envelope shape from the recorded bytes rather than
-/// just "at least one model came back", because a lister that read the wrong
-/// half would still return one model — with an empty id.
-#[tokio::test]
-async fn the_model_listing_reads_the_openai_half_of_a_hybrid_body() {
-    with_llamacpp_cassette("unmapped_surface/models_envelope", |client| async move {
-        let models = client
-            .models()
-            .list_all()
-            .await
-            .expect("listing llama.cpp models should succeed");
-
-        assert_eq!(
-            models.len(),
-            1,
-            "a single-model server lists exactly one: {models:#?}"
-        );
-        let model = &models.data[0];
-        assert!(
-            !model.id.is_empty(),
-            "reading the wrong half of the hybrid body yields an empty id: {model:#?}"
-        );
-        assert_eq!(
-            model.owned_by.as_deref(),
-            Some("llamacpp"),
-            "`owned_by` exists only on the OpenAI half: {model:#?}"
-        );
-        assert!(
-            model.created_at.is_some(),
-            "`created` exists only on the OpenAI half: {model:#?}"
-        );
-    })
-    .await;
-
-    assert_eq!(
-        recorded_request_paths("llamacpp", "unmapped_surface/models_envelope"),
-        vec!["/v1/models".to_string()]
-    );
-
-    let recorded = recorded_statuses_and_bodies("llamacpp", "unmapped_surface/models_envelope");
-    let (status, body) = &recorded[0];
-    assert_eq!(*status, 200);
-    let response: Value = serde_json::from_str(body).expect("response should be JSON");
-
-    // Both halves are present — that is what makes it a hybrid rather than
-    // simply an OpenAI listing.
-    assert_eq!(response["object"], serde_json::json!("list"));
-    let data = response["data"].as_array().expect("the OpenAI half");
-    let ollama = response["models"]
-        .as_array()
-        .expect("the Ollama-style half");
-    assert_eq!(
-        data.len(),
-        ollama.len(),
-        "the two halves describe the same models: {response}"
-    );
-
-    // And they are genuinely different shapes, so reading the wrong one is a
-    // real failure mode rather than a hypothetical.
-    assert!(
-        data[0].get("id").is_some() && data[0].get("name").is_none(),
-        "the OpenAI half keys on `id`: {}",
-        data[0]
-    );
-    assert!(
-        ollama[0].get("name").is_some() && ollama[0].get("id").is_none(),
-        "the Ollama-style half keys on `name`: {}",
-        ollama[0]
-    );
-}
+use rig::completion::CompletionRequest;
 
 /// `GET /props` is what a fixture uses to say which model and modalities
 /// produced it.
@@ -143,7 +63,7 @@ async fn the_model_listing_reads_the_openai_half_of_a_hybrid_body() {
 /// `multimodal_matrix.rs` a question worth asking rather than an assumption.
 ///
 /// It doubles as the evidence for the dialect's `verify_path`: this is the
-/// route `Bound::verify()` issues, so a successful verification is a
+/// route `Model::verify()` issues, so a successful verification is a
 /// successful `/props`.
 #[tokio::test]
 async fn props_states_which_model_and_modalities_produced_this_corpus() {
@@ -206,19 +126,14 @@ async fn props_states_which_model_and_modalities_produced_this_corpus() {
 /// cannot" is not the reason; "one provider, one wire" is.
 #[tokio::test]
 async fn the_responses_api_is_reachable_but_rig_does_not_route_to_it() {
-    use rig::completion::CompletionModel as _;
-
     with_llamacpp_bare_openai_cassette("unmapped_surface/responses_api", |client| async move {
         // The wrapper hands out the plain OpenAI configuration; the Responses
         // surface is a *different* wire over the same socket and the same
         // base URL, which is the whole shape of the exclusion.
         let model = client.responses(CASSETTE_MODEL);
         let response = model
-            .completion(
-                model
-                    .completion_request("/no_think Reply with the single word: ok")
-                    .max_tokens(256)
-                    .build(),
+            .call(
+                CompletionRequest::new("/no_think Reply with the single word: ok").max_tokens(256),
             )
             .await
             .expect("llama.cpp serves the Responses API end to end");

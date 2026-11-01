@@ -9,7 +9,7 @@ use crate::tool::ToolContext;
 async fn context_propagates_into_sub_agent() {
     // Inner agent: calls a context-probing tool, then answers.
     let probe = MockContextProbeTool::default();
-    let inner_model = MockCompletionModel::new([
+    let inner_model = MockCompletionModel::from_turns([
         MockTurn::tool_call("c1", "context_probe", json!({})),
         MockTurn::text("inner done"),
     ]);
@@ -20,12 +20,12 @@ async fn context_propagates_into_sub_agent() {
 
     // Outer agent: delegates to the inner agent (registered as the
     // "researcher" tool), then answers.
-    let outer_model = MockCompletionModel::new([
+    let outer_model = MockCompletionModel::from_turns([
         MockTurn::tool_call("c2", "researcher", json!({"prompt": "do research"})),
         MockTurn::text("outer done"),
     ]);
     let outer = AgentBuilder::new(outer_model)
-        .dynamic_tool(inner.into_tool())
+        .dynamic_tool(inner.into_tool().expect("tool name"))
         .build();
 
     let mut context = ToolContext::new();
@@ -38,6 +38,18 @@ async fn context_propagates_into_sub_agent() {
         .await
         .expect("run succeeds");
 
-    assert_eq!(out.output, "outer done");
+    assert_eq!(out.output(), "outer done");
     assert_eq!(probe.observed().as_deref(), Some("session:abc-123"));
+}
+
+#[test]
+fn an_agent_with_an_empty_name_is_not_a_tool() {
+    let agent = AgentBuilder::new(MockCompletionModel::text("ok"))
+        .name("")
+        .build();
+    assert!(agent.into_tool().is_err());
+
+    let unnamed = AgentBuilder::new(MockCompletionModel::text("ok")).build();
+    let tool = unnamed.into_tool().expect("default tool name");
+    assert_eq!(tool.name(), "agent_tool");
 }

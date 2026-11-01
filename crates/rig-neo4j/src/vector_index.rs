@@ -4,9 +4,10 @@
 use neo4rs::{Graph, Query};
 use rig_core::{
     Embed,
-    embeddings::{Embedding, EmbeddingModel},
+    embeddings::Embedding,
     vector_store::{
-        InsertDocuments, VectorStoreError, VectorStoreIndex,
+        InsertDocuments, VectorSearchIdResult, VectorSearchResult, VectorStoreError,
+        VectorStoreIndex,
         request::{SearchFilter, VectorSearchRequest},
     },
     wasm_compat::WasmCompatSend,
@@ -17,11 +18,11 @@ use crate::{Neo4jClient, Neo4jSearchFilter, ToBoltType};
 
 /// Vector index over Neo4j nodes.
 ///
-/// Queries are embedded with the same model `M` that populated the index, so
+/// Queries are embedded with the same model that populated the index, so
 /// results are meaningless under another model.
-pub struct Neo4jVectorIndex<M> {
+pub struct Neo4jVectorIndex {
     graph: Graph,
-    embedding_model: M,
+    embedding_model: rig_core::DynModel<rig_core::operation::Embedding>,
     index_config: IndexConfig,
 }
 
@@ -115,11 +116,15 @@ const BASE_VECTOR_SEARCH_QUERY: &str = "
     YIELD node, score
 ";
 
-impl<M: EmbeddingModel> Neo4jVectorIndex<M> {
-    pub fn new(graph: Graph, embedding_model: M, index_config: IndexConfig) -> Self {
+impl Neo4jVectorIndex {
+    pub fn new(
+        graph: Graph,
+        embedding_model: impl Into<rig_core::DynModel<rig_core::operation::Embedding>>,
+        index_config: IndexConfig,
+    ) -> Self {
         Self {
             graph,
-            embedding_model,
+            embedding_model: embedding_model.into(),
             index_config,
         }
     }
@@ -197,33 +202,40 @@ struct RowResult {
     element_id: i64,
 }
 
-impl<M: EmbeddingModel> VectorStoreIndex for Neo4jVectorIndex<M> {
+impl VectorStoreIndex for Neo4jVectorIndex {
     type Filter = Neo4jSearchFilter;
 
-    /// Returns matches as `(score, node id, node)`. The node is deserialized as
+    /// Returns matches keyed by node element id. The node is deserialized as
     /// `T` without its embedding property.
     async fn top_n<T: DeserializeOwned + WasmCompatSend>(
         &self,
         req: VectorSearchRequest<Neo4jSearchFilter>,
-    ) -> Result<Vec<(f64, String, T)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchResult<T>>, VectorStoreError> {
         let rows = self.run_search::<RowResultNode<T>>(&req).await?;
 
         Ok(rows
             .into_iter()
-            .map(|row| (row.score, row.element_id.to_string(), row.node))
+            .map(|row| VectorSearchResult {
+                score: row.score,
+                id: row.element_id.to_string(),
+                document: row.node,
+            })
             .collect())
     }
 
-    /// Like `top_n` but returns `(score, node id)` without deserializing nodes.
+    /// Like `top_n` but returns only scores and node ids, without deserializing nodes.
     async fn top_n_ids(
         &self,
         req: VectorSearchRequest<Neo4jSearchFilter>,
-    ) -> Result<Vec<(f64, String)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchIdResult>, VectorStoreError> {
         let rows = self.run_search::<RowResult>(&req).await?;
 
         Ok(rows
             .into_iter()
-            .map(|row| (row.score, row.element_id.to_string()))
+            .map(|row| VectorSearchIdResult {
+                score: row.score,
+                id: row.element_id.to_string(),
+            })
             .collect())
     }
 }
@@ -237,7 +249,7 @@ fn insert_documents_query(node_label: &str) -> String {
     format!("UNWIND $items AS item CREATE (n:{node_label}) SET n = item")
 }
 
-impl<M: EmbeddingModel> InsertDocuments for Neo4jVectorIndex<M> {
+impl InsertDocuments for Neo4jVectorIndex {
     /// Inserts one node per embedding, flattening the document's JSON fields
     /// onto the node alongside the embedding (`embedding_property`) and its
     /// source text (`embedded_text`). Nodes are written under the index's

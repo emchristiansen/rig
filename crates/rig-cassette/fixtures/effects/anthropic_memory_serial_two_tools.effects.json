@@ -1,6 +1,216 @@
 {
   "header": {
-    "run_spec": 6972143684084239244,
+    "stream_done": {
+      "2": [
+        {
+          "item": 13,
+          "response": {
+            "choice": [
+              {
+                "type": "text",
+                "text": "I'll call both tools simultaneously right now!",
+                "native": {
+                  "item": {
+                    "text": "I'll call both tools simultaneously right now!",
+                    "type": "text"
+                  },
+                  "fingerprint": "419c104b03bf2e1e"
+                }
+              },
+              {
+                "type": "toolcall",
+                "id": {
+                  "provider": "toolu_01LP4kcWedzFsZ8qpaqTTvYf"
+                },
+                "function": {
+                  "name": "lookup_harbor_label",
+                  "arguments": {}
+                },
+                "native": {
+                  "item": {
+                    "caller": {
+                      "type": "direct"
+                    },
+                    "id": "toolu_01LP4kcWedzFsZ8qpaqTTvYf",
+                    "input": {},
+                    "name": "lookup_harbor_label",
+                    "type": "tool_use"
+                  },
+                  "fingerprint": "db82bf069bf0de39"
+                }
+              },
+              {
+                "type": "toolcall",
+                "id": {
+                  "provider": "toolu_01765NWXXeNERbBRmiuQTgFa"
+                },
+                "function": {
+                  "name": "lookup_orchard_label",
+                  "arguments": {}
+                },
+                "native": {
+                  "item": {
+                    "caller": {
+                      "type": "direct"
+                    },
+                    "id": "toolu_01765NWXXeNERbBRmiuQTgFa",
+                    "input": {},
+                    "name": "lookup_orchard_label",
+                    "type": "tool_use"
+                  },
+                  "fingerprint": "146471887db8d818"
+                }
+              }
+            ],
+            "usage": {
+              "input_tokens": 700,
+              "output_tokens": 70,
+              "total_tokens": 770,
+              "cached_input_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cost": {
+                "input": 0.0021,
+                "output": 0.00105,
+                "cache_read": 0.0,
+                "cache_write": 0.0,
+                "total": 0.00315
+              }
+            },
+            "message_id": "msg_011CfikU8TWFS3vaML1c3EFy",
+            "origin": {
+              "api": "anthropic.messages",
+              "provider": "anthropic",
+              "model": "claude-sonnet-4-6",
+              "response_model": "claude-sonnet-4-6",
+              "response_id": "msg_011CfikU8TWFS3vaML1c3EFy"
+            },
+            "provider_request_id": "req_011CfikU86vjH3q2FwnVrZjx",
+            "finish_reason": "tool_calls",
+            "raw": {
+              "container": null,
+              "content": [
+                {
+                  "text": "I'll call both tools simultaneously right now!",
+                  "type": "text"
+                },
+                {
+                  "caller": {
+                    "type": "direct"
+                  },
+                  "id": "toolu_01LP4kcWedzFsZ8qpaqTTvYf",
+                  "input": {},
+                  "name": "lookup_harbor_label",
+                  "type": "tool_use"
+                },
+                {
+                  "caller": {
+                    "type": "direct"
+                  },
+                  "id": "toolu_01765NWXXeNERbBRmiuQTgFa",
+                  "input": {},
+                  "name": "lookup_orchard_label",
+                  "type": "tool_use"
+                }
+              ],
+              "diagnostics": null,
+              "id": "msg_011CfikU8TWFS3vaML1c3EFy",
+              "model": "claude-sonnet-4-6",
+              "role": "assistant",
+              "stop_details": null,
+              "stop_reason": "tool_use",
+              "stop_sequence": null,
+              "type": "message",
+              "usage": {
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 0,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "inference_geo": "global",
+                "input_tokens": 700,
+                "output_tokens": 70,
+                "service_tier": "standard"
+              }
+            }
+          }
+        }
+      ],
+      "5": [
+        {
+          "item": 8,
+          "response": {
+            "choice": [
+              {
+                "type": "text",
+                "text": "The alpha signal marker is **crimson-harbor** and the beta signal marker is **silver-orchard**.",
+                "native": {
+                  "item": {
+                    "text": "The alpha signal marker is **crimson-harbor** and the beta signal marker is **silver-orchard**.",
+                    "type": "text"
+                  },
+                  "fingerprint": "84a6c75f1745511b"
+                }
+              }
+            ],
+            "usage": {
+              "input_tokens": 846,
+              "output_tokens": 26,
+              "total_tokens": 872,
+              "cached_input_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cost": {
+                "input": 0.002538,
+                "output": 0.00039,
+                "cache_read": 0.0,
+                "cache_write": 0.0,
+                "total": 0.002928
+              }
+            },
+            "message_id": "msg_011CfikUFDozy9AKtVvtWduc",
+            "origin": {
+              "api": "anthropic.messages",
+              "provider": "anthropic",
+              "model": "claude-sonnet-4-6",
+              "response_model": "claude-sonnet-4-6",
+              "response_id": "msg_011CfikUFDozy9AKtVvtWduc"
+            },
+            "provider_request_id": "req_011CfikUEsxvhxNyVpd2HQvA",
+            "finish_reason": "stop",
+            "raw": {
+              "container": null,
+              "content": [
+                {
+                  "text": "The alpha signal marker is **crimson-harbor** and the beta signal marker is **silver-orchard**.",
+                  "type": "text"
+                }
+              ],
+              "diagnostics": null,
+              "id": "msg_011CfikUFDozy9AKtVvtWduc",
+              "model": "claude-sonnet-4-6",
+              "role": "assistant",
+              "stop_details": null,
+              "stop_reason": "end_turn",
+              "stop_sequence": null,
+              "type": "message",
+              "usage": {
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 0,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "inference_geo": "global",
+                "input_tokens": 846,
+                "output_tokens": 26,
+                "service_tier": "standard"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "run_spec": 14781373656345120039,
     "handlers": [
       {
         "key": "golden/memory",
@@ -142,39 +352,58 @@
           "choice": [
             {
               "type": "text",
-              "text": "I'll call both tools simultaneously right now!"
+              "text": "I'll call both tools simultaneously right now!",
+              "native": {
+                "item": {
+                  "text": "I'll call both tools simultaneously right now!",
+                  "type": "text"
+                },
+                "fingerprint": "419c104b03bf2e1e"
+              }
             },
             {
               "type": "toolcall",
               "id": {
-                "origin": "explicit",
-                "id": "toolu_01XYUUZFSMWu3jg7ZYJtJKWz"
-              },
-              "provider": {
-                "call_id": "toolu_01XYUUZFSMWu3jg7ZYJtJKWz"
+                "provider": "toolu_01LP4kcWedzFsZ8qpaqTTvYf"
               },
               "function": {
                 "name": "lookup_harbor_label",
                 "arguments": {}
               },
-              "signature": null,
-              "additional_params": null
+              "native": {
+                "item": {
+                  "caller": {
+                    "type": "direct"
+                  },
+                  "id": "toolu_01LP4kcWedzFsZ8qpaqTTvYf",
+                  "input": {},
+                  "name": "lookup_harbor_label",
+                  "type": "tool_use"
+                },
+                "fingerprint": "db82bf069bf0de39"
+              }
             },
             {
               "type": "toolcall",
               "id": {
-                "origin": "explicit",
-                "id": "toolu_013rnof6hh7fkkE6Yw6uTKBi"
-              },
-              "provider": {
-                "call_id": "toolu_013rnof6hh7fkkE6Yw6uTKBi"
+                "provider": "toolu_01765NWXXeNERbBRmiuQTgFa"
               },
               "function": {
                 "name": "lookup_orchard_label",
                 "arguments": {}
               },
-              "signature": null,
-              "additional_params": null
+              "native": {
+                "item": {
+                  "caller": {
+                    "type": "direct"
+                  },
+                  "id": "toolu_01765NWXXeNERbBRmiuQTgFa",
+                  "input": {},
+                  "name": "lookup_orchard_label",
+                  "type": "tool_use"
+                },
+                "fingerprint": "146471887db8d818"
+              }
             }
           ],
           "usage": {
@@ -182,205 +411,251 @@
             "output_tokens": 70,
             "total_tokens": 770,
             "cached_input_tokens": 0,
-            "cache_creation_input_tokens": 0
+            "cache_creation_input_tokens": 0,
+            "cost": {
+              "input": 0.0021,
+              "output": 0.00105,
+              "cache_read": 0.0,
+              "cache_write": 0.0,
+              "total": 0.00315
+            }
           },
-          "message_id": "msg_011CfLcbZBioFZPq3VJdV3Gy",
-          "response_id": null,
-          "provider_request_id": "req_011CfLcbYjBmpaVpMZubGmQJ",
+          "message_id": "msg_011CfikU8TWFS3vaML1c3EFy",
+          "origin": {
+            "api": "anthropic.messages",
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-6",
+            "response_model": "claude-sonnet-4-6",
+            "response_id": "msg_011CfikU8TWFS3vaML1c3EFy"
+          },
+          "provider_request_id": "req_011CfikU86vjH3q2FwnVrZjx",
           "finish_reason": "tool_calls",
-          "provider": "anthropic",
-          "model": "claude-sonnet-4-6",
           "raw": {
-            "usage": {
-              "output_tokens": 70,
-              "input_tokens": 700,
-              "cache_creation_input_tokens": 0,
-              "cache_creation": {
-                "ephemeral_5m_input_tokens": 0,
-                "ephemeral_1h_input_tokens": 0
+            "container": null,
+            "content": [
+              {
+                "text": "I'll call both tools simultaneously right now!",
+                "type": "text"
               },
-              "cache_read_input_tokens": 0
-            },
+              {
+                "caller": {
+                  "type": "direct"
+                },
+                "id": "toolu_01LP4kcWedzFsZ8qpaqTTvYf",
+                "input": {},
+                "name": "lookup_harbor_label",
+                "type": "tool_use"
+              },
+              {
+                "caller": {
+                  "type": "direct"
+                },
+                "id": "toolu_01765NWXXeNERbBRmiuQTgFa",
+                "input": {},
+                "name": "lookup_orchard_label",
+                "type": "tool_use"
+              }
+            ],
+            "diagnostics": null,
+            "id": "msg_011CfikU8TWFS3vaML1c3EFy",
+            "model": "claude-sonnet-4-6",
+            "role": "assistant",
+            "stop_details": null,
             "stop_reason": "tool_use",
-            "message_id": "msg_011CfLcbZBioFZPq3VJdV3Gy",
-            "model": "claude-sonnet-4-6"
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 0,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "inference_geo": "global",
+              "input_tokens": 700,
+              "output_tokens": 70,
+              "service_tier": "standard"
+            }
           }
         }
       },
       "events": [
         {
-          "event": "block_start",
-          "id": "minted:block:0",
-          "kind": {
-            "kind": "text"
+          "item": "event",
+          "value": {
+            "event": "start",
+            "part": 0,
+            "kind": "text",
+            "source_order": {
+              "primary": 0,
+              "secondary": 0
+            }
           }
         },
         {
-          "event": "block_delta",
-          "id": "minted:block:0",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": "I'll call both tools"
           }
         },
         {
-          "event": "block_delta",
-          "id": "minted:block:0",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": " simultaneously"
           }
         },
         {
-          "event": "block_delta",
-          "id": "minted:block:0",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": " right"
           }
         },
         {
-          "event": "block_delta",
-          "id": "minted:block:0",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": " now"
           }
         },
         {
-          "event": "block_delta",
-          "id": "minted:block:0",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": "!"
           }
         },
         {
-          "event": "block_start",
-          "id": "wire:toolu_01XYUUZFSMWu3jg7ZYJtJKWz",
-          "kind": {
-            "kind": "tool_call"
+          "item": "event",
+          "value": {
+            "event": "end",
+            "part": 0,
+            "content": {
+              "type": "text",
+              "text": "I'll call both tools simultaneously right now!",
+              "native": {
+                "item": {
+                  "text": "I'll call both tools simultaneously right now!",
+                  "type": "text"
+                },
+                "fingerprint": "419c104b03bf2e1e"
+              }
+            }
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01XYUUZFSMWu3jg7ZYJtJKWz",
-          "delta": {
-            "delta": "tool_name",
+          "item": "event",
+          "value": {
+            "event": "start",
+            "part": 1,
+            "kind": "tool_call",
+            "source_order": {
+              "primary": 0,
+              "secondary": 1
+            },
             "name": "lookup_harbor_label"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01XYUUZFSMWu3jg7ZYJtJKWz",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": ""
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 1,
+            "json": "{}"
           }
         },
         {
-          "event": "block_end",
-          "id": "wire:toolu_01XYUUZFSMWu3jg7ZYJtJKWz",
-          "end": {
-            "close": "tool_call",
-            "on_unparseable": "error"
-          },
-          "block": {
-            "type": "toolcall",
-            "id": {
-              "origin": "explicit",
-              "id": "toolu_01XYUUZFSMWu3jg7ZYJtJKWz"
-            },
-            "provider": {
-              "call_id": "toolu_01XYUUZFSMWu3jg7ZYJtJKWz"
-            },
-            "function": {
-              "name": "lookup_harbor_label",
-              "arguments": {}
-            },
-            "signature": null,
-            "additional_params": null
+          "item": "event",
+          "value": {
+            "event": "end",
+            "part": 1,
+            "content": {
+              "type": "toolcall",
+              "id": {
+                "provider": "toolu_01LP4kcWedzFsZ8qpaqTTvYf"
+              },
+              "function": {
+                "name": "lookup_harbor_label",
+                "arguments": {}
+              },
+              "native": {
+                "item": {
+                  "caller": {
+                    "type": "direct"
+                  },
+                  "id": "toolu_01LP4kcWedzFsZ8qpaqTTvYf",
+                  "input": {},
+                  "name": "lookup_harbor_label",
+                  "type": "tool_use"
+                },
+                "fingerprint": "db82bf069bf0de39"
+              }
+            }
           }
         },
         {
-          "event": "block_start",
-          "id": "wire:toolu_013rnof6hh7fkkE6Yw6uTKBi",
-          "kind": {
-            "kind": "tool_call"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_013rnof6hh7fkkE6Yw6uTKBi",
-          "delta": {
-            "delta": "tool_name",
+          "item": "event",
+          "value": {
+            "event": "start",
+            "part": 2,
+            "kind": "tool_call",
+            "source_order": {
+              "primary": 0,
+              "secondary": 2
+            },
             "name": "lookup_orchard_label"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_013rnof6hh7fkkE6Yw6uTKBi",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": ""
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 2,
+            "json": "{}"
           }
         },
         {
-          "event": "block_end",
-          "id": "wire:toolu_013rnof6hh7fkkE6Yw6uTKBi",
-          "end": {
-            "close": "tool_call",
-            "on_unparseable": "error"
-          },
-          "block": {
-            "type": "toolcall",
-            "id": {
-              "origin": "explicit",
-              "id": "toolu_013rnof6hh7fkkE6Yw6uTKBi"
-            },
-            "provider": {
-              "call_id": "toolu_013rnof6hh7fkkE6Yw6uTKBi"
-            },
-            "function": {
-              "name": "lookup_orchard_label",
-              "arguments": {}
-            },
-            "signature": null,
-            "additional_params": null
-          }
-        },
-        {
-          "event": "final",
-          "usage": {
-            "input_tokens": 700,
-            "output_tokens": 70,
-            "total_tokens": 770,
-            "cached_input_tokens": 0,
-            "cache_creation_input_tokens": 0
-          },
-          "finish_reason": "tool_calls",
-          "message_id": "msg_011CfLcbZBioFZPq3VJdV3Gy",
-          "response_id": null,
-          "provider_request_id": "req_011CfLcbYjBmpaVpMZubGmQJ",
-          "provider": "anthropic",
-          "model": "claude-sonnet-4-6",
-          "raw": {
-            "usage": {
-              "output_tokens": 70,
-              "input_tokens": 700,
-              "cache_creation_input_tokens": 0,
-              "cache_creation": {
-                "ephemeral_5m_input_tokens": 0,
-                "ephemeral_1h_input_tokens": 0
+          "item": "event",
+          "value": {
+            "event": "end",
+            "part": 2,
+            "content": {
+              "type": "toolcall",
+              "id": {
+                "provider": "toolu_01765NWXXeNERbBRmiuQTgFa"
               },
-              "cache_read_input_tokens": 0
-            },
-            "stop_reason": "tool_use",
-            "message_id": "msg_011CfLcbZBioFZPq3VJdV3Gy",
-            "model": "claude-sonnet-4-6"
+              "function": {
+                "name": "lookup_orchard_label",
+                "arguments": {}
+              },
+              "native": {
+                "item": {
+                  "caller": {
+                    "type": "direct"
+                  },
+                  "id": "toolu_01765NWXXeNERbBRmiuQTgFa",
+                  "input": {},
+                  "name": "lookup_orchard_label",
+                  "type": "tool_use"
+                },
+                "fingerprint": "146471887db8d818"
+              }
+            }
           }
         }
-      ]
+      ],
+      "stream_origin": {
+        "api": "anthropic.messages",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6"
+      }
     },
     {
       "tool_output": {},
@@ -454,45 +729,71 @@
             },
             {
               "role": "assistant",
-              "id": "msg_011CfLcbZBioFZPq3VJdV3Gy",
               "content": [
                 {
                   "type": "text",
-                  "text": "I'll call both tools simultaneously right now!"
+                  "text": "I'll call both tools simultaneously right now!",
+                  "native": {
+                    "item": {
+                      "text": "I'll call both tools simultaneously right now!",
+                      "type": "text"
+                    },
+                    "fingerprint": "419c104b03bf2e1e"
+                  }
                 },
                 {
                   "type": "toolcall",
                   "id": {
-                    "origin": "explicit",
-                    "id": "toolu_01XYUUZFSMWu3jg7ZYJtJKWz"
-                  },
-                  "provider": {
-                    "call_id": "toolu_01XYUUZFSMWu3jg7ZYJtJKWz"
+                    "provider": "toolu_01LP4kcWedzFsZ8qpaqTTvYf"
                   },
                   "function": {
                     "name": "lookup_harbor_label",
                     "arguments": {}
                   },
-                  "signature": null,
-                  "additional_params": null
+                  "native": {
+                    "item": {
+                      "caller": {
+                        "type": "direct"
+                      },
+                      "id": "toolu_01LP4kcWedzFsZ8qpaqTTvYf",
+                      "input": {},
+                      "name": "lookup_harbor_label",
+                      "type": "tool_use"
+                    },
+                    "fingerprint": "db82bf069bf0de39"
+                  }
                 },
                 {
                   "type": "toolcall",
                   "id": {
-                    "origin": "explicit",
-                    "id": "toolu_013rnof6hh7fkkE6Yw6uTKBi"
-                  },
-                  "provider": {
-                    "call_id": "toolu_013rnof6hh7fkkE6Yw6uTKBi"
+                    "provider": "toolu_01765NWXXeNERbBRmiuQTgFa"
                   },
                   "function": {
                     "name": "lookup_orchard_label",
                     "arguments": {}
                   },
-                  "signature": null,
-                  "additional_params": null
+                  "native": {
+                    "item": {
+                      "caller": {
+                        "type": "direct"
+                      },
+                      "id": "toolu_01765NWXXeNERbBRmiuQTgFa",
+                      "input": {},
+                      "name": "lookup_orchard_label",
+                      "type": "tool_use"
+                    },
+                    "fingerprint": "146471887db8d818"
+                  }
                 }
-              ]
+              ],
+              "origin": {
+                "api": "anthropic.messages",
+                "provider": "anthropic",
+                "model": "claude-sonnet-4-6",
+                "response_model": "claude-sonnet-4-6",
+                "response_id": "msg_011CfikU8TWFS3vaML1c3EFy"
+              },
+              "stop": "tool_use"
             },
             {
               "role": "user",
@@ -500,11 +801,7 @@
                 {
                   "type": "toolresult",
                   "call": {
-                    "origin": "explicit",
-                    "id": "toolu_01XYUUZFSMWu3jg7ZYJtJKWz"
-                  },
-                  "provider": {
-                    "call_id": "toolu_01XYUUZFSMWu3jg7ZYJtJKWz"
+                    "provider": "toolu_01LP4kcWedzFsZ8qpaqTTvYf"
                   },
                   "name": "lookup_harbor_label",
                   "answers": "function",
@@ -518,11 +815,7 @@
                 {
                   "type": "toolresult",
                   "call": {
-                    "origin": "explicit",
-                    "id": "toolu_013rnof6hh7fkkE6Yw6uTKBi"
-                  },
-                  "provider": {
-                    "call_id": "toolu_013rnof6hh7fkkE6Yw6uTKBi"
+                    "provider": "toolu_01765NWXXeNERbBRmiuQTgFa"
                   },
                   "name": "lookup_orchard_label",
                   "answers": "function",
@@ -571,7 +864,14 @@
           "choice": [
             {
               "type": "text",
-              "text": "The alpha signal marker is **crimson-harbor** and the beta signal marker is **silver-orchard**."
+              "text": "The alpha signal marker is **crimson-harbor** and the beta signal marker is **silver-orchard**.",
+              "native": {
+                "item": {
+                  "text": "The alpha signal marker is **crimson-harbor** and the beta signal marker is **silver-orchard**.",
+                  "type": "text"
+                },
+                "fingerprint": "84a6c75f1745511b"
+              }
             }
           ],
           "usage": {
@@ -579,119 +879,141 @@
             "output_tokens": 26,
             "total_tokens": 872,
             "cached_input_tokens": 0,
-            "cache_creation_input_tokens": 0
+            "cache_creation_input_tokens": 0,
+            "cost": {
+              "input": 0.002538,
+              "output": 0.00039,
+              "cache_read": 0.0,
+              "cache_write": 0.0,
+              "total": 0.002928
+            }
           },
-          "message_id": "msg_011CfLcbjaZLXqWjqD4Swnni",
-          "response_id": null,
-          "provider_request_id": "req_011CfLcbj8GHzftcDVnvaWVG",
+          "message_id": "msg_011CfikUFDozy9AKtVvtWduc",
+          "origin": {
+            "api": "anthropic.messages",
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-6",
+            "response_model": "claude-sonnet-4-6",
+            "response_id": "msg_011CfikUFDozy9AKtVvtWduc"
+          },
+          "provider_request_id": "req_011CfikUEsxvhxNyVpd2HQvA",
           "finish_reason": "stop",
-          "provider": "anthropic",
-          "model": "claude-sonnet-4-6",
           "raw": {
-            "usage": {
-              "output_tokens": 26,
-              "input_tokens": 846,
-              "cache_creation_input_tokens": 0,
-              "cache_creation": {
-                "ephemeral_5m_input_tokens": 0,
-                "ephemeral_1h_input_tokens": 0
-              },
-              "cache_read_input_tokens": 0
-            },
+            "container": null,
+            "content": [
+              {
+                "text": "The alpha signal marker is **crimson-harbor** and the beta signal marker is **silver-orchard**.",
+                "type": "text"
+              }
+            ],
+            "diagnostics": null,
+            "id": "msg_011CfikUFDozy9AKtVvtWduc",
+            "model": "claude-sonnet-4-6",
+            "role": "assistant",
+            "stop_details": null,
             "stop_reason": "end_turn",
-            "message_id": "msg_011CfLcbjaZLXqWjqD4Swnni",
-            "model": "claude-sonnet-4-6"
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 0,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "inference_geo": "global",
+              "input_tokens": 846,
+              "output_tokens": 26,
+              "service_tier": "standard"
+            }
           }
         }
       },
       "events": [
         {
-          "event": "block_start",
-          "id": "minted:block:0",
-          "kind": {
-            "kind": "text"
+          "item": "event",
+          "value": {
+            "event": "start",
+            "part": 0,
+            "kind": "text",
+            "source_order": {
+              "primary": 0,
+              "secondary": 0
+            }
           }
         },
         {
-          "event": "block_delta",
-          "id": "minted:block:0",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": "The"
           }
         },
         {
-          "event": "block_delta",
-          "id": "minted:block:0",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": " alpha"
           }
         },
         {
-          "event": "block_delta",
-          "id": "minted:block:0",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": " signal marker is"
           }
         },
         {
-          "event": "block_delta",
-          "id": "minted:block:0",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": " **crimson-harbor**"
           }
         },
         {
-          "event": "block_delta",
-          "id": "minted:block:0",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": " and the beta signal marker is **"
           }
         },
         {
-          "event": "block_delta",
-          "id": "minted:block:0",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": "silver-orchard**."
           }
         },
         {
-          "event": "final",
-          "usage": {
-            "input_tokens": 846,
-            "output_tokens": 26,
-            "total_tokens": 872,
-            "cached_input_tokens": 0,
-            "cache_creation_input_tokens": 0
-          },
-          "finish_reason": "stop",
-          "message_id": "msg_011CfLcbjaZLXqWjqD4Swnni",
-          "response_id": null,
-          "provider_request_id": "req_011CfLcbj8GHzftcDVnvaWVG",
-          "provider": "anthropic",
-          "model": "claude-sonnet-4-6",
-          "raw": {
-            "usage": {
-              "output_tokens": 26,
-              "input_tokens": 846,
-              "cache_creation_input_tokens": 0,
-              "cache_creation": {
-                "ephemeral_5m_input_tokens": 0,
-                "ephemeral_1h_input_tokens": 0
-              },
-              "cache_read_input_tokens": 0
-            },
-            "stop_reason": "end_turn",
-            "message_id": "msg_011CfLcbjaZLXqWjqD4Swnni",
-            "model": "claude-sonnet-4-6"
+          "item": "event",
+          "value": {
+            "event": "end",
+            "part": 0,
+            "content": {
+              "type": "text",
+              "text": "The alpha signal marker is **crimson-harbor** and the beta signal marker is **silver-orchard**.",
+              "native": {
+                "item": {
+                  "text": "The alpha signal marker is **crimson-harbor** and the beta signal marker is **silver-orchard**.",
+                  "type": "text"
+                },
+                "fingerprint": "84a6c75f1745511b"
+              }
+            }
           }
         }
-      ]
+      ],
+      "stream_origin": {
+        "api": "anthropic.messages",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6"
+      }
     },
     {
       "tool_output": null,
@@ -714,45 +1036,71 @@
             },
             {
               "role": "assistant",
-              "id": "msg_011CfLcbZBioFZPq3VJdV3Gy",
               "content": [
                 {
                   "type": "text",
-                  "text": "I'll call both tools simultaneously right now!"
+                  "text": "I'll call both tools simultaneously right now!",
+                  "native": {
+                    "item": {
+                      "text": "I'll call both tools simultaneously right now!",
+                      "type": "text"
+                    },
+                    "fingerprint": "419c104b03bf2e1e"
+                  }
                 },
                 {
                   "type": "toolcall",
                   "id": {
-                    "origin": "explicit",
-                    "id": "toolu_01XYUUZFSMWu3jg7ZYJtJKWz"
-                  },
-                  "provider": {
-                    "call_id": "toolu_01XYUUZFSMWu3jg7ZYJtJKWz"
+                    "provider": "toolu_01LP4kcWedzFsZ8qpaqTTvYf"
                   },
                   "function": {
                     "name": "lookup_harbor_label",
                     "arguments": {}
                   },
-                  "signature": null,
-                  "additional_params": null
+                  "native": {
+                    "item": {
+                      "caller": {
+                        "type": "direct"
+                      },
+                      "id": "toolu_01LP4kcWedzFsZ8qpaqTTvYf",
+                      "input": {},
+                      "name": "lookup_harbor_label",
+                      "type": "tool_use"
+                    },
+                    "fingerprint": "db82bf069bf0de39"
+                  }
                 },
                 {
                   "type": "toolcall",
                   "id": {
-                    "origin": "explicit",
-                    "id": "toolu_013rnof6hh7fkkE6Yw6uTKBi"
-                  },
-                  "provider": {
-                    "call_id": "toolu_013rnof6hh7fkkE6Yw6uTKBi"
+                    "provider": "toolu_01765NWXXeNERbBRmiuQTgFa"
                   },
                   "function": {
                     "name": "lookup_orchard_label",
                     "arguments": {}
                   },
-                  "signature": null,
-                  "additional_params": null
+                  "native": {
+                    "item": {
+                      "caller": {
+                        "type": "direct"
+                      },
+                      "id": "toolu_01765NWXXeNERbBRmiuQTgFa",
+                      "input": {},
+                      "name": "lookup_orchard_label",
+                      "type": "tool_use"
+                    },
+                    "fingerprint": "146471887db8d818"
+                  }
                 }
-              ]
+              ],
+              "origin": {
+                "api": "anthropic.messages",
+                "provider": "anthropic",
+                "model": "claude-sonnet-4-6",
+                "response_model": "claude-sonnet-4-6",
+                "response_id": "msg_011CfikU8TWFS3vaML1c3EFy"
+              },
+              "stop": "tool_use"
             },
             {
               "role": "user",
@@ -760,11 +1108,7 @@
                 {
                   "type": "toolresult",
                   "call": {
-                    "origin": "explicit",
-                    "id": "toolu_01XYUUZFSMWu3jg7ZYJtJKWz"
-                  },
-                  "provider": {
-                    "call_id": "toolu_01XYUUZFSMWu3jg7ZYJtJKWz"
+                    "provider": "toolu_01LP4kcWedzFsZ8qpaqTTvYf"
                   },
                   "name": "lookup_harbor_label",
                   "answers": "function",
@@ -778,11 +1122,7 @@
                 {
                   "type": "toolresult",
                   "call": {
-                    "origin": "explicit",
-                    "id": "toolu_013rnof6hh7fkkE6Yw6uTKBi"
-                  },
-                  "provider": {
-                    "call_id": "toolu_013rnof6hh7fkkE6Yw6uTKBi"
+                    "provider": "toolu_01765NWXXeNERbBRmiuQTgFa"
                   },
                   "name": "lookup_orchard_label",
                   "answers": "function",
@@ -797,13 +1137,27 @@
             },
             {
               "role": "assistant",
-              "id": "msg_011CfLcbjaZLXqWjqD4Swnni",
               "content": [
                 {
                   "type": "text",
-                  "text": "The alpha signal marker is **crimson-harbor** and the beta signal marker is **silver-orchard**."
+                  "text": "The alpha signal marker is **crimson-harbor** and the beta signal marker is **silver-orchard**.",
+                  "native": {
+                    "item": {
+                      "text": "The alpha signal marker is **crimson-harbor** and the beta signal marker is **silver-orchard**.",
+                      "type": "text"
+                    },
+                    "fingerprint": "84a6c75f1745511b"
+                  }
                 }
-              ]
+              ],
+              "origin": {
+                "api": "anthropic.messages",
+                "provider": "anthropic",
+                "model": "claude-sonnet-4-6",
+                "response_model": "claude-sonnet-4-6",
+                "response_id": "msg_011CfikUFDozy9AKtVvtWduc"
+              },
+              "stop": "stop"
             }
           ]
         }

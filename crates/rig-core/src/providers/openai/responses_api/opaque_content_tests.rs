@@ -1,51 +1,129 @@
 use super::*;
-use crate::message::{self, AdditionalParams};
+use crate::completion::{CompletionRequest, CompletionResponse};
+use crate::error::ProviderError;
+use crate::message::{
+    self, AssistantContent as CoreContent, AssistantMessage, CarriedPayload, CarriedReasoning,
+    CarriedReasoningPart, CarriedText, Message,
+};
+use crate::wire::{Mode, Operation as _, Wire as _};
 use serde_json::json;
+use std::error::Error as _;
 
 fn raw() -> Value {
     json!({"type":"future_part","payload":{"nested":[1,null,{"x":true}]},"text":"opaque"})
 }
 
-fn opaque_text() -> message::AssistantContent {
-    message::AssistantContent::Text(text_block(AssistantContent::Unknown(raw())))
+fn opaque_text() -> CoreContent {
+    let item = json!({"type":"message","content":[raw()]});
+    let mut parts = carried_message_parts(&item, 0, Some("openai".to_owned()))
+        .expect("the current private factory retains the exact opaque part");
+    assert_eq!(parts.len(), 1);
+    CoreContent::CarriedText(parts.remove(0))
 }
 
+fn assistant(content: Vec<CoreContent>) -> Message {
+    Message::Assistant(AssistantMessage::new(content))
+}
+
+fn target() -> wire::Responses {
+    crate::providers::openai::OpenAIConfig::new("test").responses("gpt-test")
+}
+
+/// The existing default wire reader/fold, with only its required terminal root.
+fn decode(output: Vec<Value>) -> Result<CompletionResponse, ProviderError> {
+    let body = json!({"id":"resp_1","object":"response","created_at":0,
+        "status":"completed","model":"gpt-test","output":output});
+    crate::test_utils::decode_reply(
+        &target(),
+        &CompletionRequest::new("prompt"),
+        Mode::Unary,
+        [crate::wire::WireFrame::Text(serde_json::to_string(&body)?)],
+        Value::Null,
+    )
+}
+
+fn input_items(content: Vec<CoreContent>) -> Result<Vec<Value>, crate::error::EncodeError> {
+    let target = target();
+    let mut custom = Custom {
+        tools: Default::default(),
+        calls: Default::default(),
+    };
+    let mut system_items = Vec::new();
+    super::input(
+        &[assistant(content)],
+        &target,
+        "gpt-test",
+        &mut custom,
+        false,
+        &mut system_items,
+        None,
+    )
+}
+
+/// OC01 / G87: current carried serde and real reader preserve the exact leaves;
+/// the retired standalone native serde projections are not restored.
 #[test]
 fn opaque_leaf_unions_are_lossless_and_known_tags_are_strict() {
     for value in [raw(), json!({"type":"future_part","payload":null})] {
-        assert_eq!(
-            serde_json::to_value(
-                serde_json::from_value::<AssistantContent>(value.clone()).unwrap()
-            )
-            .unwrap(),
-            value
-        );
-        assert_eq!(
-            serde_json::to_value(
-                serde_json::from_value::<ReasoningSummary>(value.clone()).unwrap()
-            )
-            .unwrap(),
-            value
-        );
-        assert_eq!(
-            serde_json::to_value(
-                serde_json::from_value::<ReasoningTextContent>(value.clone()).unwrap()
-            )
-            .unwrap(),
-            value
-        );
+        let message = json!({"type":"message","content":[value.clone()]});
+        let text = carried_message_parts(&message, 0, None)
+            .expect("unknown message leaf retains its value")
+            .remove(0);
+        let loaded: CarriedText = serde_json::from_value(
+            serde_json::to_value(&text).expect("current carried text serializes"),
+        )
+        .expect("current carried text loads");
+        assert_eq!(loaded, text);
+        assert_eq!(loaded.payload.item, value);
+
+        let summary = carried_reasoning(
+            &json!({"type":"reasoning","id":"rs_1","summary":[value.clone()]}),
+            None,
+        )
+        .expect("unknown summary leaf retains its value");
+        let loaded: CarriedReasoning = serde_json::from_value(
+            serde_json::to_value(&summary).expect("current summary carrier serializes"),
+        )
+        .expect("current summary carrier loads");
+        assert_eq!(loaded, summary);
+        let [CarriedReasoningPart::OpaqueSummary(payload)] = loaded.content.as_slice() else {
+            panic!("the unknown summary stays opaque");
+        };
+        assert_eq!(payload.item, value);
+
+        let reasoning = carried_reasoning(
+            &json!({"type":"reasoning","id":"rs_1","content":[value.clone()]}),
+            None,
+        )
+        .expect("unknown reasoning leaf retains its value");
+        let loaded: CarriedReasoning = serde_json::from_value(
+            serde_json::to_value(&reasoning).expect("current reasoning carrier serializes"),
+        )
+        .expect("current reasoning carrier loads");
+        assert_eq!(loaded, reasoning);
+        let [CarriedReasoningPart::OpaqueContent(payload)] = loaded.content.as_slice() else {
+            panic!("the unknown reasoning content stays opaque");
+        };
+        assert_eq!(payload.item, value);
     }
     for value in [
         json!({"type":"output_text","text":42}),
         json!({"type":"refusal","refusal":null}),
     ] {
-        assert!(serde_json::from_value::<AssistantContent>(value.clone()).is_err());
-        assert!(serde_json::from_value::<AssistantContentType>(value).is_err());
+        let item = json!({"type":"message","id":"msg_1","role":"assistant",
+            "status":"completed","content":[value]});
+        assert!(carried_message_parts(&item, 0, None).is_err());
+        assert!(decode(vec![item]).is_err());
     }
-    assert!(serde_json::from_value::<ReasoningSummary>(json!({"type":"summary_text"})).is_err());
     assert!(
-        serde_json::from_value::<ReasoningTextContent>(json!({"type":"reasoning_text","text":42}))
-            .is_err()
+        decode(vec![json!({"type":"reasoning","id":"rs_1",
+        "summary":[{"type":"summary_text"}]})])
+        .is_err()
+    );
+    assert!(
+        decode(vec![json!({"type":"reasoning","id":"rs_1",
+        "content":[{"type":"reasoning_text","text":42}]})])
+        .is_err()
     );
     for content in [
         json!(42),
@@ -54,42 +132,140 @@ fn opaque_leaf_unions_are_lossless_and_known_tags_are_strict() {
         json!([true]),
     ] {
         assert!(
-            serde_json::from_value::<Output>(
-                json!({"type":"reasoning","id":"rs_1","content":content})
-            )
+            decode(vec![json!({"type":"reasoning","id":"rs_1",
+            "content":content})])
             .is_err()
         );
     }
     for content in [json!("text"), json!(["text"])] {
-        let item: Output =
-            serde_json::from_value(json!({"type":"reasoning","id":"rs_1","content":content}))
-                .unwrap();
+        let response = decode(vec![json!({"type":"reasoning","id":"rs_1",
+            "content":content})])
+        .expect("both original accepted reasoning forms decode");
+        let input = input_items(response.choice).expect("the actual current reasoning replays");
         assert_eq!(
-            serde_json::to_value(item).unwrap()["content"],
+            input[0]["content"],
             json!([{"type":"reasoning_text","text":"text"}])
         );
     }
 }
 
+/// OC03: actual received carried reasoning retains the original whole arrays.
+#[test]
+fn opaque_reasoning_replays_both_arrays_and_refuses_a_missing_id() {
+    let summary = json!([{"type":"summary_text","text":"S"},raw()]);
+    let content = json!([raw(),{"type":"reasoning_text","text":"T"}]);
+    let output = json!({"type":"reasoning","id":"rs_1","summary":summary,
+        "content":content,"encrypted_content":"encrypted","signature":"signed"});
+    let response = decode(vec![output]).expect("the real reader/fold decodes reasoning");
+    let replay =
+        input_items(response.choice.clone()).expect("the actual carried reasoning replays");
+    assert_eq!(replay[0]["summary"], summary);
+    assert_eq!(replay[0]["content"], content);
+    assert_eq!(replay[0]["signature"], "signed");
+    assert_eq!(replay[0]["encrypted_content"], "encrypted");
+    let mut idless = response.choice;
+    let [CoreContent::CarriedReasoning(reasoning)] = idless.as_mut_slice() else {
+        panic!("one actual carried reasoning item");
+    };
+    reasoning.id = None;
+    assert!(
+        input_items(idless)
+            .unwrap_err()
+            .to_string()
+            .contains("opaque")
+    );
+}
+
+/// OC06: the current actual encoding boundaries keep each original refusal.
+#[test]
+fn opaque_parts_are_refused_by_all_core_non_responses_converters() {
+    use crate::providers::{anthropic, cohere, gemini, ollama, openai};
+    let reasoning = carried_reasoning(
+        &json!({"type":"reasoning","summary":[{"type":"summary_text","text":"known"},raw()],
+            "content":[raw()]}),
+        Some("openai".to_owned()),
+    )
+    .expect("the existing private reader preserves all original reasoning parts");
+    let parts = [opaque_text(), CoreContent::CarriedReasoning(reasoning)];
+    for part in parts {
+        let turn = assistant(vec![CoreContent::text("known"), part.clone()]);
+        let request = CompletionRequest::from(vec![turn]).max_tokens(128);
+        for details in [true, false] {
+            let mut dialect = openai::wire::OPENAI;
+            dialect.quirks.reasoning_details = details;
+            let wire = openai::OpenAIConfig::with_key(&dialect, "test").chat("gpt-test");
+            assert!(
+                wire.encode(request.clone(), Mode::Unary)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("opaque")
+            );
+        }
+        let anthropic = anthropic::AnthropicConfig::new("test").completion("test");
+        let cohere = cohere::NativeChat::new(cohere::CohereConfig::new("test"), "test");
+        let ollama = ollama::Chat::new(ollama::OllamaConfig::new(), "test");
+        assert!(
+            anthropic
+                .encode(request.clone(), Mode::Unary)
+                .unwrap_err()
+                .to_string()
+                .contains("opaque")
+        );
+        assert!(
+            cohere
+                .encode(request.clone(), Mode::Unary)
+                .unwrap_err()
+                .to_string()
+                .contains("opaque")
+        );
+        assert!(
+            ollama
+                .encode(request, Mode::Unary)
+                .unwrap_err()
+                .to_string()
+                .contains("opaque")
+        );
+        let part_request = CompletionRequest::from(vec![assistant(vec![part])]);
+        let gemini = gemini::GeminiConfig::new("test").completion("test");
+        let interactions = gemini::GeminiConfig::new("test").interactions("test");
+        assert!(
+            gemini
+                .encode(part_request.clone(), Mode::Unary)
+                .unwrap_err()
+                .to_string()
+                .contains("opaque")
+        );
+        assert!(
+            interactions
+                .encode(part_request, Mode::Unary)
+                .unwrap_err()
+                .to_string()
+                .contains("opaque")
+        );
+    }
+}
+
+/// OC02 / G127: these two labelled containing-item inputs replace only the
+/// unavailable independent parent-ID assignment; no input parity is claimed.
 #[test]
 fn opaque_message_parts_replay_in_place_with_and_without_ids() {
     let parts = json!([{"type":"output_text","text":"A"},raw(),{"type":"refusal","refusal":"No"},{"type":"output_text","text":"B"}]);
-    let output: Output = serde_json::from_value(json!({"type":"message","id":"msg_1","role":"assistant","status":"completed","phase":"final_answer","content":parts})).unwrap();
-    let content = super::tests::folded_choice(vec![output]);
-    assert_eq!(content.len(), 4);
     for id in [Some("msg_1".to_owned()), None] {
-        let items: Vec<InputItem> = message::Message::Assistant {
-            id,
-            content: content.clone(),
+        let mut output = json!({"type":"message","role":"assistant","status":"completed",
+            "phase":"final_answer","content":parts});
+        if let Some(id) = &id {
+            output["id"] = json!(id);
         }
-        .try_into()
-        .unwrap();
-        let value = serde_json::to_value(items).unwrap();
+        let content: Vec<_> = carried_message_parts(&output, 0, Some("openai".to_owned()))
+            .expect("the private factory supplies containing-item metadata")
+            .into_iter()
+            .map(CoreContent::CarriedText)
+            .collect();
+        assert_eq!(content.len(), 4);
+        let value = Value::Array(input_items(content).expect("the actual parts replay"));
         if value[0]["content"].is_array() {
             assert_eq!(value[0]["content"], parts);
         } else {
-            // Known ID-less text uses the existing string form; the opaque part alone
-            // still receives the array form needed to preserve it.
             assert!(
                 value
                     .as_array()
@@ -98,202 +274,178 @@ fn opaque_message_parts_replay_in_place_with_and_without_ids() {
                     .any(|item| item["content"] == json!([raw()]))
             );
         }
+        assert_eq!(value[0]["status"], "completed");
+        assert_eq!(value[0]["phase"], "final_answer");
+        if let Some(id) = &id {
+            assert_eq!(value[0]["id"], *id);
+        } else {
+            assert!(value[0].get("id").is_none());
+        }
     }
-    let items: Vec<InputItem> = message::Message::Assistant {
-        id: None,
-        content: vec![opaque_text()],
-    }
-    .try_into()
-    .unwrap();
-    assert_eq!(
-        serde_json::to_value(items).unwrap()[0]["content"],
-        json!([raw()])
-    );
+    let items = input_items(vec![opaque_text()]).expect("the idless opaque part replays");
+    assert_eq!(items[0]["content"], json!([raw()]));
 }
 
+/// OC04 / G128 / G201: tagged calls and untagged whole items keep their content;
+/// the original empty known reasoning keeps exact raw and, since
+/// mec-rig-port-answers-1 Q5 reopened G165, is one empty reasoning block.
 #[test]
-fn opaque_reasoning_replays_both_arrays_and_refuses_a_missing_id() {
-    let summary = json!([{"type":"summary_text","text":"S"},raw()]);
-    let content = json!([raw(),{"type":"reasoning_text","text":"T"}]);
-    let output: Output = serde_json::from_value(json!({"type":"reasoning","id":"rs_1","summary":summary,"content":content,"encrypted_content":"encrypted","signature":"signed"})).unwrap();
-    let choice = super::tests::folded_choice(vec![output]);
-    let items: Vec<InputItem> = message::Message::Assistant {
-        id: None,
-        content: choice.clone(),
-    }
-    .try_into()
-    .unwrap();
-    let replay = serde_json::to_value(items).unwrap();
-    assert_eq!(replay[0]["summary"], summary);
-    assert_eq!(replay[0]["content"], content);
-    assert_eq!(replay[0]["signature"], "signed");
-    assert_eq!(replay[0]["encrypted_content"], "encrypted");
-    let mut idless = choice;
-    if let message::AssistantContent::Reasoning(reasoning) = &mut idless[0] {
-        reasoning.id = None;
-    }
-    let result: Result<Vec<InputItem>, _> = message::Message::Assistant {
-        id: None,
-        content: idless,
-    }
-    .try_into();
-    assert!(result.unwrap_err().to_string().contains("opaque"));
-}
-
-#[test]
-fn opaque_replay_union_does_not_capture_known_tool_or_reasoning_forms() {
+fn tagged_calls_and_untagged_items_keep_content_while_empty_reasoning_keeps_raw() {
     for tagged in [true, false] {
-        let mut call = json!({"id":"fc_1","call_id":"call_1","name":"tool","arguments":"{}","status":"completed"});
+        let mut call = json!({"id":"fc_1","call_id":"call_1","name":"tool",
+            "arguments":"{}","status":"completed"});
         let mut reasoning = json!({"id":"rs_1","summary":[]});
         if tagged {
             call["type"] = json!("function_call");
             reasoning["type"] = json!("reasoning");
         }
-        assert!(matches!(
-            serde_json::from_value::<AssistantContentType>(call).unwrap(),
-            AssistantContentType::ToolCall(_)
-        ));
-        assert!(matches!(
-            serde_json::from_value::<AssistantContentType>(reasoning).unwrap(),
-            AssistantContentType::Reasoning(_)
-        ));
-    }
-    assert!(
-        serde_json::from_value::<AssistantContentType>(json!({"type":"function_call","id":"bad"}))
-            .is_err()
-    );
-}
-
-#[test]
-fn opaque_marker_replaces_atomically_only_at_the_owned_top_level() {
-    let first = json!({"openai_responses_part":{"kind":"opaque","value":raw()},"other":{"array":[1],"object":{"a":1}}});
-    let mut params = AdditionalParams::new(first.as_object().unwrap().clone()).unwrap();
-    params.merge(params.clone());
-    assert_eq!(
-        params.get(OPENAI_RESPONSES_PART_KEY).unwrap()["value"],
-        raw()
-    );
-    assert_eq!(params.get("other").unwrap()["array"], json!([1, 1]));
-    let replacement = json!({"type":"next","list":[7]});
-    let next = text_block(AssistantContent::Unknown(replacement.clone()))
-        .additional_params
-        .unwrap();
-    params.merge(next);
-    assert_eq!(
-        params.get(OPENAI_RESPONSES_PART_KEY).unwrap()["value"],
-        replacement
-    );
-    let nested =
-        json!({"unrelated":{"openai_responses_part":{"kind":"opaque","value":{"list":[1]}}}});
-    let mut params = AdditionalParams::new(nested.as_object().unwrap().clone()).unwrap();
-    params.merge(params.clone());
-    assert_eq!(
-        params.get("unrelated").unwrap()["openai_responses_part"]["value"]["list"],
-        json!([1, 1])
-    );
-}
-
-#[test]
-fn opaque_parts_are_refused_by_all_core_non_responses_converters() {
-    use crate::providers::{anthropic, cohere, gemini, ollama, openai};
-    let parts = [
-        opaque_text(),
-        message::AssistantContent::Reasoning(message::Reasoning {
-            id: None,
-            provider: Some("openai".into()),
-            content: vec![
-                message::ReasoningContent::Summary("known".into()),
-                message::ReasoningContent::OpaqueSummary(raw()),
-                message::ReasoningContent::OpaqueContent(raw()),
-            ],
-        }),
-    ];
-    for part in parts {
-        let turn = message::Message::Assistant {
-            id: None,
-            content: vec![message::AssistantContent::text("known"), part.clone()],
-        };
-        for details in [true, false] {
-            assert!(
-                openai::completion::assistant_content_to_messages(
-                    vec![message::AssistantContent::text("known"), part.clone()],
-                    details
-                )
-                .unwrap_err()
-                .to_string()
-                .contains("opaque")
-            );
+        let response = decode(vec![call.clone()]).expect("the original call fixture reads");
+        assert_eq!(response.choice.len(), 1);
+        if tagged {
+            assert!(matches!(&response.choice[0], CoreContent::ToolCall(_)));
+        } else {
+            let CoreContent::ProviderItem(item) = &response.choice[0] else {
+                panic!("the untagged original call is a whole unknown item");
+            };
+            assert_eq!(item.payload.item, call);
         }
-        let anthropic: Result<anthropic::completion::Message, _> = turn.clone().try_into();
-        let cohere: Result<Vec<cohere::completion::Message>, _> = turn.clone().try_into();
-        let ollama: Result<Vec<ollama::Message>, _> = turn.try_into();
-        assert!(anthropic.unwrap_err().to_string().contains("opaque"));
-        assert!(cohere.unwrap_err().to_string().contains("opaque"));
-        assert!(ollama.unwrap_err().to_string().contains("opaque"));
-        let gemini: Result<gemini::completion::gemini_api_types::Part, _> = part.clone().try_into();
-        let interactions: Result<gemini::interactions_api::interactions_api_types::Content, _> =
-            part.try_into();
-        assert!(gemini.unwrap_err().to_string().contains("opaque"));
-        assert!(interactions.unwrap_err().to_string().contains("opaque"));
+        assert_eq!(response.raw["output"][0], call);
+        let response =
+            decode(vec![reasoning.clone()]).expect("the original reasoning fixture reads");
+        if tagged {
+            // Q5 (G201 narrowed): the original wholly empty known reasoning
+            // is one empty reasoning block whose payload is the exact item.
+            let [CoreContent::CarriedReasoning(kept)] = response.choice.as_slice() else {
+                panic!(
+                    "the tagged empty reasoning is one reasoning block: {:?}",
+                    response.choice
+                );
+            };
+            assert_eq!(kept.id.as_deref(), Some("rs_1"));
+            assert!(kept.content.is_empty());
+            assert_eq!(kept.payload.item, reasoning);
+        } else {
+            assert_eq!(response.choice.len(), 1);
+            let CoreContent::ProviderItem(item) = &response.choice[0] else {
+                panic!("the untagged original reasoning is a whole unknown item");
+            };
+            assert_eq!(item.payload.item, reasoning);
+        }
+        assert_eq!(response.raw["output"][0], reasoning);
     }
+    assert!(decode(vec![json!({"type":"function_call","id":"bad"})]).is_err());
 }
 
+/// G201 separately labelled synthetic nonempty known-category control.
 #[test]
-fn opaque_reasoning_survives_provenance_filter_and_responses_refuses_foreign_issuers() {
-    use crate::{completion::CompletionRequestBuilder, test_utils::MockCompletionModel};
-    let mut history = vec![message::Message::Assistant {
-        id: None,
-        content: vec![
-            message::AssistantContent::Reasoning(
-                message::Reasoning::new("known").with_provider("foreign"),
-            ),
-            message::AssistantContent::Reasoning(message::Reasoning {
-                id: Some("rs_1".into()),
-                provider: Some("foreign".into()),
-                content: vec![message::ReasoningContent::OpaqueSummary(raw())],
-            }),
-        ],
-    }];
-    message::retain_replayable_reasoning(&mut history, &["openai"]);
-    let message::Message::Assistant { content, .. } = &history[0] else {
-        panic!("assistant")
+fn nonempty_tagged_reasoning_keeps_its_known_category_and_exact_raw() {
+    let item = json!({"type":"reasoning","id":"rs_1",
+        "summary":[{"type":"summary_text","text":"synthetic category control"}]});
+    let response = decode(vec![item.clone()]).expect("the nonempty control reads");
+    assert_eq!(response.choice.len(), 1);
+    let CoreContent::CarriedReasoning(reasoning) = &response.choice[0] else {
+        panic!("the nonempty known control remains reasoning");
     };
-    assert_eq!(content.len(), 1);
-    let mut request =
-        CompletionRequestBuilder::new(MockCompletionModel::default(), "prompt").build();
-    request.chat_history = history;
-    let wire = crate::providers::openai::OpenAI::new("test").responses("gpt-test");
-    assert!(
-        wire.responses_request(request, false, None, InputRequirement::NonEmpty)
-            .unwrap_err()
-            .to_string()
-            .contains("opaque")
+    assert_eq!(reasoning.id.as_deref(), Some("rs_1"));
+    assert_eq!(
+        reasoning.content,
+        [CarriedReasoningPart::Summary(
+            "synthetic category control".to_owned(),
+        )]
+    );
+    assert_eq!(response.raw["output"][0], item);
+}
+
+/// OC07 / G130: preparation retains both current carried foreign parts.
+/// The removed filter/count-one view is lost; final encoding still refuses opaque data.
+#[test]
+fn prepared_foreign_reasoning_stays_intact_until_the_typed_responses_refusal() {
+    let known = CoreContent::CarriedReasoning(CarriedReasoning::new(
+        vec![CarriedReasoningPart::Text {
+            text: "known".to_owned(),
+            signature: None,
+        }],
+        CarriedPayload::new(Value::Null, Some("foreign".to_owned())),
+    ));
+    let opaque = CoreContent::CarriedReasoning(
+        CarriedReasoning::new(
+            vec![CarriedReasoningPart::OpaqueSummary(CarriedPayload::new(
+                raw(),
+                Some("foreign".to_owned()),
+            ))],
+            CarriedPayload::new(Value::Null, Some("foreign".to_owned())),
+        )
+        .with_id(Some("rs_1".to_owned())),
+    );
+    let expected = vec![known, opaque];
+    let mut request = CompletionRequest::new("prompt");
+    request.chat_history = vec![assistant(expected.clone())];
+    let wire = target();
+    let prepared = crate::operation::Completion::prepare(request, &wire.describe())
+        .expect("actual preparation retains both foreign current carriers");
+    let [Message::Assistant(turn)] = prepared.chat_history.as_slice() else {
+        panic!("the exact original assistant turn stays");
+    };
+    assert_eq!(turn.content.len(), 2);
+    assert_eq!(turn.content, expected);
+    let error = ProviderError::from(
+        wire.responses_request(&prepared, Delivery::Http(Mode::Unary))
+            .expect_err("actual final request refuses the foreign opaque part"),
+    );
+    assert!(matches!(&error, ProviderError::Request(_)));
+    assert!(error.to_string().contains("opaque"));
+    let refusal = error
+        .source()
+        .expect("typed final refusal")
+        .downcast_ref::<message::UnrepresentableOpaqueContent>()
+        .expect("the existing nested opaque error");
+    assert_eq!(
+        refusal.wire,
+        "OpenAI Responses with incompatible reasoning provenance"
+    );
+    assert_eq!(
+        refusal.to_string(),
+        "OpenAI Responses with incompatible reasoning provenance cannot replay opaque OpenAI Responses content"
     );
 }
 
+/// OC08 / G131: the current carried wrapper preserves the original raw values;
+/// only the two old bare-content serialized views are lost.
 #[test]
 fn opaque_neutral_parts_round_trip_without_becoming_display_text() {
-    let reasoning = message::Reasoning {
-        id: Some("rs_opaque".into()),
-        provider: Some("openai".into()),
-        content: vec![
-            message::ReasoningContent::Summary("known".into()),
-            message::ReasoningContent::OpaqueSummary(raw()),
-            message::ReasoningContent::OpaqueContent(raw()),
+    let reasoning = CarriedReasoning::new(
+        vec![
+            CarriedReasoningPart::Summary("known".to_owned()),
+            CarriedReasoningPart::OpaqueSummary(CarriedPayload::new(
+                raw(),
+                Some("openai".to_owned()),
+            )),
+            CarriedReasoningPart::OpaqueContent(CarriedPayload::new(
+                raw(),
+                Some("openai".to_owned()),
+            )),
         ],
-    };
+        CarriedPayload::new(Value::Null, Some("openai".to_owned())),
+    )
+    .with_id(Some("rs_opaque".to_owned()));
     assert_eq!(reasoning.display_text(), "known");
+    assert_eq!(reasoning.id.as_deref(), Some("rs_opaque"));
+    assert_eq!(reasoning.provider(), Some("openai"));
     let serialized = serde_json::to_value(&reasoning).unwrap();
     assert_eq!(
         serialized["content"][1],
-        json!({"type":"opaque_summary","content":raw()})
+        json!({"type":"opaque_summary",
+        "content":{"item":raw(),"provider":"openai"}})
     );
     assert_eq!(
         serialized["content"][2],
-        json!({"type":"opaque_content","content":raw()})
+        json!({"type":"opaque_content",
+        "content":{"item":raw(),"provider":"openai"}})
     );
+    assert_eq!(serialized["content"][1]["content"]["item"], raw());
+    assert_eq!(serialized["content"][2]["content"]["item"], raw());
     assert_eq!(
-        serde_json::from_value::<message::Reasoning>(serialized).unwrap(),
+        serde_json::from_value::<CarriedReasoning>(serialized).unwrap(),
         reasoning
     );
 }

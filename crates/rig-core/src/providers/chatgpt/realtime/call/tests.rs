@@ -6,6 +6,7 @@
 use super::*;
 use crate::http_client::{HttpClientExt, LazyBody};
 use crate::providers::chatgpt;
+use crate::providers::openai::OpenAIConfig;
 use crate::wasm_compat::WasmCompatSend;
 use bytes::Bytes;
 use serde_json::json;
@@ -163,8 +164,8 @@ async fn a_response_less_body_failure_stays_a_transport_error() {
 
 /// The identity the Codex client stamps: `originator`, its user agent and
 /// its version, all three exactly as given.
-fn provider() -> OpenAI {
-    OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
+fn provider() -> OpenAIConfig {
+    OpenAIConfig::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
         .with_account_id(ACCOUNT_ID)
         .with_caller_identity(
             crate::providers::openai::wire::CallerIdentity::new(
@@ -177,7 +178,7 @@ fn provider() -> OpenAI {
 }
 
 fn calls() -> LiveCalls {
-    LiveCalls::new(provider())
+    LiveCalls::new(provider().client())
         .expect("the ChatGPT dialect is the Codex backend")
         .with_identity(CodexIdentity::from_ids("session-1", "thread-1").expect("valid ids"))
 }
@@ -353,8 +354,9 @@ fn the_control_handshake_carries_the_call_headers() {
 /// dialect is refused by name.
 #[test]
 fn calls_need_the_codex_backend_and_the_callers_identity() {
-    let anonymous = LiveCalls::new(OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN))
-        .expect("the ChatGPT dialect is the Codex backend");
+    let anonymous =
+        LiveCalls::new(OpenAIConfig::with_key(&chatgpt::DIALECT, ACCESS_TOKEN).client())
+            .expect("the ChatGPT dialect is the Codex backend");
     assert!(
         anonymous
             .call_request(OFFER, &SessionConfig::new("x"))
@@ -404,7 +406,7 @@ async fn a_credential_source_is_read_at_send_time() {
             })
         }
     }
-    let calls = LiveCalls::new(provider().with_credential_source(Source)).expect("Codex");
+    let calls = LiveCalls::new(provider().with_credential_source(Source).client()).expect("Codex");
     let backend = Backend::created("/calls/rtc_1");
     calls
         .create_call(&backend, OFFER, &SessionConfig::new("x"))
@@ -513,7 +515,7 @@ async fn a_credential_source_keeps_the_callers_headers() {
             })
         }
     }
-    let calls = LiveCalls::new(provider().with_credential_source(Source))
+    let calls = LiveCalls::new(provider().with_credential_source(Source).client())
         .expect("Codex")
         .with_request_headers(
             RequestHeaders::new()

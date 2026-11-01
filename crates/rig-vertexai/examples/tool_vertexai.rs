@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rig_agent::prelude::*;
 use rig_agent::tool::ToolContext;
-use rig_vertexai::{Client, completion::GEMINI_2_5_FLASH_LITE};
+use rig_vertexai::VertexAi;
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -48,19 +48,18 @@ impl Tool for Adder {
 async fn main() -> Result<(), anyhow::Error> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    // Create Vertex AI client using implicit credentials
-    let client = Client::from_env()?;
+    // Create the Vertex AI model using implicit credentials
+    let model = VertexAi::from_env()?.completion("gemini-2.5-flash-lite");
 
     // Create agent with a calculator tool
-    let calculator_agent = client
-        .agent(GEMINI_2_5_FLASH_LITE)
+    let calculator_agent = AgentBuilder::new(model)
         .tool(Adder)
         .max_tokens(1024)
         .build();
 
     // Prompt the agent and print the response
     println!("Calculate 15 + 27");
-    let answer = calculator_agent.prompt("Calculate 15 + 27").await?.output;
+    let answer = calculator_agent.prompt("Calculate 15 + 27").await?.output();
     println!("Vertex AI Calculator Agent: {answer}");
 
     Ok(())

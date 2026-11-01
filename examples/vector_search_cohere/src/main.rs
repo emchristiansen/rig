@@ -5,15 +5,13 @@
 use rig::{
     Embed,
     embeddings::EmbeddingsBuilder,
-    prelude::*,
     providers::cohere::{self, Cohere},
     vector_store::{
-        VectorStoreIndex, in_memory_store::InMemoryVectorStore, request::VectorSearchRequest,
+        VectorSearchResult, VectorStoreIndex, in_memory_store::InMemoryVectorStore,
+        request::VectorSearchRequest,
     },
 };
 use serde::{Deserialize, Serialize};
-
-type SearchMatch = (f64, String, String);
 
 // Shape of data that needs to be RAG'ed.
 // The definition field will be used to generate embeddings.
@@ -54,25 +52,26 @@ fn sample_documents() -> Vec<WordDefinition> {
     ]
 }
 
-fn print_matches(matches: &[SearchMatch]) {
+fn print_matches(matches: &[VectorSearchResult<WordDefinition>]) {
     println!("Top document matches:");
-    for (score, id, word) in matches {
-        println!("  score={score:.4} id={id} word={word}");
+    for result in matches {
+        println!(
+            "  score={:.4} id={} word={}",
+            result.score, result.id, result.document.word
+        );
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    let cohere_client = Cohere::from_env()?.bound()?;
-    // Cohere scores a document and a query differently, so the two wires
-    // differ only in the `input_type` they send.
-    let document_model = cohere_client
-        .embedding(cohere::EMBED_ENGLISH_V3, None)
-        .map_wire(|wire| wire.with_input_type("search_document"));
-    let search_model = cohere_client
-        .embedding(cohere::EMBED_ENGLISH_V3, None)
-        .map_wire(|wire| wire.with_input_type("search_query"));
-    let embeddings = EmbeddingsBuilder::new(document_model.clone())
+    let cohere_client = Cohere::from_env()?;
+    // Cohere scores a document and a query differently, so the two models
+    // differ only in the `input_type` their wires send.
+    let mut document_model = cohere_client.embedding(cohere::EMBED_ENGLISH_V3, None);
+    document_model.wire = document_model.wire.with_input_type("search_document");
+    let mut search_model = cohere_client.embedding(cohere::EMBED_ENGLISH_V3, None);
+    search_model.wire = search_model.wire.with_input_type("search_query");
+    let embeddings = EmbeddingsBuilder::new(document_model)
         .documents(sample_documents())?
         .build()
         .await?;
@@ -87,12 +86,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .build();
 
     let index = vector_store.index(search_model);
-    let results = index
-        .top_n::<WordDefinition>(req)
-        .await?
-        .into_iter()
-        .map(|(score, id, doc)| (score, id, doc.word))
-        .collect::<Vec<SearchMatch>>();
+    let results = index.top_n::<WordDefinition>(req).await?;
 
     print_matches(&results);
 

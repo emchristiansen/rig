@@ -1,13 +1,13 @@
 //! xAI's model identifiers and its dialect.
 //!
-//! [`DIALECT`] configures the Responses endpoint and reads `XAI_API_KEY`.
+//! [`from_env`] and [`new`] build a client on [`DIALECT`], which uses the
+//! Responses endpoint and reads `XAI_API_KEY`.
 //!
 //! ```no_run
-//! use rig_core::providers::openai::OpenAI;
 //! use rig_core::providers::xai;
 //!
 //! # fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let grok = OpenAI::from_env_with(&xai::DIALECT)?.completion(xai::GROK_3);
+//! let grok = xai::from_env()?.completion(xai::GROK_3);
 //! # let _ = grok;
 //! # Ok(())
 //! # }
@@ -15,6 +15,7 @@
 
 #[cfg(feature = "audio")]
 pub mod audio_generation;
+pub mod extension;
 #[cfg(feature = "image")]
 pub mod image_generation;
 
@@ -37,6 +38,10 @@ use crate::providers::openai::responses_api::SystemInstructionsPlacement;
 use crate::providers::openai::wire::{
     Dialect, ImageBody, Quirks, ResponsesContract, ResponsesQuirks, Route, SpeechBody,
 };
+
+/// The provider key: the dialect name, a reply's `Origin::provider` and
+/// the typed provider-options key.
+pub const PROVIDER_NAME: &str = "xai";
 
 /// xAI endpoint and encoding configuration. Responses system messages remain
 /// in `input`; error envelopes may arrive with HTTP 200. Completed function calls
@@ -63,5 +68,16 @@ pub const DIALECT: Dialect = Dialect {
         },
         ..Quirks::openai()
     },
-    ..Dialect::gateway("xai", "https://api.x.ai", "XAI_API_KEY")
+    ..Dialect::gateway(PROVIDER_NAME, "https://api.x.ai", "XAI_API_KEY")
 };
+
+crate::client::macros::openai_vendor!(DIALECT, "xAI");
+
+/// Whether the xAI `model`, an id the catalog does not list, reads images:
+/// Grok 2 only in its vision models, and neither Grok 3 nor Grok Code.
+pub(crate) fn reads_images(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    !((model.starts_with("grok-2") && !model.contains("vision"))
+        || model.starts_with("grok-3")
+        || model.starts_with("grok-code"))
+}

@@ -1,7 +1,8 @@
 //! Wire envelopes and classification for observed Responses payloads.
 
 use super::super::observed_wire as ow;
-use crate::providers::internal::wire::{self, WireEvent};
+use crate::providers::internal::wire;
+use crate::wire::WireEvent;
 use ow::{FunctionCallArguments, Output, ReasoningSummary};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

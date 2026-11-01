@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::openapi_schema::{self, Schema};
-use super::streaming::{StreamingCompletionChunk, classify_responses_frame};
-use crate::providers::internal::wire::WireEvent;
+use super::streaming::{ResponsesEvent, classify_responses_frame};
 use crate::test_utils::streaming_conformance::{WireInput, fixtures};
+use crate::wire::WireEvent;
 
 fn event(frame: &WireInput) -> Value {
     let bytes = frame
@@ -78,7 +78,7 @@ fn public_known_web_search_event_can_remain_unknown_to_rig() {
 
     assert!(matches!(
         classify_responses_frame(&event.to_string()),
-        WireEvent::<StreamingCompletionChunk>::Unknown { event_type, .. }
+        WireEvent::<ResponsesEvent>::Unknown { event_type, .. }
             if event_type == "response.web_search_call.searching"
     ));
 }
@@ -94,7 +94,7 @@ fn future_event_fails_the_public_union_but_remains_an_unknown_rig_event() {
 
     assert!(matches!(
         classify_responses_frame(&event.to_string()),
-        WireEvent::<StreamingCompletionChunk>::Unknown { event_type, .. }
+        WireEvent::<ResponsesEvent>::Unknown { event_type, .. }
             if event_type == "response.future.delta"
     ));
 }
@@ -111,7 +111,7 @@ fn malformed_known_fixture_fails_both_the_public_union_and_rig_decode() {
     openapi_schema::assert_invalid(Schema::ResponseStreamEvent, &event);
     assert!(matches!(
         classify_responses_frame(&event.to_string()),
-        WireEvent::<StreamingCompletionChunk>::Corrupt(_)
+        WireEvent::<ResponsesEvent>::Corrupt(_)
     ));
 }
 

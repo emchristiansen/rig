@@ -1,7 +1,8 @@
-use super::super::ToolStatus;
+use super::super::observed_values::{ResponseStatus, ToolStatus};
 use super::super::{observed_types as ot, observed_wire as ow};
-use crate::driver::{TriagedFrame, triage_frame};
+use crate::driver::triage;
 use crate::error::{ErrorReport, ProviderError};
+use crate::streaming::Item;
 use ow::Output;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -130,6 +131,7 @@ pub struct ObservedAssembler {
     provider_keys: BTreeSet<ItemKey>,
     finished_tools: BTreeSet<ItemKey>,
     next_tool: u64,
+    diagnostic_local_id: Option<crate::message::LocalCallId>,
     pending_calls: Vec<(u64, PendingCall)>,
     prefix: Vec<ot::AssistantContent>,
     terminal: Option<ow::CompletionResponse>,
@@ -167,6 +169,7 @@ impl ObservedAssembler {
             provider_keys: BTreeSet::new(),
             finished_tools: BTreeSet::new(),
             next_tool: 0,
+            diagnostic_local_id: None,
             pending_calls: Vec::new(),
             prefix: Vec::new(),
             terminal: None,
@@ -216,17 +219,17 @@ impl ObservedAssembler {
         out: &mut Vec<ObservedEvent>,
     ) -> Result<(), ObservedInterpretationError> {
         let (classified, event_type) = classify(data, super::is_known_responses_event_type);
-        match triage_frame(classified)? {
-            TriagedFrame::Unknown(value) => out.push(ObservedEvent::Unknown {
+        match triage(classified)? {
+            Item::Unknown(value) => out.push(ObservedEvent::Unknown {
                 event_type,
                 value: value.value().clone(),
             }),
-            TriagedFrame::Event(Payload::Sentinel) => {}
-            TriagedFrame::Event(Payload::Failure(raw)) => {
+            Item::Event(Payload::Sentinel) => {}
+            Item::Event(Payload::Failure(raw)) => {
                 self.flush_pending_calls()?;
                 return Err(ProviderError::from_provider_body(raw).into());
             }
-            TriagedFrame::Event(Payload::Frame {
+            Item::Event(Payload::Frame {
                 raw,
                 chunk: Chunk::Response(chunk),
             }) => match chunk.kind {
@@ -241,11 +244,11 @@ impl ObservedAssembler {
                 }
                 _ => {}
             },
-            TriagedFrame::Event(Payload::Frame {
+            Item::Event(Payload::Frame {
                 chunk: Chunk::Delta(chunk),
                 ..
             }) => self.item(chunk, out)?,
-            TriagedFrame::Event(Payload::Whole(response)) => {
+            Item::Event(Payload::Whole(response)) => {
                 if !response
                     .output
                     .iter()
@@ -831,6 +834,14 @@ impl ObservedAssembler {
         if name.is_empty() {
             return Ok(());
         }
+        let diagnostic_call_id = (!call.call_id.is_empty())
+            .then(|| call.call_id.clone())
+            .or_else(|| part.as_ref().and_then(|part| part.call_id.clone()))
+            .filter(|id| !id.is_empty());
+        let diagnostic_item_id = (!call.id.is_empty())
+            .then(|| call.id.clone())
+            .or_else(|| part.as_ref().and_then(|part| part.item_id.clone()))
+            .filter(|id| !id.is_empty());
         let provider = ot::ProviderCallId::new(call.call_id)
             .map(|p| p.with_item_id(call.id))
             .or_else(|| {
@@ -879,14 +890,20 @@ impl ObservedAssembler {
                     }
                 };
                 use crate::error::{ErrorDetail, ErrorKind, MalformedToolInput};
-                let provider = provider.map(|provider| crate::message::ProviderCallId {
-                    call_id: provider.call_id,
-                    item_id: provider.item_id,
-                });
-                let id = crate::message::ToolCallId::for_provider_or(
-                    provider.as_ref(),
-                    crate::message::ToolCallId::minted(minted),
-                );
+                let provider = diagnostic_call_id
+                    .and_then(crate::message::ProviderCallId::new)
+                    .map(|call_id| crate::error::ProviderCallEvidence {
+                        call_id,
+                        item_id: diagnostic_item_id,
+                    });
+                let id = match &provider {
+                    Some(provider) => crate::message::CallId::from_wire(provider.call_id.as_str()),
+                    None => crate::message::CallId::Local(
+                        *self
+                            .diagnostic_local_id
+                            .get_or_insert_with(crate::message::LocalCallId::new),
+                    ),
+                };
                 return Err(ObservedInterpretationError::NativeReport(
                     ErrorReport::new(
                         ErrorKind::Response,
@@ -1479,7 +1496,7 @@ impl ObservedAssembler {
             ),
             ("model", serde_json::to_value(&self.terminal_model)),
         ] {
-            let value = value.map_err(ProviderError::Json)?;
+            let value = value.map_err(ProviderError::from)?;
             if !value.is_null() {
                 self.document.insert(key.to_owned(), value);
             }
@@ -1516,8 +1533,8 @@ impl ObservedAssembler {
             .or(self.terminal_message_id)
             .filter(|id| !id.is_empty());
         let reason = match &native.status {
-            super::super::ResponseStatus::Completed => Some(ot::FinishReason::Stop),
-            super::super::ResponseStatus::Incomplete => Some(
+            ResponseStatus::Completed => Some(ot::FinishReason::Stop),
+            ResponseStatus::Incomplete => Some(
                 match self
                     .document
                     .get("incomplete_details")
@@ -1531,17 +1548,11 @@ impl ObservedAssembler {
                     None => ot::FinishReason::Other("incomplete".to_owned()),
                 },
             ),
-            super::super::ResponseStatus::Failed => {
-                Some(ot::FinishReason::Other("failed".to_owned()))
-            }
-            super::super::ResponseStatus::Cancelled => {
-                Some(ot::FinishReason::Other("cancelled".to_owned()))
-            }
-            super::super::ResponseStatus::Other(status) if status.is_empty() => None,
-            super::super::ResponseStatus::Other(status) => {
-                Some(ot::FinishReason::Other(status.clone()))
-            }
-            super::super::ResponseStatus::InProgress | super::super::ResponseStatus::Queued => None,
+            ResponseStatus::Failed => Some(ot::FinishReason::Other("failed".to_owned())),
+            ResponseStatus::Cancelled => Some(ot::FinishReason::Other("cancelled".to_owned())),
+            ResponseStatus::Other(status) if status.is_empty() => None,
+            ResponseStatus::Other(status) => Some(ot::FinishReason::Other(status.clone())),
+            ResponseStatus::InProgress | ResponseStatus::Queued => None,
         };
         self.prefix.extend(self.completed.into_values());
         let mut response = ot::CompletionResponse {

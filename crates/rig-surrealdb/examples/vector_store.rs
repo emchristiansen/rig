@@ -1,11 +1,10 @@
-use rig_core::providers::openai::{self, wire::OpenAI};
+use rig_core::providers::openai::{self, OpenAI};
 use rig_core::vector_store::request::VectorSearchRequest;
 use rig_core::{
     Embed,
     embeddings::EmbeddingsBuilder,
     vector_store::{InsertDocuments, VectorStoreIndex},
 };
-use rig_reqwest::prelude::*;
 use rig_surrealdb::{Mem, SurrealVectorStore};
 use serde::{Deserialize, Serialize};
 use surrealdb::Surreal;
@@ -28,9 +27,11 @@ impl std::fmt::Display for TopicDefinition {
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    // Bind the OpenAI embeddings endpoint
-    let openai_client = OpenAI::from_env()?.bound()?;
-    let model = openai_client.embedding(openai::TEXT_EMBEDDING_ADA_002, None);
+    // The OpenAI client, from `OPENAI_API_KEY`.
+    let openai_client = OpenAI::from_env()?;
+    let model = openai_client
+        .embedding(openai::TEXT_EMBEDDING_ADA_002, None)
+        .erase();
 
     let surreal = Surreal::new::<Mem>(()).await?;
 
@@ -79,20 +80,23 @@ async fn main() -> Result<(), anyhow::Error> {
         return Err(anyhow::anyhow!("expected at least one result"));
     };
     anyhow::ensure!(
-        first_result.2.topic == "pasta carbonara",
+        first_result.document.topic == "pasta carbonara",
         "expected first result to be pasta carbonara, got {}",
-        first_result.2.topic
+        first_result.document.topic
     );
 
     println!("{} results for query: {}", results.len(), query);
-    for (distance, _id, doc) in results.iter() {
-        println!("Result distance {distance} for topic: {doc}");
+    for result in &results {
+        println!(
+            "Result distance {} for topic: {}",
+            result.score, result.document
+        );
     }
 
     let Some(second_result) = results.get(1) else {
         return Err(anyhow::anyhow!("expected at least two results"));
     };
-    let midpoint = (first_result.0 + second_result.0) / 2.0;
+    let midpoint = (first_result.score + second_result.score) / 2.0;
 
     println!(
         "Attempting vector search with cosine similarity threshold of {midpoint} and query: {query}"
@@ -115,13 +119,16 @@ async fn main() -> Result<(), anyhow::Error> {
         return Err(anyhow::anyhow!("expected one filtered result"));
     };
     anyhow::ensure!(
-        filtered_result.2.topic == "pasta carbonara",
+        filtered_result.document.topic == "pasta carbonara",
         "expected filtered result to be pasta carbonara, got {}",
-        filtered_result.2.topic
+        filtered_result.document.topic
     );
 
-    for (distance, _id, doc) in results.iter() {
-        println!("Result distance {distance} for topic: {doc}");
+    for result in &results {
+        println!(
+            "Result distance {} for topic: {}",
+            result.score, result.document
+        );
     }
 
     Ok(())

@@ -24,7 +24,7 @@ use rig_core::{
 use rig_core::serve::{Dispatch, Reply, Serve};
 
 use super::log::canonical_tool_args;
-use super::{EffectLog, stable_hash};
+use super::{EffectLog, canonical_local_ids, stable_hash};
 
 /// Selects request comparison by payload or [`stable_hash`].
 /// Payload diagnostics name the first differing field path; hash diagnostics
@@ -71,6 +71,7 @@ pub struct EffectLogReplayer {
     descriptor: HandlerDescriptor,
     records: Mutex<Records>,
     stream_errors: BTreeMap<EffectId, Vec<super::RecordedStreamError>>,
+    stream_done: BTreeMap<EffectId, Vec<super::RecordedStreamDone>>,
     check: RequestCheck,
     refusals: Option<ReplayRefusals>,
 }
@@ -174,6 +175,17 @@ impl EffectLogReplayer {
                 })
                 .map(|(id, errors)| (*id, errors.clone()))
                 .collect(),
+            stream_done: log
+                .header
+                .stream_done
+                .iter()
+                .filter(|(id, _)| {
+                    log.records
+                        .iter()
+                        .any(|record| record.id == **id && &record.key == key)
+                })
+                .map(|(id, done)| (*id, done.clone()))
+                .collect(),
             check: RequestCheck::Payload,
             refusals: None,
         })
@@ -249,33 +261,62 @@ impl EffectLogReplayer {
         keys
     }
 
-    /// Validate stream error positions, consistent key families and descriptors,
+    /// Validate kept stream positions, consistent key families and descriptors,
     /// and descriptor coverage for scoped programs. Returns an error for invalid
     /// or conflicting metadata.
     pub fn check_header(log: &EffectLog) -> Result<(), ErrorReport> {
-        for (id, errors) in &log.header.stream_errors {
+        let stream_ids: std::collections::BTreeSet<_> = log
+            .header
+            .stream_errors
+            .keys()
+            .chain(log.header.stream_done.keys())
+            .copied()
+            .collect();
+        for id in stream_ids {
+            let errors = log
+                .header
+                .stream_errors
+                .get(&id)
+                .map_or(&[][..], Vec::as_slice);
+            let done = log
+                .header
+                .stream_done
+                .get(&id)
+                .map_or(&[][..], Vec::as_slice);
             let events = log
                 .records
                 .iter()
-                .find(|record| record.id == *id && record.kind.streams())
+                .find(|record| record.id == id && record.kind.streams())
                 .and_then(|record| record.events.as_ref())
                 .ok_or_else(|| {
                     ErrorReport::new(
                         ErrorKind::Divergence,
-                        format!("stream errors for {id} require a kept stream record"),
+                        format!("stream items for {id} require a kept stream record"),
                     )
                 })?;
-            let total = events.len().checked_add(errors.len()).ok_or_else(|| {
-                ErrorReport::new(ErrorKind::Divergence, "stream item count overflow")
-            })?;
+            let total = events
+                .len()
+                .checked_add(errors.len())
+                .and_then(|total| total.checked_add(done.len()))
+                .ok_or_else(|| {
+                    ErrorReport::new(ErrorKind::Divergence, "stream item count overflow")
+                })?;
             if errors.iter().any(|error| error.item >= total)
                 || errors
                     .windows(2)
                     .any(|pair| matches!(pair, [first, second] if first.item >= second.item))
+                || done.iter().any(|response| response.item >= total)
+                || done
+                    .windows(2)
+                    .any(|pair| matches!(pair, [first, second] if first.item >= second.item))
+                || errors.iter().any(|error| {
+                    done.binary_search_by_key(&error.item, |response| response.item)
+                        .is_ok()
+                })
             {
                 return Err(ErrorReport::new(
                     ErrorKind::Divergence,
-                    format!("invalid stream error positions for {id}"),
+                    format!("invalid stream item positions for {id}"),
                 ));
             }
         }
@@ -376,10 +417,14 @@ fn divergence_under(
     }
 }
 
-/// The effect with a tool call's arguments in canonical key order, so a
-/// replay does not diverge on key order alone.
+/// The effect with a tool call's arguments in canonical key order and its
+/// rig-issued call ids renamed in order of appearance, so a replay does not
+/// diverge on key order or on the ids rig issued afresh alone.
 fn with_canonical_args(kind: &EffectKind) -> EffectKind {
-    let mut kind = kind.clone();
+    let mut kind = serde_json::to_value(kind)
+        .map(canonical_local_ids)
+        .and_then(serde_json::from_value)
+        .unwrap_or_else(|_| kind.clone());
     if let EffectKind::ToolCall { args, .. } = &mut kind {
         *args = canonical_tool_args(args);
     }
@@ -501,7 +546,7 @@ fn describe_required(
             let advertised = advertised_tool(name, log)
                 .ok_or_else(|| gap("no recorded request advertises the tool"))?;
             Ok(FamilyDescriptor::Tool {
-                name: advertised.name,
+                name: advertised.name.into(),
                 description: advertised.description,
                 parameters: advertised.parameters,
                 embedding: None,
@@ -540,7 +585,7 @@ fn describe(key: &HandlerKey, kind: &EffectKind, log: &EffectLog) -> FamilyDescr
         },
         EffectKind::ToolCall { name, .. } => match advertised_tool(name, log) {
             Some(tool) => FamilyDescriptor::Tool {
-                name: tool.name,
+                name: tool.name.into(),
                 description: tool.description,
                 parameters: tool.parameters,
                 embedding: None,
@@ -634,40 +679,92 @@ impl Serve for EffectLogReplayer {
                                 .unwrap_or_default();
                             published.publish(context.with_result_context(output));
                         }
-                        // Preserve original item positions, including items after a terminal.
-                        // Append only failures not reproduced by kept items or EOF.
+                        // Preserve original item positions; the stream then ends with
+                        // the recorded response, or with the recorded failure when no
+                        // kept item reproduced it.
                         if let (Some(events), true) = (record.events, dispatch.is_stream()) {
                             let errors = self
                                 .stream_errors
                                 .get(&record.id)
                                 .cloned()
                                 .unwrap_or_default();
-                            let mut tap = rig_core::serve::StreamTap::new();
-                            let folded = events
-                                .iter()
-                                .any(|event| tap.observe(&Ok(event.clone())).is_some());
-                            let fallback = match record.outcome {
+                            if let Some(done) = self.stream_done.get(&record.id) {
+                                let total = events.len() + errors.len() + done.len();
+                                let mut replayed = Vec::with_capacity(total + 1);
+                                replayed.extend(record.stream_origin.map(|origin| {
+                                    Ok(rig_core::streaming::Relayed::Origin(origin))
+                                }));
+                                let mut errors = errors.into_iter().peekable();
+                                let mut done = done.iter().peekable();
+                                let mut items = events.into_items().into_iter();
+                                for position in 0..total {
+                                    if errors.peek().is_some_and(|error| error.item == position) {
+                                        replayed
+                                            .extend(errors.next().map(|error| Err(error.error)));
+                                    } else if done.peek().is_some_and(|done| done.item == position)
+                                    {
+                                        replayed.extend(done.next().map(|done| {
+                                            Ok(rig_core::streaming::Relayed::Done(Box::new(
+                                                done.response.clone(),
+                                            )))
+                                        }));
+                                    } else {
+                                        replayed.extend(items.next().map(|item| {
+                                            Ok(rig_core::streaming::Relayed::Item(item))
+                                        }));
+                                    }
+                                }
+                                return Reply::Stream(Box::pin(futures::stream::iter(replayed)));
+                            }
+                            // A reply that ended well ended before any error it
+                            // went on to carry: an earlier error would have been
+                            // its outcome.
+                            let (mut done, ending) = match record.outcome {
+                                Ok(rig_core::effect::Outcome::Completion(response)) => {
+                                    (Some(Box::new(response)), None)
+                                }
                                 Err(error)
                                     if errors.is_empty()
-                                        && !folded
                                         && error != rig_core::serve::stream_truncated() =>
                                 {
-                                    Some(error)
+                                    (None, Some(Err(error)))
                                 }
-                                Ok(_) | Err(_) => None,
+                                Ok(_) | Err(_) => (None, None),
                             };
-                            let total = events.len() + errors.len();
+                            let items = events.into_items();
+                            let events = items.len();
+                            let mut replayed = Vec::with_capacity(events + errors.len() + 2);
+                            replayed.extend(
+                                record
+                                    .stream_origin
+                                    .map(|origin| Ok(rig_core::streaming::Relayed::Origin(origin))),
+                            );
                             let mut errors = errors.into_iter().peekable();
-                            let mut events = events.into_iter();
-                            let items = (0..total)
-                                .filter_map(move |position| {
-                                    if errors.peek().is_some_and(|error| error.item == position) {
-                                        errors.next().map(|error| Err(error.error))
-                                    } else {
-                                        events.next().map(Ok)
+                            let mut items = items.into_iter();
+                            for position in 0..events + errors.len() {
+                                if errors.peek().is_some_and(|error| error.item == position) {
+                                    if position >= events
+                                        && let Some(response) = done.take()
+                                    {
+                                        replayed
+                                            .push(Ok(rig_core::streaming::Relayed::Done(response)));
                                     }
-                                })
-                                .chain(fallback.map(Err));
+                                    replayed.extend(errors.next().map(|error| Err(error.error)));
+                                } else {
+                                    replayed.extend(
+                                        items.next().map(|item| {
+                                            Ok(rig_core::streaming::Relayed::Item(item))
+                                        }),
+                                    );
+                                }
+                            }
+                            replayed.extend(
+                                done.map(|response| {
+                                    Ok(rig_core::streaming::Relayed::Done(response))
+                                }),
+                            );
+                            replayed.extend(ending);
+                            let items = replayed;
                             return Reply::Stream(Box::pin(futures::stream::iter(items)));
                         }
                         record.outcome

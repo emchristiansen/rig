@@ -20,16 +20,14 @@ impl Debater {
             .with_max_level(tracing::Level::INFO)
             .with_target(false)
             .init();
-        let openai_client = OpenAI::from_env()?.bound()?;
-        let cohere_client = Cohere::from_env()?.bound()?;
+        let openai_client = OpenAI::from_env()?;
+        let cohere_client = Cohere::from_env()?;
 
         Ok(Self {
-            gpt_4: openai_client
-                .agent(openai::GPT_4)
+            gpt_4: AgentBuilder::new(openai_client.completion(openai::GPT_4))
                 .preamble(position_a)
                 .build(),
-            coral: cohere_client
-                .agent(cohere::COMMAND_A_03_2025)
+            coral: AgentBuilder::new(cohere_client.completion(cohere::COMMAND_A_03_2025))
                 .preamble(position_b)
                 .build(),
         })
@@ -50,26 +48,22 @@ impl Debater {
                 .prompt(prompt_a.as_str())
                 .history(&history_a)
                 .await?;
-            // Extract updated history for next iteration
-            history_a = resp_a
-                .messages
-                .map(|m| m.into_iter().collect())
-                .unwrap_or_default();
-            println!("GPT-4:\n{}", resp_a.output);
+            let answer_a = resp_a.output();
+            // Append this round to the history for the next one.
+            history_a.extend(resp_a.messages);
+            println!("GPT-4:\n{answer_a}");
             println!("================================================================");
             let resp_b = self
                 .coral
-                .prompt(resp_a.output.as_str())
+                .prompt(answer_a.as_str())
                 .history(&history_b)
                 .await?;
-            // Extract updated history for next iteration
-            history_b = resp_b
-                .messages
-                .map(|m| m.into_iter().collect())
-                .unwrap_or_default();
-            println!("Coral:\n{}", resp_b.output);
+            let answer_b = resp_b.output();
+            // Append this round to the history for the next one.
+            history_b.extend(resp_b.messages);
+            println!("Coral:\n{answer_b}");
             println!("================================================================");
-            last_resp_b = Some(resp_b.output);
+            last_resp_b = Some(answer_b);
         }
         Ok(())
     }

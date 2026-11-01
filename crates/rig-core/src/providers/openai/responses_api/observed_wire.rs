@@ -1,7 +1,7 @@
 use super::observed_types::{self as message, Text};
-use super::{
-    OpenAIServiceTier, OutputRole, Reasoning, ResponseObject, ResponseStatus, ToolStatus,
-    TruncationStrategy,
+use super::observed_values::{
+    AdditionalParams, OpenAIServiceTier, OutputRole, Reasoning, ResponseObject, ResponseStatus,
+    ToolStatus, TruncationStrategy,
 };
 use crate::json_utils;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -779,7 +779,7 @@ impl<'de> Deserialize<'de> for Output {
                 let Value::Object(mut map) = value else {
                     return Ok(Output::Unknown(value));
                 };
-                map.remove("type");
+                map.shift_remove("type");
                 Ok(Output::Compaction(map))
             }
             _ => Ok(Output::Unknown(value)),
@@ -999,7 +999,7 @@ impl<'de> Deserialize<'de> for AssistantContent {
                 // OutputText flattens sibling fields; the tag belongs to the enum.
                 let mut value = value;
                 if let Some(fields) = value.as_object_mut() {
-                    fields.remove("type");
+                    fields.shift_remove("type");
                 }
                 serde_json::from_value(value)
                     .map(Self::OutputText)
@@ -1083,9 +1083,7 @@ const OPENAI_RESPONSES_PART_KEY: &str = "openai_responses_part";
 const REFUSAL_PART_KIND: &str = "refusal";
 
 /// The retained JSON value of an opaque Responses message part, when `params` marks one.
-pub(crate) fn opaque_message_part(
-    params: Option<&crate::message::AdditionalParams>,
-) -> Option<&Value> {
+pub(crate) fn opaque_message_part(params: Option<&AdditionalParams>) -> Option<&Value> {
     let marker = params?.wire_extras(OPENAI_RESPONSES_PART_KEY)?;
     (marker.get("kind").and_then(Value::as_str) == Some("opaque"))
         .then(|| marker.get("value"))
@@ -1093,8 +1091,8 @@ pub(crate) fn opaque_message_part(
 }
 
 /// The metadata that marks a text block as a refusal.
-pub(crate) fn refusal_marker() -> Option<crate::message::AdditionalParams> {
-    crate::message::AdditionalParams::from_entries(Some((
+pub(crate) fn refusal_marker() -> Option<AdditionalParams> {
+    AdditionalParams::from_entries(Some((
         OPENAI_RESPONSES_PART_KEY,
         serde_json::json!({ "kind": REFUSAL_PART_KIND }),
     )))
@@ -1110,12 +1108,12 @@ pub(crate) fn stamp_phase(text: &mut Text, phase: Option<&str>) {
     let mut entries = match text
         .additional_params
         .take()
-        .map(crate::message::AdditionalParams::into_value)
+        .map(AdditionalParams::into_value)
     {
         Some(Value::Object(entries)) => entries,
         _ => Map::new(),
     };
-    let mut extras = match entries.remove(OPENAI_RESPONSES_EXTRAS_KEY) {
+    let mut extras = match entries.shift_remove(OPENAI_RESPONSES_EXTRAS_KEY) {
         Some(Value::Object(extras)) => extras,
         _ => Map::new(),
     };
@@ -1127,7 +1125,7 @@ pub(crate) fn stamp_phase(text: &mut Text, phase: Option<&str>) {
         OPENAI_RESPONSES_EXTRAS_KEY.to_string(),
         Value::Object(extras),
     );
-    text.additional_params = crate::message::AdditionalParams::new(entries);
+    text.additional_params = AdditionalParams::new(entries);
 }
 
 /// Converts output text, a refusal or an opaque part to a Rig text block, retaining nonempty
@@ -1137,7 +1135,7 @@ pub(crate) fn text_block(value: AssistantContent) -> Text {
     match value {
         AssistantContent::Unknown(value) => Text {
             text: String::new(),
-            additional_params: crate::message::AdditionalParams::from_entries(Some((
+            additional_params: AdditionalParams::from_entries(Some((
                 OPENAI_RESPONSES_PART_KEY,
                 serde_json::json!({"kind": "opaque", "value": value}),
             ))),
@@ -1160,7 +1158,7 @@ pub(crate) fn text_block(value: AssistantContent) -> Text {
                 .collect();
             Text {
                 text,
-                additional_params: crate::message::AdditionalParams::from_entries(
+                additional_params: AdditionalParams::from_entries(
                     (!extras.is_empty())
                         .then_some((OPENAI_RESPONSES_EXTRAS_KEY, Value::Object(extras))),
                 ),

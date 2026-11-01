@@ -29,26 +29,27 @@
 //! - **Single in-flight custody**, inherited from the shared session.
 //!
 //! The handshake carries the wire's credential as it stands when the session
-//! connects: [`OpenAI::api_key`](crate::providers::openai::OpenAI::api_key),
+//! connects: [`OpenAIConfig::api_key`](crate::providers::openai::OpenAIConfig::api_key),
 //! or, when the wire has a
-//! [credential source](crate::providers::openai::OpenAI::with_credential_source),
+//! [credential source](crate::providers::openai::OpenAIConfig::with_credential_source),
 //! what that source supplies at connect. An open connection keeps the
 //! credential it was opened with; a rotated credential takes effect at the
 //! next session's connect.
 //!
 //! ```no_run
 //! use rig_core::providers::chatgpt;
-//! use rig_core::providers::openai::OpenAI;
+//! use rig_core::providers::openai::OpenAIConfig;
+//! use rig_core::providers::openai::responses_api::wire::Responses;
 //! use rig_core::providers::openai::responses_api::websocket::codex::CodexWebSocketSessionBuilder;
 //!
 //! # async fn example(
 //! #     backend: &impl rig_core::ws_client::WebSocketClientExt,
 //! #     identity: rig_core::providers::openai::wire::CallerIdentity,
 //! # ) -> Result<(), rig_core::error::ProviderError> {
-//! let wire = OpenAI::with_key(&chatgpt::DIALECT, "access-token")
+//! let provider = OpenAIConfig::with_key(&chatgpt::DIALECT, "access-token")
 //!     .with_caller_identity(identity)
-//!     .with_account_id("account-id")
-//!     .responses(chatgpt::GPT_5_3_CODEX);
+//!     .with_account_id("account-id");
+//! let wire = Responses::new(provider, chatgpt::GPT_5_3_CODEX);
 //! let mut session = CodexWebSocketSessionBuilder::new(wire)?
 //!     .connect_with(backend)
 //!     .await?;
@@ -60,13 +61,13 @@
 //! [`send_incremental`]: CodexWebSocketSession::send_incremental
 
 use super::{
-    Chaining, DEFAULT_CONNECT_TIMEOUT, ResponsesWebSocketSession, WEBSOCKET_PATH, connect,
-    encode_frame,
+    Chaining, DEFAULT_CONNECT_TIMEOUT, ResponsesWebSocketSession, WEBSOCKET_PATH, WebSocketCreate,
+    WebSocketCreateInput, connect, encode_frame,
 };
 
 // The shared session types this session's API speaks, re-exported beside it.
 pub use super::{
-    EmptyInputDeltaError, IncrementalSendRefused, InputDelta, KeepaliveDrain,
+    EmptyInputDeltaError, IncrementalSendRefused, InputDelta, InputDeltaItem, KeepaliveDrain,
     ResponsesWebSocketCreateOptions, ResponsesWebSocketEvent, UncollectedRecoveredFrames,
     UnrecognizedEvent,
 };
@@ -129,7 +130,7 @@ pub struct ReservedFrameMetadataKey {
 
 impl From<ReservedFrameMetadataKey> for ProviderError {
     fn from(error: ReservedFrameMetadataKey) -> Self {
-        ProviderError::Request(Box::new(error))
+        ProviderError::request(error)
     }
 }
 
@@ -150,33 +151,26 @@ impl FrameStamps {
         Ok(())
     }
 
-    /// Stamp the frame metadata over the frame's own `client_metadata`
-    /// values, then the send instant. The identity has already made
-    /// `client_metadata` an object.
-    fn stamp(
-        &self,
-        body: &mut serde_json::Map<String, serde_json::Value>,
-    ) -> Result<(), EncodeError> {
-        if self.metadata.is_empty() && self.clock.is_none() {
-            return Ok(());
-        }
-        let Some(serde_json::Value::Object(metadata)) =
-            body.get_mut(super::super::codex_identity::CLIENT_METADATA_FIELD)
-        else {
-            return Err(EncodeError::request(
-                "a Codex frame's `client_metadata` must be a JSON object to carry frame metadata",
-            ));
-        };
-        for (key, value) in &self.metadata {
-            metadata.insert(key.clone(), serde_json::Value::String(value.clone()));
-        }
+    fn values(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut metadata: serde_json::Map<String, serde_json::Value> = self
+            .metadata
+            .iter()
+            .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+            .collect();
         if let Some(clock) = &self.clock {
             metadata.insert(
                 WS_STREAM_REQUEST_START_MS_METADATA_KEY.to_owned(),
                 serde_json::Value::String(clock.unix_millis().to_string()),
             );
         }
-        Ok(())
+        if metadata.is_empty() {
+            serde_json::Map::new()
+        } else {
+            serde_json::Map::from_iter([(
+                super::super::codex_identity::CLIENT_METADATA_FIELD.to_owned(),
+                serde_json::Value::Object(metadata),
+            )])
+        }
     }
 }
 
@@ -329,6 +323,15 @@ impl CodexWebSocketSessionBuilder {
     pub fn without_event_timeout(mut self) -> Self {
         self.event_timeout = None;
         self
+    }
+
+    /// Open the session over the bundled tungstenite backend with the configured
+    /// timeouts. Return handshake construction, transport, or provider errors.
+    #[cfg(all(feature = "tungstenite", not(target_family = "wasm")))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "tungstenite")))]
+    pub async fn connect(self) -> Result<CodexWebSocketSession, ProviderError> {
+        self.connect_with(&rig_tungstenite::TungsteniteClient::new())
+            .await
     }
 
     /// Open the session over `backend`.
@@ -496,17 +499,28 @@ impl CodexWebSocketSession {
             Some(&self.identity),
             super::super::InputRequirement::for_create(&options),
         )?;
-        let responses_lite = self.session.wire.codex_request_shape.is_lite();
-        let frame = encode_frame(&envelope, options.generate, |body| {
-            stamp_frame(&self.identity, responses_lite, &self.frame_stamps, body)
-        })?;
+        let body = self.session.wire.websocket_request_with_identity(
+            &envelope.request,
+            Some(&self.identity),
+            super::super::InputRequirement::for_create(&options),
+            WebSocketCreate {
+                input: WebSocketCreateInput::Full,
+                stamps: self.frame_stamps.values(),
+                identity: Some(self.identity.clone()),
+                lite: self.session.wire.codex_request_shape.is_lite(),
+                automatic_previous: None,
+                generate: options.generate,
+            },
+        )?;
+        let frame = encode_frame(&body)?;
         self.session.send_encoded(envelope, frame).await
     }
 
     /// Continue the live tip with a forward-only incremental turn.
     ///
-    /// Sends exactly `delta` as the new input, chaining the tip's response ID
-    /// and reusing the non-input configuration (model, instructions, tools,
+    /// Lowers canonical messages as one Responses input batch and sends Raw
+    /// items unchanged, chaining the tip's response ID and reusing the
+    /// non-input configuration (model, instructions, tools,
     /// reasoning, include, cache identity) of the envelope captured from the
     /// last completed turn. Changing any of that requires a full send.
     ///
@@ -519,21 +533,31 @@ impl CodexWebSocketSession {
         let (envelope, tip) = self
             .session
             .continuation()
-            .map_err(|refused| ProviderError::Request(Box::new(refused)))?;
+            .map_err(ProviderError::request)?;
         let envelope = envelope.clone();
-        let mut request = envelope.clone();
-        request.input = delta.into_vec();
-        request.additional_parameters.previous_response_id = Some(tip.to_owned());
-
-        let responses_lite = self.session.wire.codex_request_shape.is_lite();
-        if responses_lite {
-            super::super::responses_lite::shape_delta(&mut request.input);
-        }
-        let frame = encode_frame(&request, None, |body| {
-            stamp_frame(&self.identity, responses_lite, &self.frame_stamps, body)
-        })?;
-        // The captured envelope, not the delta request, is what a later
-        // delta continues from.
+        let tip = tip.to_owned();
+        let input = self
+            .session
+            .wire
+            .lower_websocket_delta(delta, &envelope.context)?;
+        let body = self.session.wire.websocket_request_with_identity(
+            &envelope.request,
+            Some(&self.identity),
+            super::super::InputRequirement::NonEmpty,
+            WebSocketCreate {
+                input: WebSocketCreateInput::Delta {
+                    envelope: envelope.body.clone(),
+                    input,
+                    previous_response_id: tip,
+                },
+                stamps: self.frame_stamps.values(),
+                identity: Some(self.identity.clone()),
+                lite: self.session.wire.codex_request_shape.is_lite(),
+                automatic_previous: None,
+                generate: None,
+            },
+        )?;
+        let frame = encode_frame(&body)?;
         self.session.send_encoded(envelope, frame).await
     }
 
@@ -578,7 +602,16 @@ impl CodexWebSocketSession {
             ResponsesWebSocketCreateOptions::warmup(),
         )
         .await?;
-        Ok(self.session.wait_for_completed_response().await?.id)
+        let response = self.session.wait_for_completed_response().await?;
+        response
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                ProviderError::Provider(
+                    "OpenAI websocket warmup completed without a response ID".to_owned(),
+                )
+            })
     }
 
     /// Send a root turn and collect its normalized response. An incomplete
@@ -595,19 +628,6 @@ impl CodexWebSocketSession {
     pub async fn close(&mut self) -> Result<(), ProviderError> {
         self.session.close().await
     }
-}
-
-fn stamp_frame(
-    identity: &CodexIdentity,
-    responses_lite: bool,
-    frame_stamps: &FrameStamps,
-    body: &mut serde_json::Map<String, serde_json::Value>,
-) -> Result<(), EncodeError> {
-    identity.stamp(body)?;
-    if responses_lite {
-        super::super::responses_lite::stamp_websocket_marker(body)?;
-    }
-    frame_stamps.stamp(body)
 }
 
 impl std::fmt::Debug for CodexWebSocketSession {

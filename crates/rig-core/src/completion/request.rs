@@ -1,23 +1,26 @@
 //! Completion requests, normalized responses, and provider model contracts.
 //!
 //! ```
-//! use rig_core::completion::CompletionRequestBuilder;
+//! use rig_core::completion::CompletionRequest;
 //!
-//! let request = CompletionRequestBuilder::unbound("Who are you?")
-//!     .preamble("You are a concise assistant.".to_owned())
-//!     .temperature(0.5)
-//!     .build();
+//! let request = CompletionRequest::new("Who are you?")
+//!     .preamble("You are a concise assistant.")
+//!     .temperature(0.5);
 //! assert_eq!(request.temperature, Some(0.5));
 //! ```
 
-use super::message::{AssistantContent, DocumentMediaType};
+use super::message::{
+    AssistantContent, AssistantMessage, DocumentMediaType, Origin, StopReason, ToolCall,
+};
+use super::options::{
+    CacheRetention, GenerationOptions, OnUnsupported, Reasoning, ServiceTier, Verbosity,
+};
+use super::provider_options::{ExtensionOptions, ProviderExtension, ProviderOptions, ReplyExtras};
 use crate::error::ProviderError;
 use crate::message::ToolChoice;
-use crate::streaming::StreamingCompletionResponse;
-use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use crate::{
     json_utils,
-    message::{Message, UserContent},
+    message::{Message, ToolName, UserContent},
 };
 
 use serde::{Deserialize, Serialize};
@@ -60,11 +63,27 @@ impl std::fmt::Display for Document {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ToolDefinition {
     /// Tool name exposed to the model. It must match the registered tool name.
-    pub name: String,
+    pub name: ToolName,
     /// Human-readable description sent to the model.
     pub description: String,
     /// JSON Schema describing tool arguments.
     pub parameters: serde_json::Value,
+}
+
+impl ToolDefinition {
+    /// A tool the model may call by `name`, with arguments matching the
+    /// JSON Schema `parameters`.
+    pub fn new(
+        name: ToolName,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Self {
+        Self {
+            name,
+            description: description.into(),
+            parameters,
+        }
+    }
 }
 
 /// Provider-native tool definition.
@@ -102,10 +121,11 @@ impl ProviderToolDefinition {
 /// such output is usable rather than treating every response as successful.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum FinishReason {
     /// Natural end of the response.
     Stop,
-    /// The response hit the output-token limit.
+    /// A token limit, such as the output budget or context window, cut the response.
     Length,
     /// The model stopped to call one or more tools.
     ToolCalls,
@@ -135,13 +155,13 @@ impl FinishReason {
         matches!(self, Self::Length | Self::ContentFilter)
     }
 
-    /// Formats an answerless-turn diagnostic with budget or filtering advice
+    /// Formats an answerless-turn diagnostic with limit or filtering advice
     /// for known truncation reasons, and a generic explanation otherwise.
     pub fn no_answer_message(&self) -> String {
         let remedy = match self {
             Self::Length => {
-                "the turn ran out of output budget before producing one — \
-                 raise max_tokens for this request"
+                "the turn reached a token limit before producing one — \
+                 if the limit was the output budget, raise max_tokens for this request"
             }
             Self::ContentFilter => {
                 "the provider filtered the response — the content, not the \
@@ -169,23 +189,39 @@ pub type ProviderResponseHeaders = std::collections::BTreeMap<String, String>;
 /// Assistant content and normalized completion metadata. The choice may be
 /// empty, including for truncated or filtered turns. Provider-specific data is
 /// available through [`Self::raw`] without retaining a concrete model type.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// A response goes straight back into the conversation as the assistant
+/// turn: `history.extend(response.message())`.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(from = "CompletionResponseRepr")]
 pub struct CompletionResponse {
-    /// Assistant content returned by the provider, possibly empty.
+    /// Assistant content returned by the provider, one block per provider
+    /// output item, in provider order. Possibly empty.
     pub choice: Vec<AssistantContent>,
     /// Tokens used during prompting and responding
     pub usage: Usage,
-    /// Provider-issued assistant message ID suitable for replay in
-    /// [`Message::Assistant`]. Response-wide IDs belong in [`Self::response_id`].
-    #[serde(default)]
-    pub message_id: Option<String>,
-    /// Provider-issued response ID for telemetry and diagnostics.
-    /// Must not be replayed as an assistant message ID.
-    #[serde(default)]
-    pub response_id: Option<String>,
+    /// Assistant message ID the provider actually supplied, independent of
+    /// response and request IDs. Never used to fabricate Origin metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<ProviderMessageId>,
+    /// The wire, provider and requested model that produced the response,
+    /// with the model and response id the provider reported.
+    pub origin: Origin,
+    /// The provider's report that the turn failed, such as a refusal's
+    /// explanation. The turn's message then ends in [`StopReason::Error`]
+    /// skips upstream-native content during replay. Carried ProviderItems keep
+    /// their protected replay contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Why the reply stopped before the provider ended it, when the caller
+    /// stopped reading: the turn's message then ends in
+    /// [`StopReason::Aborted`]. Upstream-native content is skipped during replay;
+    /// carried ProviderItems retain their protected replay contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aborted: Option<String>,
     /// Request identifier from HTTP headers or SDK metadata, not the body's
-    /// message or response ID. `None` when the provider reports none.
+    /// response ID. `None` when the provider reports none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_request_id: Option<String>,
     /// Success-reply headers the dialect captures, from the reply that
@@ -196,30 +232,67 @@ pub struct CompletionResponse {
     /// Read through [`Self::finish_reason`].
     #[serde(default)]
     finish_reason: Option<FinishReason>,
-    /// Stable descriptor name of the provider that produced this response, for
-    /// example `"openai"`. Always populated, including for responses derived
-    /// from a stream that ended before its terminal record.
-    pub provider: String,
-    /// Provider-reported model identifier for the response.
-    ///
-    /// This is the model named by the wire response, not the model that was
-    /// requested; it is `None` when the provider reports no identifier.
-    #[serde(default)]
-    pub model: Option<String>,
+    /// Whether [`FinishReason::Other`] ends the turn as a normal stop. Read
+    /// through [`Self::accepts_unknown_finish_reasons`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    accepts_unknown_finish_reasons: bool,
     /// Provider response document for typed inspection through deserialization.
     /// Parsed wire types may omit unmodeled fields. This data does not override
     /// normalized fields; callers constructing responses must supply it.
     pub raw: serde_json::Value,
 }
 
-/// Distinct message, response, and transport identifiers for one model call.
+/// A provider-issued assistant message identifier, distinct from response,
+/// request and tool-call identifiers. An absent identifier is not manufactured.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ProviderMessageId(String);
+
+/// The provider supplied an empty message identifier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("a provider message id cannot be empty")]
+pub struct EmptyMessageId;
+
+impl ProviderMessageId {
+    /// A nonempty provider-issued identifier, or None for an empty wire value.
+    pub fn new(id: impl Into<String>) -> Option<Self> {
+        let id = id.into();
+        (!id.is_empty()).then_some(Self(id))
+    }
+
+    /// The exact provider-issued value.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ProviderMessageId {
+    type Error = EmptyMessageId;
+    fn try_from(id: String) -> Result<Self, Self::Error> {
+        Self::new(id).ok_or(EmptyMessageId)
+    }
+}
+
+impl From<ProviderMessageId> for String {
+    fn from(id: ProviderMessageId) -> Self {
+        id.0
+    }
+}
+
+impl std::fmt::Display for ProviderMessageId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Distinct response and transport identifiers for one model call.
 /// Unreported identifiers remain `None`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResponseIdentity {
-    /// Provider-issued assistant message ID suitable for replay.
+    /// The provider-issued assistant message ID, when one was supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message_id: Option<String>,
-    /// Response-wide ID, never replayed as a message ID.
+    pub message_id: Option<ProviderMessageId>,
+    /// Response-wide ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_id: Option<String>,
     /// Transport request ID from HTTP headers or SDK metadata.
@@ -229,27 +302,76 @@ pub struct ResponseIdentity {
 
 impl CompletionResponse {
     /// Create a response from its required parts; optional metadata starts
-    /// unset and is filled in with the `with_*` helpers. `raw` is the
-    /// provider's own document for this response, serialized; see
-    /// [`Self::raw`].
+    /// unset. `raw` is the provider's own document for this response,
+    /// serialized; see [`Self::raw`].
     pub fn new(
         choice: Vec<AssistantContent>,
         usage: Usage,
-        provider: impl Into<String>,
+        origin: Origin,
         raw: serde_json::Value,
     ) -> Self {
         Self {
             choice,
             usage,
             message_id: None,
-            response_id: None,
+            origin,
+            error: None,
+            aborted: None,
             provider_request_id: None,
             provider_response_headers: ProviderResponseHeaders::new(),
             finish_reason: None,
-            provider: provider.into(),
-            model: None,
+            accepts_unknown_finish_reasons: false,
             raw,
         }
+    }
+
+    /// The provider descriptor name (`"openai"`).
+    pub fn provider(&self) -> &str {
+        &self.origin.provider
+    }
+
+    /// `P`'s typed view of [`Self::raw`]. `None` unless `P` is the provider
+    /// that produced the reply.
+    ///
+    /// # Errors
+    ///
+    /// The inner result fails when `raw` does not hold `P`'s extras.
+    pub fn extras<P: ProviderExtension>(&self) -> Option<Result<P::Extras, serde_json::Error>> {
+        (self.origin.provider == P::PROVIDER)
+            .then(|| P::Extras::from_reply(&self.origin.api, &self.raw))
+    }
+
+    /// `P`'s typed view of [`Self::raw`], or the empty view (every field
+    /// `None`) when it cannot be read: when another provider produced the
+    /// reply, or when `raw` does not hold `P`'s extras. A decode failure is
+    /// logged at `debug`; use [`Self::extras`] to tell the cases apart.
+    pub fn extras_lossy<P: ProviderExtension>(&self) -> P::Extras
+    where
+        P::Extras: Default,
+    {
+        match self.extras::<P>() {
+            Some(Ok(extras)) => extras,
+            Some(Err(error)) => {
+                tracing::debug!(
+                    provider = P::PROVIDER,
+                    api = %self.origin.api,
+                    %error,
+                    "reply extras did not decode; reading them as empty"
+                );
+                P::Extras::default()
+            }
+            None => P::Extras::default(),
+        }
+    }
+
+    /// The model the provider reported, when it reported one.
+    pub fn model(&self) -> Option<&str> {
+        self.origin.response_model.as_deref()
+    }
+
+    /// The provider's response id, when it sent one.
+    pub fn response_id(&self) -> Option<&str> {
+        self.origin.response_id.as_deref()
     }
 
     /// Why the model stopped generating, when the provider reported it.
@@ -257,11 +379,64 @@ impl CompletionResponse {
         self.finish_reason.clone()
     }
 
+    /// Whether a finish reason outside the normalized vocabulary ends the
+    /// turn as a normal stop, as the request asked
+    /// ([`CompletionRequest::accept_unknown_finish_reasons`]).
+    ///
+    /// [`CompletionRequest::accept_unknown_finish_reasons`]: field@CompletionRequest::accept_unknown_finish_reasons
+    pub fn accepts_unknown_finish_reasons(&self) -> bool {
+        self.accepts_unknown_finish_reasons
+    }
+
+    /// Accept, or refuse, [`FinishReason::Other`] as a normal stop in
+    /// [`Self::stop`]. Filtered content and a reported failure still fail.
+    pub fn accept_unknown_finish_reasons(mut self, accept: bool) -> Self {
+        self.accepts_unknown_finish_reasons = accept;
+        self
+    }
+
+    /// How the turn ended, for history. It fails closed: only a natural
+    /// stop, the token limit and a stop to call tools are successes. A
+    /// reported failure, filtered content and any finish reason outside
+    /// that set are [`StopReason::Error`], unless the response accepts
+    /// unknown reasons ([`Self::accepts_unknown_finish_reasons`]), which then
+    /// stop like [`FinishReason::Stop`]. A reply the caller stopped reading
+    /// is [`StopReason::Aborted`].
+    pub fn stop(&self) -> StopReason {
+        if let Some(error) = &self.error {
+            return StopReason::Error(error.clone());
+        }
+        if let Some(reason) = &self.aborted {
+            return StopReason::Aborted(reason.clone());
+        }
+        match &self.finish_reason {
+            Some(FinishReason::Length) => StopReason::Length,
+            Some(FinishReason::ToolCalls) => StopReason::ToolUse,
+            Some(FinishReason::ContentFilter) => {
+                StopReason::Error("Provider finish_reason: content_filter".to_owned())
+            }
+            Some(FinishReason::Other(reason)) if !self.accepts_unknown_finish_reasons => {
+                StopReason::Error(format!("Provider finish_reason: {reason}"))
+            }
+            Some(FinishReason::Stop | FinishReason::Other(_)) | None
+                if self.choice.iter().any(|content| {
+                    matches!(
+                        content,
+                        AssistantContent::ToolCall(_) | AssistantContent::CustomToolCall(_)
+                    )
+                }) =>
+            {
+                StopReason::ToolUse
+            }
+            Some(FinishReason::Stop | FinishReason::Other(_)) | None => StopReason::Stop,
+        }
+    }
+
     /// This response's identity metadata as one [`ResponseIdentity`] carrier.
     pub fn identity(&self) -> ResponseIdentity {
         ResponseIdentity {
             message_id: self.message_id.clone(),
-            response_id: self.response_id.clone(),
+            response_id: self.origin.response_id.clone(),
             provider_request_id: self.provider_request_id.clone(),
         }
     }
@@ -270,6 +445,110 @@ impl CompletionResponse {
     /// [`FinishReason::reconcile_with_output`].
     pub fn with_finish_reason(self, finish_reason: FinishReason) -> Self {
         self.with_optional_finish_reason(Some(finish_reason))
+    }
+
+    /// The text parts of [`Self::choice`], concatenated in order.
+    pub fn text(&self) -> String {
+        self.choice
+            .iter()
+            .filter_map(|part| match part {
+                AssistantContent::Text(text) => Some(text.text.as_str()),
+                AssistantContent::CarriedText(text) => Some(text.text()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The reasoning text of [`Self::choice`], concatenated in order.
+    /// Upstream redacted reasoning has no text; carried reasoning keeps the
+    /// fork's visible block projection.
+    pub fn reasoning(&self) -> String {
+        self.choice
+            .iter()
+            .filter_map(|part| match part {
+                AssistantContent::Reasoning(reasoning) => Some(reasoning.text.clone()),
+                AssistantContent::CarriedReasoning(reasoning) => Some(reasoning.display_text()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The assistant turn to append to the conversation: [`Self::choice`] in
+    /// order with its origin and stop, or `None` for an
+    /// empty choice.
+    pub fn message(&self) -> Option<Message> {
+        if self.choice.is_empty() {
+            return None;
+        }
+        Some(Message::Assistant(AssistantMessage {
+            content: self.choice.clone(),
+            ..self.head()
+        }))
+    }
+
+    /// The turn this response began, holding `content`, for a runtime that
+    /// cut the reply short and answers its calls itself (an agent rolling a
+    /// turn back over an invalid call). It keeps the origin, and stops to
+    /// call tools, since the runtime answers them. A block keeps its provider
+    /// item only when this response holds the same block with it. A response
+    /// the provider did not end, or one the consumer has not wholly taken,
+    /// holds no upstream-native provider item, so that content replays canonically.
+    /// Carried ProviderItems retain their item and per-item issuer unchanged.
+    pub fn continued(&self, content: Vec<AssistantContent>) -> AssistantMessage {
+        let content = content
+            .into_iter()
+            .map(|block| {
+                if self.choice.contains(&block) {
+                    block
+                } else {
+                    crate::operation::completion::canonical(block)
+                }
+            })
+            .collect();
+        AssistantMessage::rolled_back(Some(self.origin.clone()), content)
+    }
+
+    /// The turn's origin and stop with no content, for a
+    /// runtime that carries the content separately.
+    pub fn head(&self) -> AssistantMessage {
+        AssistantMessage {
+            content: Vec::new(),
+            origin: Some(self.origin.clone()),
+            stop: Some(self.stop()),
+        }
+    }
+
+    /// The tool calls in [`Self::choice`], in order.
+    pub fn tool_calls(&self) -> impl Iterator<Item = &ToolCall> {
+        self.choice.iter().filter_map(|part| match part {
+            AssistantContent::ToolCall(call) => Some(call),
+            _ => None,
+        })
+    }
+
+    /// Set the independently supplied assistant message ID.
+    pub fn with_message_id(self, message_id: ProviderMessageId) -> Self {
+        self.with_optional_message_id(Some(message_id))
+    }
+
+    /// Set or clear the assistant message ID. Other identity slots are unchanged.
+    pub fn with_optional_message_id(mut self, message_id: Option<ProviderMessageId>) -> Self {
+        self.message_id = message_id;
+        self
+    }
+
+    /// Success-reply headers captured by the response's dialect.
+    pub fn with_provider_response_headers(mut self, headers: ProviderResponseHeaders) -> Self {
+        self.provider_response_headers = headers;
+        self
+    }
+
+    /// Raw-input custom tool calls in [`Self::choice`], in order.
+    pub fn custom_tool_calls(&self) -> impl Iterator<Item = &crate::message::CustomToolCall> {
+        self.choice.iter().filter_map(|part| match part {
+            AssistantContent::CustomToolCall(call) => Some(call),
+            _ => None,
+        })
     }
 
     /// Sets or clears the finish reason, reconciling a present reason with the choice.
@@ -286,88 +565,289 @@ impl CompletionResponse {
     }
 }
 
-crate::provider_response::response_metadata_setters!(CompletionResponse);
-
 /// Deserialization shape routed through builders for finish-reason reconciliation
 /// and empty-identifier normalization.
 #[derive(Deserialize)]
 struct CompletionResponseRepr {
-    choice: Vec<AssistantContent>,
-    usage: Usage,
+    // Normalize an empty incoming wire value as absent before constructing
+    // the canonical nonempty identifier, preserving the protected boundary.
     #[serde(default)]
     message_id: Option<String>,
+    choice: Vec<AssistantContent>,
+    usage: Usage,
+    origin: Origin,
     #[serde(default)]
-    response_id: Option<String>,
+    error: Option<String>,
+    #[serde(default)]
+    aborted: Option<String>,
     #[serde(default)]
     provider_request_id: Option<String>,
     #[serde(default)]
     provider_response_headers: ProviderResponseHeaders,
     #[serde(default)]
     finish_reason: Option<FinishReason>,
-    provider: String,
     #[serde(default)]
-    model: Option<String>,
+    accepts_unknown_finish_reasons: bool,
     raw: serde_json::Value,
 }
 
 impl From<CompletionResponseRepr> for CompletionResponse {
     fn from(repr: CompletionResponseRepr) -> Self {
         let CompletionResponseRepr {
+            message_id,
             choice,
             usage,
-            message_id,
-            response_id,
+            mut origin,
+            error,
+            aborted,
             provider_request_id,
             provider_response_headers,
             finish_reason,
-            provider,
-            model,
+            accepts_unknown_finish_reasons,
             raw,
         } = repr;
-        Self::new(choice, usage, provider, raw)
-            .with_optional_message_id(message_id)
-            .with_optional_response_id(response_id)
-            .with_optional_provider_request_id(provider_request_id)
-            .with_provider_response_headers(provider_response_headers)
-            .with_optional_finish_reason(finish_reason)
-            .with_optional_model(model)
+        use crate::provider_response::reported;
+        origin.response_id = reported(origin.response_id);
+        origin.response_model = reported(origin.response_model);
+        let mut response =
+            Self::new(choice, usage, origin, raw).with_optional_finish_reason(finish_reason);
+        response.message_id = message_id.and_then(ProviderMessageId::new);
+        response.error = error;
+        response.aborted = aborted;
+        response.provider_request_id = reported(provider_request_id);
+        response.provider_response_headers = provider_response_headers;
+        response.accepts_unknown_finish_reasons = accepts_unknown_finish_reasons;
+        response
     }
 }
 
-/// The token usage a provider reported for one completion.
+/// Token usage for one completion, as mapped from the provider's report.
 ///
-/// A counter the provider did not send is `None`; a reported zero is
-/// `Some(0)`. Serialized as the same keys, absent when `None`.
-#[derive(Debug, Default, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
+/// Counters are optional and independent. The provider mapping determines
+/// their values and any computation from component counters; this type does
+/// not reconcile totals or enforce subset relationships between counters.
+/// A total can be present without input and output counts and need not equal
+/// their sum. Cache and reasoning counts are not constrained by the input
+/// and output counts here.
+///
+/// An unavailable counter is `None`; a known zero is `Some(0)`. Each counter
+/// serializes under its field name and is absent when `None`.
+///
+/// ```
+/// use rig_core::completion::Usage;
+///
+/// let usage = Usage::new().input_tokens(12).output_tokens(3).total_tokens(15);
+/// assert_eq!(usage.input_tokens, Some(12));
+/// assert!(usage.cost.is_none());
+/// ```
+#[non_exhaustive]
+#[derive(Debug, Default, PartialEq, Clone, Copy, Serialize, Deserialize)]
 pub struct Usage {
-    /// The number of input ("prompt") tokens used in a given request.
+    /// The input-token counter from the provider mapping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
-    /// The number of output ("completion") tokens used in a given request.
+    /// The output-token counter from the provider mapping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
-    /// We store this separately as some providers may only report one number
+    /// The total-token counter, independently of the input and output fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
-    /// The number of input tokens read from a provider-managed cache
+    /// Input tokens read from a provider-managed cache, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_input_tokens: Option<u64>,
-    /// The number of input tokens written to a provider-managed cache
+    /// Input tokens written to a provider-managed cache, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_input_tokens: Option<u64>,
-    /// The number of tool-use prompt tokens used in a given request.
+    /// Prompt tokens added by the provider's hosted tools, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_use_prompt_tokens: Option<u64>,
-    /// The number of tokens spent on internal reasoning / "thoughts" by reasoning-capable
-    /// models (e.g. Gemini thinking, Anthropic extended thinking, OpenAI o-series).
+    /// Tokens spent on internal reasoning ("thinking", "thoughts"), when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
+    /// What the turn cost in USD, when known. Never derived from the token
+    /// counters here, and none of them is derived from it. A cost the
+    /// provider reports is its figure. One priced from the built-in catalog
+    /// ([`Pricing::cost`](crate::catalog::Pricing::cost)) is the
+    /// standard-tier list price of the counted tokens: it leaves out the
+    /// service tier, long-context price tiers and hosted-tool fees (web
+    /// search, code execution), so it can be lower than the bill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<Cost>,
 }
 
 impl Usage {
-    /// Whether the provider reported any counter at all.
+    /// No counter and no cost reported.
+    pub const fn new() -> Self {
+        Self {
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            tool_use_prompt_tokens: None,
+            reasoning_tokens: None,
+            cost: None,
+        }
+    }
+
+    /// Whether the provider reported any counter or a cost.
     pub fn is_reported(&self) -> bool {
         *self != Self::default()
+    }
+
+    /// Set, or with `None` clear, [`Self::input_tokens`](field@Self::input_tokens).
+    pub fn input_tokens(mut self, tokens: impl Into<Option<u64>>) -> Self {
+        self.input_tokens = tokens.into();
+        self
+    }
+
+    /// Set, or with `None` clear, [`Self::output_tokens`](field@Self::output_tokens).
+    pub fn output_tokens(mut self, tokens: impl Into<Option<u64>>) -> Self {
+        self.output_tokens = tokens.into();
+        self
+    }
+
+    /// Set, or with `None` clear, [`Self::total_tokens`](field@Self::total_tokens).
+    pub fn total_tokens(mut self, tokens: impl Into<Option<u64>>) -> Self {
+        self.total_tokens = tokens.into();
+        self
+    }
+
+    /// Set, or with `None` clear,
+    /// [`Self::cached_input_tokens`](field@Self::cached_input_tokens).
+    pub fn cached_input_tokens(mut self, tokens: impl Into<Option<u64>>) -> Self {
+        self.cached_input_tokens = tokens.into();
+        self
+    }
+
+    /// Set, or with `None` clear,
+    /// [`Self::cache_creation_input_tokens`](field@Self::cache_creation_input_tokens).
+    pub fn cache_creation_input_tokens(mut self, tokens: impl Into<Option<u64>>) -> Self {
+        self.cache_creation_input_tokens = tokens.into();
+        self
+    }
+
+    /// Set, or with `None` clear,
+    /// [`Self::tool_use_prompt_tokens`](field@Self::tool_use_prompt_tokens).
+    pub fn tool_use_prompt_tokens(mut self, tokens: impl Into<Option<u64>>) -> Self {
+        self.tool_use_prompt_tokens = tokens.into();
+        self
+    }
+
+    /// Set, or with `None` clear, [`Self::reasoning_tokens`](field@Self::reasoning_tokens).
+    pub fn reasoning_tokens(mut self, tokens: impl Into<Option<u64>>) -> Self {
+        self.reasoning_tokens = tokens.into();
+        self
+    }
+
+    /// Set, or with `None` clear, [`Self::cost`](field@Self::cost).
+    pub fn cost(mut self, cost: impl Into<Option<Cost>>) -> Self {
+        self.cost = cost.into();
+        self
+    }
+}
+
+/// What one or more turns cost, in USD. `total` is what was charged.
+///
+/// A part is `None` when its source does not give it: a provider that
+/// reports only a total leaves every part `None`, and one that reports
+/// input and output leaves the cache parts `None`. A cost computed from
+/// the catalog ([`Pricing::cost`](crate::catalog::Pricing::cost)) has every
+/// part `Some`, and it prices a cache rate the catalog does not list at the
+/// input rate, so a `Some` cache part may be that estimate rather than a
+/// listed price. A part is never filled with a placeholder `0.0`. Summing
+/// costs keeps a part only when every side has it. A `None` part is left
+/// out when serialized, and an absent one reads back as `None`.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Cost {
+    /// Uncached input tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<f64>,
+    /// Output tokens, reasoning included.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<f64>,
+    /// Input tokens read from a cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<f64>,
+    /// Input tokens written to a cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<f64>,
+    /// The whole charge.
+    pub total: f64,
+}
+
+impl Cost {
+    /// A cost split into its parts, each known; `total` is their sum.
+    pub fn from_parts(input: f64, output: f64, cache_read: f64, cache_write: f64) -> Self {
+        Self {
+            input: Some(input),
+            output: Some(output),
+            cache_read: Some(cache_read),
+            cache_write: Some(cache_write),
+            total: input + output + cache_read + cache_write,
+        }
+    }
+
+    /// A cost known only as its total; every part is `None`.
+    pub fn from_total(total: f64) -> Self {
+        Self {
+            input: None,
+            output: None,
+            cache_read: None,
+            cache_write: None,
+            total,
+        }
+    }
+
+    /// Set, or with `None` clear, [`Self::input`](field@Self::input).
+    /// `total` is left as it is.
+    pub fn input(mut self, input: impl Into<Option<f64>>) -> Self {
+        self.input = input.into();
+        self
+    }
+
+    /// Set, or with `None` clear, [`Self::output`](field@Self::output).
+    /// `total` is left as it is.
+    pub fn output(mut self, output: impl Into<Option<f64>>) -> Self {
+        self.output = output.into();
+        self
+    }
+
+    /// Set, or with `None` clear, [`Self::cache_read`](field@Self::cache_read).
+    /// `total` is left as it is.
+    pub fn cache_read(mut self, cache_read: impl Into<Option<f64>>) -> Self {
+        self.cache_read = cache_read.into();
+        self
+    }
+
+    /// Set, or with `None` clear, [`Self::cache_write`](field@Self::cache_write).
+    /// `total` is left as it is.
+    pub fn cache_write(mut self, cache_write: impl Into<Option<f64>>) -> Self {
+        self.cache_write = cache_write.into();
+        self
+    }
+}
+
+/// Sum one part of two costs: unknown when either side's is unknown, since
+/// a known part plus an unknown one is not known.
+fn add_part(lhs: Option<f64>, rhs: Option<f64>) -> Option<f64> {
+    Some(lhs? + rhs?)
+}
+
+/// `total` always sums. Each part sums only when both sides know it, and is
+/// `None` otherwise, so a summed part never understates what it covers.
+impl Add for Cost {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self::Output {
+        Self {
+            input: add_part(self.input, other.input),
+            output: add_part(self.output, other.output),
+            cache_read: add_part(self.cache_read, other.cache_read),
+            cache_write: add_part(self.cache_write, other.cache_write),
+            total: self.total + other.total,
+        }
     }
 }
 
@@ -389,8 +869,24 @@ impl Add for Usage {
     }
 }
 
+/// Token counters add where an unreported side adds nothing. Cost sums only
+/// when both sides have one: a turn whose cost is unknown makes the sum
+/// unknown, rather than too low. A side that reports nothing at all
+/// ([`Usage::is_reported`] is `false`) is the identity, so a fold from
+/// [`Usage::default`] keeps its first turn's cost.
 impl AddAssign for Usage {
     fn add_assign(&mut self, other: Self) {
+        if !other.is_reported() {
+            return;
+        }
+        if !self.is_reported() {
+            *self = other;
+            return;
+        }
+        self.cost = match (self.cost, other.cost) {
+            (Some(lhs), Some(rhs)) => Some(lhs + rhs),
+            _ => None,
+        };
         self.input_tokens = add_counter(self.input_tokens, other.input_tokens);
         self.output_tokens = add_counter(self.output_tokens, other.output_tokens);
         self.total_tokens = add_counter(self.total_tokens, other.total_tokens);
@@ -412,6 +908,11 @@ pub struct ProviderCapabilities {
     /// Whether native structured output can remain enabled with tool calls
     /// without suppressing them. Defaults to `false`.
     pub composes_native_output_with_tools: bool,
+    /// Whether the model answers a forced tool choice (`Required` or
+    /// `Specific`) with an error. Rig then does not force the output tool
+    /// of its own structured-output flow (the extractor). Defaults to `false`.
+    #[serde(default, skip_serializing_if = "crate::json_utils::is_false")]
+    pub rejects_forced_tool_choice: bool,
 }
 
 impl ProviderCapabilities {
@@ -419,6 +920,7 @@ impl ProviderCapabilities {
     pub const fn new() -> Self {
         Self {
             composes_native_output_with_tools: false,
+            rejects_forced_tool_choice: false,
         }
     }
 
@@ -427,114 +929,27 @@ impl ProviderCapabilities {
         self.composes_native_output_with_tools = supported;
         self
     }
-}
 
-/// Generates buffered or streamed normalized completions. Provider-specific
-/// response data belongs in [`CompletionResponse::raw`]. Only
-/// [`Self::completion_request`] requires cloning; `Arc<M>` can share a model.
-pub trait CompletionModel: WasmCompatSend + WasmCompatSync {
-    /// Generates a completion response for the given completion request.
-    fn completion(
-        &self,
-        request: CompletionRequest,
-    ) -> impl std::future::Future<Output = Result<CompletionResponse, ProviderError>> + WasmCompatSend;
-
-    /// Streams a completion response for the given completion request.
-    fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> impl std::future::Future<Output = Result<StreamingCompletionResponse, ProviderError>>
-    + WasmCompatSend;
-
-    /// Generates a completion with optional execution-local observation.
-    /// The default delegates without observations. Forwarding wrappers must
-    /// preserve the context to retain per-call identity across retries and tasks.
-    fn completion_with_context(
-        &self,
-        request: CompletionRequest,
-        _context: Option<crate::observe::AdapterContext>,
-    ) -> impl std::future::Future<Output = Result<CompletionResponse, ProviderError>> + WasmCompatSend
-    {
-        self.completion(request)
-    }
-
-    /// Optionally observe a stream, retaining context through lazy startup and drop.
-    /// The default delegates to [`Self::stream`] without provider observations.
-    fn stream_with_context(
-        &self,
-        request: CompletionRequest,
-        _context: Option<crate::observe::AdapterContext>,
-    ) -> impl std::future::Future<Output = Result<StreamingCompletionResponse, ProviderError>>
-    + WasmCompatSend {
-        self.stream(request)
-    }
-
-    /// Generates a completion request builder for the given `prompt`.
-    fn completion_request(&self, prompt: impl Into<Message>) -> CompletionRequestBuilder<Self>
-    where
-        Self: Sized + Clone,
-    {
-        CompletionRequestBuilder::new(self.clone(), prompt)
-    }
-
-    /// Provider behavior a runtime should account for when preparing requests.
-    ///
-    /// The default is conservative; see [`ProviderCapabilities`]. Override
-    /// this to declare the capabilities a provider actually supports.
-    fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities::default()
-    }
-}
-
-/// Forwards model operations through shared ownership. Request builders clone
-/// the `Arc`, not the underlying model.
-impl<M: CompletionModel + ?Sized> CompletionModel for std::sync::Arc<M> {
-    fn completion(
-        &self,
-        request: CompletionRequest,
-    ) -> impl std::future::Future<Output = Result<CompletionResponse, ProviderError>> + WasmCompatSend
-    {
-        (**self).completion(request)
-    }
-
-    fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> impl std::future::Future<Output = Result<StreamingCompletionResponse, ProviderError>>
-    + WasmCompatSend {
-        (**self).stream(request)
-    }
-
-    fn completion_with_context(
-        &self,
-        request: CompletionRequest,
-        context: Option<crate::observe::AdapterContext>,
-    ) -> impl std::future::Future<Output = Result<CompletionResponse, ProviderError>> + WasmCompatSend
-    {
-        (**self).completion_with_context(request, context)
-    }
-
-    fn stream_with_context(
-        &self,
-        request: CompletionRequest,
-        context: Option<crate::observe::AdapterContext>,
-    ) -> impl std::future::Future<Output = Result<StreamingCompletionResponse, ProviderError>>
-    + WasmCompatSend {
-        (**self).stream_with_context(request, context)
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        (**self).capabilities()
+    /// Declare whether the model rejects a forced tool choice.
+    pub const fn with_forced_tool_choice_rejected(mut self, rejected: bool) -> Self {
+        self.rejects_forced_tool_choice = rejected;
+        self
     }
 }
 
 /// Struct representing a general completion request that can be sent to a completion model provider.
+#[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionRequest {
     /// Optional model override for this request.
     pub model: Option<String>,
-    /// Conversation ending with the prompt. Must contain at least one message;
-    /// checked by [`Self::validate_message_content`].
+    /// The chat history to be sent to the completion model provider.
+    /// The very last message is the prompt.
+    ///
+    /// It must hold at least one message, and every user and assistant
+    /// message must carry content. The field is public, so this is a rule
+    /// rather than a type guarantee: [`Self::validate_message_content`]
+    /// checks it at the request boundary.
     pub chat_history: Vec<Message>,
     /// The documents to be sent to the completion model provider
     pub documents: Vec<Document>,
@@ -559,12 +974,29 @@ pub struct CompletionRequest {
     /// especially for streams consumed after the provider returns.
     #[serde(skip)]
     pub record_telemetry_content: bool,
+    /// Whether a finish reason outside the normalized vocabulary
+    /// ([`FinishReason::Other`]) ends the turn as a normal stop instead of a
+    /// failure. Defaults to `false`. The response carries the choice, so its
+    /// [`CompletionResponse::stop`], the runtimes and history replay agree.
+    /// `Other` also holds genuine failures, such as a malformed tool call or a
+    /// recitation block, so with this set the tool calls of such a reply run.
+    /// [`FinishReason::ContentFilter`] still fails the turn.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub accept_unknown_finish_reasons: bool,
+    /// Portable generation options. Precedence, lowest first: the mapped
+    /// options, then [`Self::provider_options`], then `additional_params`.
+    #[serde(default, skip_serializing_if = "GenerationOptions::is_default")]
+    pub options: GenerationOptions,
+    /// Typed per-provider options. The wire reads only the entry of its own
+    /// provider, above the mapped options and below `additional_params`.
+    #[serde(default, skip_serializing_if = "ProviderOptions::is_empty")]
+    pub provider_options: ProviderOptions,
 }
 
 impl CompletionRequest {
     /// The system instructions of this request: the content of the leading
     /// [`Message::System`] in `chat_history`, which is where
-    /// [`CompletionRequestBuilder::preamble`] places it.
+    /// [`Self::preamble`] places it.
     pub fn system_instructions(&self) -> Option<&str> {
         match self.chat_history.first() {
             Some(Message::System { content }) => Some(content.as_str()),
@@ -572,36 +1004,43 @@ impl CompletionRequest {
         }
     }
 
-    /// Returns a request error for empty history, empty user or assistant
-    /// content lists, or tool results with no content blocks. Empty strings,
-    /// including system messages, are allowed.
+    /// Reject a request with no messages, a user or assistant message with no
+    /// content, or a tool result with no content blocks. The error is
+    /// [`ProviderError::Request`] and names the role and index of the first
+    /// offending message.
     ///
-    /// Builder `send` and `stream` validate automatically. Call this before
-    /// invoking a [`CompletionModel`] directly. Response-content validation is
-    /// provider-specific and is not performed here.
+    /// Every wire rejects an empty turn, so this turns a remote 400 into a
+    /// local error. It checks the request direction only: a provider may
+    /// return empty assistant content, which the reply keeps and the
+    /// runtime judges. `System` content is a
+    /// `String` and is not checked. A tool result holding one empty text
+    /// block is not empty.
+    ///
+    /// [`Model::call`](crate::driver::Model::call),
+    /// [`Model::stream`](crate::driver::Model::stream) and their `_observed`
+    /// twins run it before encoding, so it covers
+    /// [`DynModel`](crate::DynModel), every model the bus serves and the
+    /// agent runtimes built on them. The OpenAI Responses websocket session
+    /// sends without the driver and runs it on each send. Code that encodes
+    /// a request some other way should call it first.
     pub fn validate_message_content(&self) -> Result<(), ProviderError> {
         if self.chat_history.is_empty() {
-            return Err(ProviderError::Request(
-                "request has an empty chat history; providers require at least one message"
-                    .to_owned()
-                    .into(),
+            return Err(ProviderError::request(
+                "request has an empty chat history; providers require at least one message",
             ));
         }
 
         let empty_message = |role: &str, index: usize| {
-            ProviderError::Request(
-                format!(
-                    "{role} message at index {index} has no content; \
-                     providers reject empty content blocks"
-                )
-                .into(),
-            )
+            ProviderError::request(format!(
+                "{role} message at index {index} has no content; \
+                 providers reject empty content blocks"
+            ))
         };
 
         for (index, message) in self.chat_history.iter().enumerate() {
             match message {
                 Message::System { .. } => {}
-                Message::Assistant { content, .. } => {
+                Message::Assistant(AssistantMessage { content, .. }) => {
                     if content.is_empty() {
                         return Err(empty_message("assistant", index));
                     }
@@ -610,21 +1049,13 @@ impl CompletionRequest {
                     if content.is_empty() {
                         return Err(empty_message("user", index));
                     }
-
                     for (position, item) in content.iter().enumerate() {
-                        // Keep exhaustive so new content variants must choose a
-                        // request-validation policy.
                         match item {
                             UserContent::ToolResult(result) if result.content.is_empty() => {
-                                let name = &result.name;
-                                return Err(ProviderError::Request(
-                                    format!(
-                                        "tool result for `{name}` at index {position} of the \
-                                         user message at index {index} has no content; \
-                                         providers reject empty content blocks"
-                                    )
-                                    .into(),
-                                ));
+                                return Err(ProviderError::request(format!(
+                                    "tool result for `{}` at index {position} of the user message at index {index} has no content; providers reject empty content blocks",
+                                    result.name,
+                                )));
                             }
                             UserContent::ToolResult(_)
                             | UserContent::Text(_)
@@ -666,12 +1097,12 @@ impl CompletionRequest {
             return None;
         }
 
-        let messages = documents
+        let content = documents
             .iter()
-            .map(|doc| UserContent::document(doc.to_string(), Some(DocumentMediaType::TXT)))
-            .collect::<Vec<_>>();
+            .map(|doc| UserContent::document_text(doc.to_string(), Some(DocumentMediaType::TXT)))
+            .collect();
 
-        crate::message::non_empty(messages).map(|content| Message::User { content })
+        Some(Message::User { content })
     }
 
     pub(crate) fn chat_history_with_documents(&self) -> Vec<Message> {
@@ -683,15 +1114,24 @@ impl CompletionRequest {
     }
 }
 
-/// Insert `message` at the first non-system position so document context lands
-/// after any leading system messages; telemetry and the sent request must
+/// Place the documents message `message` at the first non-system position,
+/// so document context lands after any leading system messages. A user
+/// message already there takes the documents at its front instead, so the
+/// history keeps alternating roles. Telemetry and the sent request must
 /// agree on this placement.
 fn insert_after_leading_system(chat_history: &mut Vec<Message>, message: Message) {
     let insert_at = chat_history
         .iter()
         .position(|message| !matches!(message, Message::System { .. }))
         .unwrap_or(chat_history.len());
-    chat_history.insert(insert_at, message);
+    match (chat_history.get_mut(insert_at), message) {
+        (Some(Message::User { content }), Message::User { content: documents })
+            if !content.is_empty() =>
+        {
+            content.splice(0..0, documents);
+        }
+        (_, message) => chat_history.insert(insert_at, message),
+    }
 }
 
 fn merge_provider_tools_into_additional_params(
@@ -721,7 +1161,7 @@ fn merge_provider_tools_into_additional_params(
         _ => serde_json::Map::new(),
     };
 
-    let mut merged_tools = match params_map.remove("tools") {
+    let mut merged_tools = match params_map.shift_remove("tools") {
         Some(serde_json::Value::Array(existing)) => existing,
         _ => Vec::new(),
     };
@@ -730,262 +1170,387 @@ fn merge_provider_tools_into_additional_params(
     Some(serde_json::Value::Object(params_map))
 }
 
-/// Builds completion requests, optionally retaining a model for dispatch.
-/// [`Self::build`] does not validate message content; `send` and `stream` do.
-///
-/// ```no_run
-/// use rig_core::completion::{CompletionModel, CompletionRequestBuilder};
-///
-/// # async fn run(model: impl CompletionModel) -> Result<(), Box<dyn std::error::Error>> {
-/// let response = CompletionRequestBuilder::new(model, "Who are you?")
-///     .temperature(0.5)
-///     .send()
-///     .await?;
-/// # let _ = response;
-/// # Ok(())
-/// # }
-/// ```
-#[must_use = "a request builder does nothing until built or sent"]
-pub struct CompletionRequestBuilder<M = Unbound> {
-    model: M,
-    prompt: Message,
-    request_model: Option<String>,
-    preamble: Option<String>,
-    chat_history: Vec<Message>,
-    documents: Vec<Document>,
-    tools: Vec<ToolDefinition>,
-    provider_tools: Vec<ProviderToolDefinition>,
-    temperature: Option<f64>,
-    max_tokens: Option<u64>,
-    tool_choice: Option<ToolChoice>,
-    additional_params: Option<serde_json::Value>,
-    output_schema: Option<schemars::Schema>,
-    record_telemetry_content: bool,
-}
-
-/// The model slot of a request under assembly that has no model attached:
-/// the request is built with [`CompletionRequestBuilder::build`] and
-/// dispatched elsewhere (an agent dispatches it through its bus).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Unbound;
-
-impl CompletionRequestBuilder<Unbound> {
-    /// A builder with no model attached; `build` produces the request.
-    pub fn unbound(prompt: impl Into<Message>) -> Self {
-        Self::new(Unbound, prompt)
+impl CompletionRequest {
+    /// A request whose conversation is the one user message `prompt`, with
+    /// no preamble, documents or tools. The setters below add to it and
+    /// check nothing; [`Self::validate_message_content`] checks the content
+    /// when the request is sent.
+    ///
+    /// Each setter changes the request's public fields as it is called, so
+    /// order matters where two setters touch the same field: a second
+    /// [`Self::preamble`] adds a second system message, and
+    /// [`Self::additional_params`] with a `tools` key (or `None`) replaces
+    /// provider tools added before it. Set `additional_params` first.
+    ///
+    /// ```
+    /// use rig_core::completion::CompletionRequest;
+    ///
+    /// let request = CompletionRequest::new("Who are you?")
+    ///     .preamble("You are a concise assistant.")
+    ///     .temperature(0.5);
+    /// assert_eq!(request.chat_history.len(), 2);
+    /// assert_eq!(request.temperature, Some(0.5));
+    /// ```
+    pub fn new(prompt: impl Into<Message>) -> Self {
+        Self::conversation(vec![prompt.into()])
     }
-}
 
-impl<M> CompletionRequestBuilder<M> {
-    pub fn new(model: M, prompt: impl Into<Message>) -> Self {
+    /// A request for `chat_history` as given, with nothing else set.
+    fn conversation(chat_history: Vec<Message>) -> Self {
         Self {
-            model,
-            prompt: prompt.into(),
-            request_model: None,
-            preamble: None,
-            chat_history: Vec::new(),
+            model: None,
+            chat_history,
             documents: Vec::new(),
             tools: Vec::new(),
-            provider_tools: Vec::new(),
             temperature: None,
             max_tokens: None,
             tool_choice: None,
             additional_params: None,
             output_schema: None,
             record_telemetry_content: false,
+            accept_unknown_finish_reasons: false,
+            options: GenerationOptions::default(),
+            provider_options: ProviderOptions::default(),
         }
     }
 
-    /// Sets the preamble for the completion request. It becomes the leading
-    /// [`Message::System`] of `chat_history` at build time.
-    pub fn preamble(mut self, preamble: String) -> Self {
-        self.preamble = Some(preamble);
+    /// Put `preamble` first in the conversation, as a [`Message::System`],
+    /// ahead of any system message already there.
+    pub fn preamble(mut self, preamble: impl Into<String>) -> Self {
+        self.chat_history
+            .insert(0, Message::system(preamble.into()));
         self
     }
 
-    /// Overrides the model used for this request.
+    /// Override the model for this request.
     pub fn model<S: Into<String>>(mut self, model: impl Into<Option<S>>) -> Self {
-        self.request_model = model.into().map(Into::into);
+        self.model = model.into().map(Into::into);
+        self.warn_if_shadowed("model", self.model.is_some());
         self
     }
 
-    /// Adds a message to the chat history for the completion request.
-    pub fn message(mut self, message: Message) -> Self {
-        self.chat_history.push(message);
-
-        self
+    /// Add `message` to the conversation, before the prompt (its last
+    /// message).
+    pub fn message(self, message: Message) -> Self {
+        self.messages([message])
     }
 
-    /// Adds a list of messages to the chat history for the completion request.
+    /// Add `messages` to the conversation in order, before the prompt (its
+    /// last message).
     pub fn messages(mut self, messages: impl IntoIterator<Item = Message>) -> Self {
+        let prompt = self.chat_history.pop();
         self.chat_history.extend(messages);
-
+        self.chat_history.extend(prompt);
         self
     }
 
-    /// Adds a document to the completion request.
+    /// Add a document.
     pub fn document(mut self, document: Document) -> Self {
         self.documents.push(document);
         self
     }
 
-    /// Adds a list of documents to the completion request.
-    pub fn documents(self, documents: impl IntoIterator<Item = Document>) -> Self {
-        documents
-            .into_iter()
-            .fold(self, CompletionRequestBuilder::document)
-    }
-
-    /// Adds a tool to the completion request.
-    pub fn tool(mut self, tool: ToolDefinition) -> Self {
-        self.tools.push(tool);
+    /// Add documents in order.
+    pub fn documents(mut self, documents: impl IntoIterator<Item = Document>) -> Self {
+        self.documents.extend(documents);
         self
     }
 
-    /// Adds a list of tools to the completion request.
-    pub fn tools(self, tools: Vec<ToolDefinition>) -> Self {
-        tools.into_iter().fold(self, CompletionRequestBuilder::tool)
+    /// Add a tool.
+    pub fn tool(self, tool: ToolDefinition) -> Self {
+        self.tools(vec![tool])
     }
 
-    /// Adds a provider-hosted tool to the completion request.
-    pub fn provider_tool(mut self, tool: ProviderToolDefinition) -> Self {
-        self.provider_tools.push(tool);
+    /// Add tools in order.
+    pub fn tools(mut self, tools: Vec<ToolDefinition>) -> Self {
+        let first = self.tools.is_empty();
+        self.tools.extend(tools);
+        self.warn_if_shadowed("tools", first && !self.tools.is_empty());
         self
     }
 
-    /// Adds provider-hosted tools to the completion request.
-    pub fn provider_tools(self, tools: Vec<ProviderToolDefinition>) -> Self {
-        tools
-            .into_iter()
-            .fold(self, CompletionRequestBuilder::provider_tool)
+    /// Add a provider-hosted tool: appended to `additional_params.tools`,
+    /// so a later [`Self::additional_params`] with a `tools` key replaces
+    /// it.
+    pub fn provider_tool(self, tool: ProviderToolDefinition) -> Self {
+        self.provider_tools(vec![tool])
     }
 
-    /// Merges provider-specific parameters; `None` clears existing parameters.
-    /// Provider conversion determines precedence over typed fields.
-    /// [`Self::build`] warns about overlapping sampling, model, tool, and
-    /// response-format keys without changing their values.
+    /// Add provider-hosted tools in order: appended to
+    /// `additional_params.tools`.
+    pub fn provider_tools(mut self, tools: Vec<ProviderToolDefinition>) -> Self {
+        self.additional_params =
+            merge_provider_tools_into_additional_params(self.additional_params.take(), tools);
+        self
+    }
+
+    /// Merge provider-specific parameters into the request's, key by key;
+    /// `None` clears them, provider tools included. Provider conversion determines precedence over typed fields,
+    /// and a key that overrides a typed field this request sets is logged.
     pub fn additional_params(
         mut self,
         additional_params: impl Into<Option<serde_json::Value>>,
     ) -> Self {
+        let additional_params = additional_params.into();
+        for key in shadowed_typed_fields(
+            additional_params.as_ref(),
+            &[
+                ("temperature", self.temperature.is_some()),
+                ("max_tokens", self.max_tokens.is_some()),
+                ("tool_choice", self.tool_choice.is_some()),
+                ("model", self.model.is_some()),
+                ("tools", !self.tools.is_empty()),
+                ("response_format", self.output_schema.is_some()),
+            ],
+        ) {
+            warn_shadowed(key);
+        }
         self.additional_params =
-            json_utils::merge_params(self.additional_params.take(), additional_params.into());
+            json_utils::merge_params(self.additional_params.take(), additional_params);
         self
     }
 
-    /// Sets (or, with `None`, clears) the temperature for the completion request.
+    /// Set, or with `None` clear, the temperature.
     pub fn temperature(mut self, temperature: impl Into<Option<f64>>) -> Self {
         self.temperature = temperature.into();
+        self.warn_if_shadowed("temperature", self.temperature.is_some());
         self
     }
 
-    /// Sets the output-token limit, or clears it with `None`.
-    /// Provider-specific defaults and requirements apply.
+    /// Set, or with `None` clear, the output-token limit. Provider-specific
+    /// defaults and requirements apply.
     pub fn max_tokens(mut self, max_tokens: impl Into<Option<u64>>) -> Self {
         self.max_tokens = max_tokens.into();
+        self.warn_if_shadowed("max_tokens", self.max_tokens.is_some());
         self
     }
 
-    /// Sets the tool-selection policy.
+    /// Set the tool-selection policy.
     pub fn tool_choice(mut self, tool_choice: ToolChoice) -> Self {
         self.tool_choice = Some(tool_choice);
+        self.warn_if_shadowed("tool_choice", true);
         self
     }
 
-    /// Sets a native structured-output schema for supporting providers.
-    /// This does not deserialize the returned content. `None` clears the schema.
+    /// Set, or with `None` clear, a native structured-output schema for
+    /// providers that support one. The returned content is not
+    /// deserialized.
     pub fn output_schema(mut self, schema: impl Into<Option<schemars::Schema>>) -> Self {
         self.output_schema = schema.into();
+        self.warn_if_shadowed("response_format", self.output_schema.is_some());
         self
     }
 
-    /// Sets the opt-in for sensitive content telemetry, disabled by default.
-    /// See [`CompletionRequest::record_telemetry_content`] for exposure risks and
-    /// provider coverage. Structural metadata and usage remain available when disabled.
+    /// Opt in to sensitive content telemetry, off by default. See
+    /// [`Self::record_telemetry_content`] for what that exposes.
     pub fn record_content_telemetry(mut self, enabled: bool) -> Self {
         self.record_telemetry_content = enabled;
         self
     }
 
-    /// Returns the normalized input messages used by runtime telemetry.
+    /// Accept, or with `false` refuse, finish reasons outside the normalized
+    /// vocabulary as a normal stop. See
+    /// [`Self::accept_unknown_finish_reasons`] for what that lets through.
+    ///
+    /// [`Self::accept_unknown_finish_reasons`]: field@Self::accept_unknown_finish_reasons
+    pub fn accept_unknown_finish_reasons(mut self, accept: bool) -> Self {
+        self.accept_unknown_finish_reasons = accept;
+        self
+    }
+
+    /// Replace the portable generation options with `options`, a reusable
+    /// value. Calls apply in order: this replaces every field, so a
+    /// shortcut such as [`Self::seed`] called before it is lost, and one
+    /// called after it sets its one field on top.
+    ///
+    /// ```
+    /// use rig_core::completion::{CompletionRequest, Effort, GenerationOptions};
+    ///
+    /// let shared = GenerationOptions::new().reasoning(Effort::High).seed(1);
+    /// let request = CompletionRequest::new("hi").seed(7).options(shared.clone()).seed(2);
+    /// assert_eq!(request.options, shared.seed(2));
+    /// ```
+    pub fn options(mut self, options: GenerationOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Set the reasoning level or budget in [`Self::options`](field@Self::options), as
+    /// [`GenerationOptions::reasoning`](GenerationOptions::reasoning) does,
+    /// keeping its other fields. See
+    /// [`Self::options`](method@Self::options) for the order of calls.
+    pub fn reasoning(mut self, reasoning: impl Into<Reasoning>) -> Self {
+        self.options = std::mem::take(&mut self.options).reasoning(reasoning);
+        self
+    }
+
+    /// Set the cache retention in [`Self::options`](field@Self::options), as
+    /// [`GenerationOptions::cache`](GenerationOptions::cache) does,
+    /// keeping its other fields. See
+    /// [`Self::options`](method@Self::options) for the order of calls.
+    pub fn cache(mut self, cache: CacheRetention) -> Self {
+        self.options = std::mem::take(&mut self.options).cache(cache);
+        self
+    }
+
+    /// Set the service tier in [`Self::options`](field@Self::options), as
+    /// [`GenerationOptions::service_tier`](GenerationOptions::service_tier) does,
+    /// keeping its other fields. See
+    /// [`Self::options`](method@Self::options) for the order of calls.
+    pub fn service_tier(mut self, tier: ServiceTier) -> Self {
+        self.options = std::mem::take(&mut self.options).service_tier(tier);
+        self
+    }
+
+    /// Set the answer verbosity in [`Self::options`](field@Self::options), as
+    /// [`GenerationOptions::verbosity`](GenerationOptions::verbosity) does,
+    /// keeping its other fields. See
+    /// [`Self::options`](method@Self::options) for the order of calls.
+    pub fn verbosity(mut self, verbosity: Verbosity) -> Self {
+        self.options = std::mem::take(&mut self.options).verbosity(verbosity);
+        self
+    }
+
+    /// Set whether the model may call several tools in one turn in [`Self::options`](field@Self::options), as
+    /// [`GenerationOptions::parallel_tool_calls`](GenerationOptions::parallel_tool_calls) does,
+    /// keeping its other fields. See
+    /// [`Self::options`](method@Self::options) for the order of calls.
+    pub fn parallel_tool_calls(mut self, parallel: bool) -> Self {
+        self.options = std::mem::take(&mut self.options).parallel_tool_calls(parallel);
+        self
+    }
+
+    /// Set the nucleus sampling probability mass in [`Self::options`](field@Self::options), as
+    /// [`GenerationOptions::top_p`](GenerationOptions::top_p) does,
+    /// keeping its other fields. See
+    /// [`Self::options`](method@Self::options) for the order of calls.
+    pub fn top_p(mut self, top_p: f64) -> Self {
+        self.options = std::mem::take(&mut self.options).top_p(top_p);
+        self
+    }
+
+    /// Set the sampling seed in [`Self::options`](field@Self::options), as
+    /// [`GenerationOptions::seed`](GenerationOptions::seed) does,
+    /// keeping its other fields. See
+    /// [`Self::options`](method@Self::options) for the order of calls.
+    pub fn seed(mut self, seed: u64) -> Self {
+        self.options = std::mem::take(&mut self.options).seed(seed);
+        self
+    }
+
+    /// Set the stop sequences in [`Self::options`](field@Self::options), as
+    /// [`GenerationOptions::stop`](GenerationOptions::stop) does,
+    /// keeping its other fields. See
+    /// [`Self::options`](method@Self::options) for the order of calls.
+    pub fn stop<S: Into<String>>(mut self, stop: impl IntoIterator<Item = S>) -> Self {
+        self.options = std::mem::take(&mut self.options).stop(stop);
+        self
+    }
+
+    /// Set what happens to an option the wire or model cannot honour in [`Self::options`](field@Self::options), as
+    /// [`GenerationOptions::on_unsupported`](GenerationOptions::on_unsupported) does,
+    /// keeping its other fields. See
+    /// [`Self::options`](method@Self::options) for the order of calls.
+    pub fn on_unsupported(mut self, policy: OnUnsupported) -> Self {
+        self.options = std::mem::take(&mut self.options).on_unsupported(policy);
+        self
+    }
+
+    /// Replace the typed per-provider options.
+    ///
+    /// Calls apply in order: this replaces every entry, so an entry set by
+    /// an earlier [`Self::provider_option`] is lost, and a later
+    /// [`Self::provider_option`] replaces its provider's entry on top.
+    pub fn provider_options(mut self, options: ProviderOptions) -> Self {
+        self.provider_options = options;
+        self
+    }
+
+    /// Store `options` as the entry of their provider
+    /// ([`ExtensionOptions::Ext`]), replacing that provider's entry and
+    /// keeping every other, as [`ProviderOptions::set`] does. Options that
+    /// do not serialize fail the request's encode.
+    ///
+    /// The entry is always stored under `O::Ext`'s key, the built-in
+    /// provider the options type belongs to. A third-party provider whose
+    /// extension reuses a built-in options type (say `OpenAiOptions` for an
+    /// OpenAI-compatible gateway) must store them with
+    /// [`ProviderOptions::with::<P>`](ProviderOptions::with) instead, or its
+    /// wire never reads them.
+    ///
+    /// ```
+    /// use rig_core::completion::{CompletionRequest, ProviderOptions};
+    /// use rig_core::providers::openrouter::extension::{
+    ///     OpenRouterExt, OpenRouterOptions, ProviderPreferences,
+    /// };
+    ///
+    /// let request = CompletionRequest::new("hi").provider_option(
+    ///     OpenRouterOptions::new().provider(ProviderPreferences::new().allow_fallbacks(false)),
+    /// );
+    /// assert!(request.provider_options.contains::<OpenRouterExt>());
+    /// ```
+    pub fn provider_option<O: ExtensionOptions>(mut self, options: O) -> Self {
+        self.provider_options = std::mem::take(&mut self.provider_options).set(options);
+        self
+    }
+
+    /// The input messages telemetry records: the conversation with the
+    /// documents inserted after any leading system messages.
     pub fn messages_for_telemetry(&self) -> Vec<Message> {
-        let mut chat_history = self.chat_history.clone();
-        if let Some(preamble) = &self.preamble {
-            chat_history.insert(0, Message::system(preamble.clone()));
-        }
-        chat_history.push(self.prompt.clone());
-
-        if let Some(documents) = CompletionRequest::normalized_documents_from(&self.documents) {
-            insert_after_leading_system(&mut chat_history, documents);
-        }
-
-        chat_history
+        self.chat_history_with_documents()
     }
 
-    /// Builds the completion request.
-    pub fn build(self) -> CompletionRequest {
-        self.into_model_and_request().1
+    /// Log a typed field `key` that `additional_params` already overrides.
+    fn warn_if_shadowed(&self, key: &'static str, set: bool) {
+        if !shadowed_typed_fields(self.additional_params.as_ref(), &[(key, set)]).is_empty() {
+            warn_shadowed(key);
+        }
     }
+}
 
-    /// Moves out the model and constructs the request without cloning the model.
-    fn into_model_and_request(self) -> (M, CompletionRequest) {
-        let model = self.model;
-        let mut chat_history = self.chat_history;
-        let prompt = self.prompt;
-        if let Some(preamble) = self.preamble {
-            chat_history.insert(0, Message::system(preamble));
-        }
-
-        chat_history.push(prompt);
-        // Checked before provider tools are merged in: that merge writes a
-        // `tools` key of its own, which is not a caller collision.
-        for key in shadowed_typed_fields(
-            self.additional_params.as_ref(),
-            &[
-                ("temperature", self.temperature.is_some()),
-                ("max_tokens", self.max_tokens.is_some()),
-                ("tool_choice", self.tool_choice.is_some()),
-                ("model", self.request_model.is_some()),
-                ("tools", !self.tools.is_empty()),
-                ("response_format", self.output_schema.is_some()),
-            ],
-        ) {
-            if matches!(key, "tools" | "response_format") {
-                tracing::warn!(
-                    key,
-                    "additional_params also carries `{key}`; the provider decides how it combines with the typed field"
-                );
-            } else {
-                tracing::warn!(
-                    key,
-                    "additional_params overrides the typed `{key}` field set on the same request"
-                );
-            }
-        }
-        let additional_params = merge_provider_tools_into_additional_params(
-            self.additional_params,
-            self.provider_tools,
+fn warn_shadowed(key: &str) {
+    if matches!(key, "tools" | "response_format") {
+        tracing::warn!(
+            key,
+            "additional_params also carries `{key}`; the provider decides how it combines with the typed field"
         );
+    } else {
+        tracing::warn!(
+            key,
+            "additional_params overrides the typed `{key}` field set on the same request"
+        );
+    }
+}
 
-        let request = CompletionRequest {
-            model: self.request_model,
-            chat_history,
-            documents: self.documents,
-            tools: self.tools,
-            temperature: self.temperature,
-            max_tokens: self.max_tokens,
-            tool_choice: self.tool_choice,
-            additional_params,
-            output_schema: self.output_schema,
-            record_telemetry_content: self.record_telemetry_content,
-        };
-        (model, request)
+impl From<&str> for CompletionRequest {
+    fn from(prompt: &str) -> Self {
+        Self::new(prompt)
+    }
+}
+
+impl From<String> for CompletionRequest {
+    fn from(prompt: String) -> Self {
+        Self::new(prompt)
+    }
+}
+
+impl From<Message> for CompletionRequest {
+    fn from(prompt: Message) -> Self {
+        Self::new(prompt)
+    }
+}
+
+/// The conversation as given, ending with the prompt. An empty one fails
+/// [`CompletionRequest::validate_message_content`].
+impl From<Vec<Message>> for CompletionRequest {
+    fn from(chat_history: Vec<Message>) -> Self {
+        Self::conversation(chat_history)
     }
 }
 
 /// The passthrough keys that will override a typed field the caller also set.
 /// The override itself is the documented precedence (see
-/// [`CompletionRequestBuilder::additional_params`]); naming the collisions
+/// [`CompletionRequest::additional_params`]); naming the collisions
 /// makes an accidental one visible instead of silent.
 pub(crate) fn shadowed_typed_fields<'a>(
     additional_params: Option<&serde_json::Value>,
@@ -1001,24 +1566,14 @@ pub(crate) fn shadowed_typed_fields<'a>(
         .collect()
 }
 
-impl<M: CompletionModel> CompletionRequestBuilder<M> {
-    /// Sends the completion request to the completion model provider and returns the completion response.
-    pub async fn send(self) -> Result<CompletionResponse, ProviderError> {
-        let (model, request) = self.into_model_and_request();
-        request.validate_message_content()?;
-        model.completion(request).await
-    }
-
-    /// Stream the completion request
-    pub async fn stream(self) -> Result<StreamingCompletionResponse, ProviderError> {
-        let (model, request) = self.into_model_and_request();
-        request.validate_message_content()?;
-        model.stream(request).await
-    }
-}
-
 #[cfg(test)]
 mod tests;
 
 #[cfg(test)]
 mod response_identity_tests;
+
+#[cfg(test)]
+mod plain_value_tests;
+
+#[cfg(test)]
+mod carried_tests;

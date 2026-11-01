@@ -7,12 +7,16 @@
 //! before any call exists; those equivalent no-call states were pruned because
 //! they do not enter the changed deserializer or streaming tool assembler.
 //!
-//! The complete recorded space is 2 transports × 2 models × 3 budgets × 2
-//! public surfaces = 24 cells. Model cells assert on the normalized blocking
-//! response or drive the normalized stream; agent cells prove that a
-//! partial call is never invoked and a complete control is invoked exactly
-//! once. Every cell asserts its own request, finish reason, and accumulated
-//! argument bytes from the fixture.
+//! The space is 2 transports × 2 models × 3 budgets × 2 public surfaces = 24
+//! cells. The one test is the streaming model cell at cap 4 on
+//! `ministral-3b-latest`: it drives the normalized stream and asserts its
+//! request, finish reason, and accumulated argument bytes from the fixture.
+//!
+//! Upstream kept a cut call with what its arguments state. The port instead
+//! discards a Chat call cut at an explicit `length` finish
+//! (coord-a-rig-port-discard-15): the stream yields no canonical call for it,
+//! closes its Part with the typed `Discard` reason `Length`, and leaves the
+//! argument fragments it delivered visible as `Arguments` events.
 //!
 //! | dimension | values |
 //! |---|---|
@@ -21,62 +25,49 @@
 //! | output cap | 4 empty/incomplete, 16 partial, 48 complete |
 //! | surface | model, one-turn agent |
 //!
-//! Coverage ledger: the exploratory pre-pruning product was 2 transports × 2
-//! models × 5 caps × 2 surfaces = 40. The 16 cap-1/cap-2 cells were pruned
-//! because their fixtures contain no tool call and never enter the changed
-//! paths; all remaining 24 cells are recorded. Each explicit test maps to
+//! Each test maps to
 //! `crates/rig-cassette/fixtures/cassettes/mistral/tool_truncation_matrix/<test-name>.yaml`.
-//! The two cheap served model families share a stable boundary. Assertions
-//! cover exact wire bytes/reasons, the normalized model surface, raw
-//! stream assembly, non-invocation of incomplete calls, and exact-once agent
-//! invocation of valid calls; compound impossible shapes remain unit-only.
+//! Compound impossible shapes remain unit tests.
 //!
 //! | recorded cells | exact fixture set |
 //! |---|---|
-//! | all 24 retained cells | `crates/rig-cassette/fixtures/cassettes/mistral/tool_truncation_matrix/{blocking,streaming}_{mistral_small,ministral_3b}_{low,mid,complete}_{model,agent}.yaml` |
+//! | 1 of 24 | `crates/rig-cassette/fixtures/cassettes/mistral/tool_truncation_matrix/streaming_ministral_3b_low_model.yaml` |
 
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
-};
+use rig::streaming::{DiscardReason, Item, PartKind};
+use rig_test_support::cassette_models::OpenAiModels;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use futures::StreamExt as _;
-use rig::completion::{AssistantContent, CompletionModel, FinishReason};
-use rig::prelude::*;
+use rig::completion::{AssistantContent, FinishReason};
 use rig::streaming::StreamEvent;
-use rig::tool::Tool;
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::support::{BoundMistral, with_mistral_tool_truncation_cassette_result};
+use super::support::with_mistral_tool_truncation_cassette_result;
+use rig::completion::CompletionRequest;
 
 const PREAMBLE: &str = "Call file_report exactly once. Copy the entire user incident verbatim into the required summary argument. Do not answer in prose.";
 const PROMPT: &str = "The cache warmer raced the artifact uploader, the retry storm saturated the queue, three regions were drained by hand, dashboards lagged nine minutes, and rollback took forty minutes.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Transport {
-    Blocking,
     Streaming,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Model {
-    MistralSmall,
     Ministral3b,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Budget {
     Low,
-    Mid,
     Complete,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Surface {
     Model,
-    Agent,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -91,8 +82,10 @@ struct Cell {
 struct Observation {
     finish_reason: Option<FinishReason>,
     arguments: Vec<Value>,
+    /// Each call the stream closed with a typed `Discard`: the tool its Part
+    /// started under, the reason, and the argument fragments it delivered.
+    discarded: Vec<(Option<String>, DiscardReason, String)>,
     errors: Vec<String>,
-    invocations: usize,
 }
 
 type SharedObservation = Arc<Mutex<Option<Observation>>>;
@@ -108,7 +101,6 @@ fn cell(transport: Transport, model: Model, budget: Budget, surface: Surface) ->
 
 fn model_name(model: Model) -> &'static str {
     match model {
-        Model::MistralSmall => "mistral-small-latest",
         Model::Ministral3b => "ministral-3b-latest",
     }
 }
@@ -116,14 +108,13 @@ fn model_name(model: Model) -> &'static str {
 fn max_tokens(budget: Budget) -> u64 {
     match budget {
         Budget::Low => 4,
-        Budget::Mid => 16,
         Budget::Complete => 48,
     }
 }
 
 fn tool_definition() -> rig::completion::ToolDefinition {
     rig::completion::ToolDefinition {
-        name: "file_report".to_owned(),
+        name: rig_core::message::ToolName::new("file_report").expect("tool name"),
         description: "File an incident report".to_owned(),
         parameters: json!({
             "type": "object",
@@ -133,82 +124,19 @@ fn tool_definition() -> rig::completion::ToolDefinition {
     }
 }
 
-fn request(
-    model: &(impl CompletionModel + Clone),
-    cell: Cell,
-) -> rig::completion::CompletionRequest {
-    model
-        .completion_request(PROMPT)
+fn request(cell: Cell) -> rig::completion::CompletionRequest {
+    CompletionRequest::new(PROMPT)
         .preamble(PREAMBLE.to_owned())
         .tool(tool_definition())
         .additional_params(json!({ "tool_choice": "any" }))
         .max_tokens(max_tokens(cell.budget))
-        .build()
 }
 
-fn calls(choice: &[AssistantContent]) -> Vec<Value> {
-    choice
-        .iter()
-        .filter_map(|content| match content {
-            AssistantContent::ToolCall(call) => Some(call.function.arguments.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-#[derive(Clone)]
-struct FileReport {
-    invocations: Arc<AtomicUsize>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct FileReportArgs {
-    summary: String,
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("file report failed")]
-struct FileReportError;
-
-impl Tool for FileReport {
-    const NAME: &'static str = "file_report";
-    type Error = FileReportError;
-    type Args = FileReportArgs;
-    type Output = String;
-
-    fn description(&self) -> String {
-        "File an incident report".to_owned()
-    }
-    fn parameters(&self) -> Value {
-        tool_definition().parameters
-    }
-
-    async fn call(
-        &self,
-        _context: &mut rig::tool::ToolContext,
-        args: Self::Args,
-    ) -> std::result::Result<Self::Output, Self::Error> {
-        self.invocations.fetch_add(1, Ordering::SeqCst);
-        Ok(args.summary)
-    }
-}
-
-async fn run_model(client: BoundMistral, cell: Cell) -> Observation {
+async fn run_model(client: OpenAiModels, cell: Cell) -> Observation {
     let model = client.completion(model_name(cell.model));
     match cell.transport {
-        Transport::Blocking => match model.completion(request(&model, cell)).await {
-            Ok(response) => Observation {
-                finish_reason: response.finish_reason(),
-                arguments: calls(&response.choice),
-                ..Default::default()
-            },
-            Err(error) => Observation {
-                errors: vec![error.to_string()],
-                ..Default::default()
-            },
-        },
         Transport::Streaming => {
-            let raw = match model.stream(request(&model, cell)).await {
+            let raw = match model.stream(request(cell)) {
                 Ok(raw) => raw,
                 Err(error) => {
                     return Observation {
@@ -219,67 +147,52 @@ async fn run_model(client: BoundMistral, cell: Cell) -> Observation {
             };
             let mut stream = raw;
             let mut observation = Observation::default();
+            let mut names = std::collections::HashMap::new();
+            let mut fragments: std::collections::HashMap<_, String> =
+                std::collections::HashMap::new();
             while let Some(item) = stream.next().await {
                 match item {
-                    Ok(StreamEvent::BlockEnd {
-                        block: Some(AssistantContent::ToolCall(tool_call)),
+                    Ok(Item::Event(StreamEvent::End {
+                        content: AssistantContent::ToolCall(tool_call),
                         ..
-                    }) => {
-                        observation.arguments.push(tool_call.function.arguments);
+                    })) => {
+                        observation
+                            .arguments
+                            .push(tool_call.function.arguments_value());
                     }
-                    Ok(StreamEvent::Final(terminal)) => {
-                        observation.finish_reason = terminal.finish_reason;
+                    Ok(Item::Event(StreamEvent::Start {
+                        part,
+                        kind: PartKind::ToolCall,
+                        name,
+                        ..
+                    })) => {
+                        names.insert(part, name.map(|name| name.as_str().to_owned()));
+                    }
+                    Ok(Item::Event(StreamEvent::Arguments { part, json })) => {
+                        fragments.entry(part).or_default().push_str(&json);
+                    }
+                    Ok(Item::Event(StreamEvent::Discard { part, reason })) => {
+                        observation.discarded.push((
+                            names.get(&part).cloned().flatten(),
+                            reason,
+                            fragments.remove(&part).unwrap_or_default(),
+                        ));
                     }
                     Ok(_) => {}
                     Err(error) => observation.errors.push(error.to_string()),
                 }
+            }
+            if let Ok(terminal) = stream.finish().await {
+                observation.finish_reason = terminal.finish_reason();
             }
             observation
         }
     }
 }
 
-async fn run_agent(client: BoundMistral, cell: Cell) -> Observation {
-    let invocations = Arc::new(AtomicUsize::new(0));
-    let agent = client
-        .agent(model_name(cell.model))
-        .preamble(PREAMBLE)
-        .tool(FileReport {
-            invocations: Arc::clone(&invocations),
-        })
-        .additional_params(json!({ "tool_choice": "any" }))
-        .max_tokens(max_tokens(cell.budget))
-        .default_max_turns(1)
-        .build();
-    let mut errors = Vec::new();
-    match cell.transport {
-        Transport::Blocking => {
-            if let Err(error) = agent.prompt(PROMPT).await {
-                errors.push(error.to_string());
-            }
-        }
-        Transport::Streaming => {
-            let mut stream = agent
-                .prompt(PROMPT)
-                .history(Vec::<rig::completion::Message>::new())
-                .max_turns(1)
-                .stream();
-            errors = crate::support::collect_stream_observation(&mut stream)
-                .await
-                .errors;
-        }
-    }
-    Observation {
-        errors,
-        invocations: invocations.load(Ordering::SeqCst),
-        ..Default::default()
-    }
-}
-
-async fn run_cell(client: BoundMistral, cell: Cell, observed: SharedObservation) -> Result<()> {
+async fn run_cell(client: OpenAiModels, cell: Cell, observed: SharedObservation) -> Result<()> {
     let observation = match cell.surface {
         Surface::Model => run_model(client, cell).await,
-        Surface::Agent => run_agent(client, cell).await,
     };
     *observed.lock().expect("observation mutex poisoned") = Some(observation);
     Ok(())
@@ -289,35 +202,12 @@ fn recorded_request(scenario: &str) -> Value {
     crate::cassettes::recorded_json_request("mistral", scenario)
 }
 
-fn recorded_response(scenario: &str) -> Value {
-    crate::cassettes::recorded_json_response("mistral", scenario)
-}
-
 fn recorded_chunks(scenario: &str) -> Vec<Value> {
     crate::cassettes::recorded_sse_json_frames("mistral", scenario)
 }
 
 fn recorded_finish_and_arguments(scenario: &str, transport: Transport) -> (String, Vec<String>) {
     match transport {
-        Transport::Blocking => {
-            let response = recorded_response(scenario);
-            let finish = response["choices"][0]["finish_reason"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned();
-            let arguments = response["choices"][0]["message"]["tool_calls"]
-                .as_array()
-                .map(|calls| {
-                    calls
-                        .iter()
-                        .filter_map(|call| {
-                            call["function"]["arguments"].as_str().map(str::to_owned)
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            (finish, arguments)
-        }
         Transport::Streaming => {
             let mut finish = String::new();
             let mut arguments = Vec::<String>::new();
@@ -422,6 +312,11 @@ fn assert_cell(scenario: &str, cell: Cell, observed: SharedObservation) {
             );
             assert_eq!(observation.arguments.len(), 1, "{scenario}");
             assert_eq!(observation.arguments[0]["summary"], PROMPT, "{scenario}");
+            assert!(
+                observation.discarded.is_empty(),
+                "{scenario}: a complete call is never discarded: {:?}",
+                observation.discarded
+            );
         }
         Surface::Model => {
             assert!(
@@ -434,27 +329,21 @@ fn assert_cell(scenario: &str, cell: Cell, observed: SharedObservation) {
                 Some(FinishReason::Length),
                 "{scenario}"
             );
+            // A call cut at Length is discarded: no canonical call, the
+            // typed reason Length, and its delivered fragments visible.
             assert!(
                 observation.arguments.is_empty(),
-                "{scenario}: partial call is dropped"
+                "{scenario}: the cut call yields no canonical call: {:?}",
+                observation.arguments
             );
-        }
-        Surface::Agent if complete => assert_eq!(
-            observation.invocations, 1,
-            "{scenario}: complete call invoked once"
-        ),
-        Surface::Agent => {
             assert_eq!(
-                observation.invocations, 0,
-                "{scenario}: partial call is never invoked"
-            );
-            assert!(
-                observation
-                    .errors
-                    .iter()
-                    .all(|error| !error.contains("ProviderResponseError")),
-                "{scenario}: truncation reached agent loop: {:?}",
-                observation.errors
+                observation.discarded,
+                vec![(
+                    Some("file_report".to_owned()),
+                    DiscardReason::Length,
+                    wire_arguments[0].clone(),
+                )],
+                "{scenario}: the cut call is discarded with reason Length, its fragments visible"
             );
         }
     }
@@ -468,384 +357,6 @@ async fn execute(scenario: &'static str, cell: Cell, observed: SharedObservation
 // parses source rather than macro expansion.
 
 #[tokio::test]
-async fn blocking_mistral_small_low_model() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/blocking_mistral_small_low_model";
-    let c = cell(
-        Transport::Blocking,
-        Model::MistralSmall,
-        Budget::Low,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/blocking_mistral_small_low_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_mistral_small_low_agent() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/blocking_mistral_small_low_agent";
-    let c = cell(
-        Transport::Blocking,
-        Model::MistralSmall,
-        Budget::Low,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/blocking_mistral_small_low_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_mistral_small_mid_model() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/blocking_mistral_small_mid_model";
-    let c = cell(
-        Transport::Blocking,
-        Model::MistralSmall,
-        Budget::Mid,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/blocking_mistral_small_mid_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_mistral_small_mid_agent() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/blocking_mistral_small_mid_agent";
-    let c = cell(
-        Transport::Blocking,
-        Model::MistralSmall,
-        Budget::Mid,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/blocking_mistral_small_mid_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_mistral_small_complete_model() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/blocking_mistral_small_complete_model";
-    let c = cell(
-        Transport::Blocking,
-        Model::MistralSmall,
-        Budget::Complete,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/blocking_mistral_small_complete_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_mistral_small_complete_agent() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/blocking_mistral_small_complete_agent";
-    let c = cell(
-        Transport::Blocking,
-        Model::MistralSmall,
-        Budget::Complete,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/blocking_mistral_small_complete_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_ministral_3b_low_model() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/blocking_ministral_3b_low_model";
-    let c = cell(
-        Transport::Blocking,
-        Model::Ministral3b,
-        Budget::Low,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/blocking_ministral_3b_low_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_ministral_3b_low_agent() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/blocking_ministral_3b_low_agent";
-    let c = cell(
-        Transport::Blocking,
-        Model::Ministral3b,
-        Budget::Low,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/blocking_ministral_3b_low_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_ministral_3b_mid_model() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/blocking_ministral_3b_mid_model";
-    let c = cell(
-        Transport::Blocking,
-        Model::Ministral3b,
-        Budget::Mid,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/blocking_ministral_3b_mid_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_ministral_3b_mid_agent() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/blocking_ministral_3b_mid_agent";
-    let c = cell(
-        Transport::Blocking,
-        Model::Ministral3b,
-        Budget::Mid,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/blocking_ministral_3b_mid_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_ministral_3b_complete_model() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/blocking_ministral_3b_complete_model";
-    let c = cell(
-        Transport::Blocking,
-        Model::Ministral3b,
-        Budget::Complete,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/blocking_ministral_3b_complete_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_ministral_3b_complete_agent() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/blocking_ministral_3b_complete_agent";
-    let c = cell(
-        Transport::Blocking,
-        Model::Ministral3b,
-        Budget::Complete,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/blocking_ministral_3b_complete_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_mistral_small_low_model() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/streaming_mistral_small_low_model";
-    let c = cell(
-        Transport::Streaming,
-        Model::MistralSmall,
-        Budget::Low,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/streaming_mistral_small_low_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_mistral_small_low_agent() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/streaming_mistral_small_low_agent";
-    let c = cell(
-        Transport::Streaming,
-        Model::MistralSmall,
-        Budget::Low,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/streaming_mistral_small_low_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_mistral_small_mid_model() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/streaming_mistral_small_mid_model";
-    let c = cell(
-        Transport::Streaming,
-        Model::MistralSmall,
-        Budget::Mid,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/streaming_mistral_small_mid_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_mistral_small_mid_agent() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/streaming_mistral_small_mid_agent";
-    let c = cell(
-        Transport::Streaming,
-        Model::MistralSmall,
-        Budget::Mid,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/streaming_mistral_small_mid_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_mistral_small_complete_model() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/streaming_mistral_small_complete_model";
-    let c = cell(
-        Transport::Streaming,
-        Model::MistralSmall,
-        Budget::Complete,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/streaming_mistral_small_complete_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_mistral_small_complete_agent() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/streaming_mistral_small_complete_agent";
-    let c = cell(
-        Transport::Streaming,
-        Model::MistralSmall,
-        Budget::Complete,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/streaming_mistral_small_complete_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
 async fn streaming_ministral_3b_low_model() -> Result<()> {
     const S: &str = "tool_truncation_matrix/streaming_ministral_3b_low_model";
     let c = cell(
@@ -857,111 +368,6 @@ async fn streaming_ministral_3b_low_model() -> Result<()> {
     let o = SharedObservation::default();
     with_mistral_tool_truncation_cassette_result(
         "tool_truncation_matrix/streaming_ministral_3b_low_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_ministral_3b_low_agent() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/streaming_ministral_3b_low_agent";
-    let c = cell(
-        Transport::Streaming,
-        Model::Ministral3b,
-        Budget::Low,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/streaming_ministral_3b_low_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_ministral_3b_mid_model() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/streaming_ministral_3b_mid_model";
-    let c = cell(
-        Transport::Streaming,
-        Model::Ministral3b,
-        Budget::Mid,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/streaming_ministral_3b_mid_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_ministral_3b_mid_agent() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/streaming_ministral_3b_mid_agent";
-    let c = cell(
-        Transport::Streaming,
-        Model::Ministral3b,
-        Budget::Mid,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/streaming_ministral_3b_mid_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_ministral_3b_complete_model() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/streaming_ministral_3b_complete_model";
-    let c = cell(
-        Transport::Streaming,
-        Model::Ministral3b,
-        Budget::Complete,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/streaming_ministral_3b_complete_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_ministral_3b_complete_agent() -> Result<()> {
-    const S: &str = "tool_truncation_matrix/streaming_ministral_3b_complete_agent";
-    let c = cell(
-        Transport::Streaming,
-        Model::Ministral3b,
-        Budget::Complete,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_mistral_tool_truncation_cassette_result(
-        "tool_truncation_matrix/streaming_ministral_3b_complete_agent",
         {
             let o = Arc::clone(&o);
             move |x| run_cell(x, c, o)

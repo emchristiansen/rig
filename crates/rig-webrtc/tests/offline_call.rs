@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use rig_core::providers::chatgpt::{self, realtime};
-use rig_core::providers::openai::OpenAI;
+use rig_core::providers::openai::OpenAIConfig;
 use rig_core::providers::openai::responses_api::codex_identity::CodexIdentity;
 use rig_core::providers::openai::responses_api::request_headers::RequestHeaders;
 use rig_core::providers::openai::wire::CallerIdentity;
@@ -169,10 +169,11 @@ async fn a_call_runs_end_to_end_against_local_servers() {
         Some("0.155.1".to_owned()),
     )
     .expect("an identity");
-    let provider = OpenAI::with_key(&chatgpt::DIALECT, "test-token")
+    let provider = OpenAIConfig::with_key(&chatgpt::DIALECT, "test-token")
         .with_base_url(format!("http://{http_addr}/backend-api/codex"))
         .with_account_id("acct-123")
-        .with_caller_identity(identity);
+        .with_caller_identity(identity)
+        .connect(rig_reqwest::ReqwestClient::default());
     let calls = realtime::LiveCalls::new(provider)
         .expect("the Codex backend")
         .with_identity(CodexIdentity::from_ids("session-1", "thread-1").expect("ids"))

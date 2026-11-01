@@ -20,11 +20,10 @@
 use std::collections::BTreeSet;
 
 use anyhow::Result;
-use rig::agent::run::{AgentRun, AgentRunStep, ModelTurn, ModelTurnOutcome};
+use rig::agent::run::{AgentRun, AgentRunStep, ModelTurn, ModelTurnOutcome, TurnPolicy};
 use rig::agent::{AgentHook, DispatchAction, DispatchEvent, HookContext, InvalidToolCallAction};
-use rig::completion::CompletionModel;
+use rig::completion::CompletionRequest;
 use rig::message::UserContent;
-use rig::prelude::*;
 use rig::providers::openai::{self, OpenAI};
 use rig::tool::{Tool, ToolSet};
 use serde::Deserialize;
@@ -91,8 +90,8 @@ impl AgentHook for ToolLoggerHook {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let openai = OpenAI::from_env()?.bound()?;
-    let model = openai.completion(openai::GPT_4O);
+    let openai = OpenAI::from_env()?;
+    let model = openai.completion(openai::GPT_4O).erase();
     let agent = rig::agent::AgentBuilder::new(model.clone())
         .preamble("You are a calculator. Always use the provided tools to compute results.")
         .tool(Add)
@@ -115,14 +114,13 @@ async fn main() -> Result<()> {
                 // execution of the configured `Agent`. Its transport is an
                 // explicit raw model request and therefore has no agent hooks.
                 let response = model
-                    .completion_request(prompt)
+                    .call(CompletionRequest::new(prompt)
                     .messages(history)
                     .preamble(
                         "You are a calculator. Always use the provided tools to compute results."
                             .to_string(),
                     )
-                    .tools(tool_definitions.clone())
-                    .send()
+                    .tools(tool_definitions.clone()))
                     .await?;
 
                 // The tools advertised to the provider for this turn. With
@@ -130,15 +128,14 @@ async fn main() -> Result<()> {
                 // with dynamic (RAG) tools would resolve them per turn.
                 let tool_names: BTreeSet<String> = tool_definitions
                     .iter()
-                    .map(|def| def.name.clone())
+                    .map(|def| def.name.to_string())
                     .collect();
 
                 let mut outcome = run.model_response(ModelTurn::new(
-                    response.message_id.clone(),
+                    response.head(),
                     response.choice.clone(),
                     response.usage,
-                    tool_names.clone(),
-                    tool_names,
+                    TurnPolicy::new(tool_names, None, None)?,
                     response.raw.clone(),
                 ))?;
                 while let ModelTurnOutcome::NeedsResolution(context) = outcome {
@@ -168,13 +165,12 @@ async fn main() -> Result<()> {
                         continue;
                     }
                     let name = &call.tool_call.function.name;
-                    let args = call.tool_call.function.arguments.to_string();
+                    let args = call.tool_call.function.arguments_value().to_string();
                     println!("→ executing {name}({args})");
                     let mut context = rig::tool::ToolContext::new();
                     let result = local_tools.execute(name, args, &mut context).await;
-                    results.push(UserContent::tool_result_for(
+                    results.push(UserContent::tool_result(
                         call.tool_call.id.clone(),
-                        call.tool_call.provider.clone(),
                         name.clone(),
                         result.output().clone().into_content(),
                     ));
@@ -183,7 +179,7 @@ async fn main() -> Result<()> {
                 run = run_resumed;
             }
             AgentRunStep::Done(response) => {
-                println!("✓ {}", response.output);
+                println!("✓ {}", response.output());
                 println!(
                     "  {} model call(s), {} total tokens",
                     response.completion_calls.len(),
@@ -212,7 +208,7 @@ async fn main() -> Result<()> {
         .run()
         .await?;
 
-    println!("✓ {}", resp.output);
+    println!("✓ {}", resp.output());
     println!(
         "  {} model call(s), {} total tokens",
         resp.completion_calls.len(),

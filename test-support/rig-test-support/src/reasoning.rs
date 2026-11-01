@@ -3,7 +3,6 @@
 //! These tests verify that providers can handle reasoning-enabled requests,
 //! preserve multi-turn history, and complete tool roundtrips. Visible reasoning
 //! is recorded for diagnostics when a provider emits it, but is not required.
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,33 +24,19 @@ use rig_agent::agent::ReasoningDelta;
 
 use rig_agent::agent::StepEventKind;
 
-use rig_agent::agent::StreamingError;
+use rig_agent::completion::PromptError;
 
 use rig_agent::completion;
-
-use rig_agent::completion::CompletionModel;
 
 use rig_core::message::AssistantContent;
 
 use rig_core::message::Message;
 
-use rig_core::message::Reasoning;
-
-use rig_core::message::ReasoningContent;
-
 use rig_core::message::ToolResultContent;
 
 use rig_core::message::UserContent;
 
-use rig_core::streaming::BlockClose;
-
-use rig_core::streaming::BlockKind;
-
-use rig_core::streaming::Delta;
-
-use rig_core::streaming::StreamEvent;
-
-use rig_core::streaming::StreamedUserContent;
+use rig_core::streaming::{Item, StreamEvent};
 
 use rig_core::tool::Tool;
 
@@ -67,8 +52,7 @@ Think through the counting carefully, then answer with only the integer.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ReasoningDeltaSnapshot {
-    id: String,
-    provider_id: Option<String>,
+    part: usize,
     delta: String,
     aggregated: Option<String>,
     turn: usize,
@@ -86,13 +70,12 @@ struct ReasoningDeltaHookRecorder {
 }
 
 impl ReasoningDeltaHookRecorder {
-    fn record_stream_delta(&self, id: String, provider_id: Option<String>, delta: String) {
+    fn record_stream_delta(&self, part: usize, delta: String) {
         self.timeline
             .lock()
             .expect("reasoning delta timeline lock")
             .push(ReasoningDeltaTimelineItem::Stream(ReasoningDeltaSnapshot {
-                id,
-                provider_id,
+                part,
                 delta,
                 aggregated: None,
                 turn: 1,
@@ -121,8 +104,7 @@ impl AgentHook for ReasoningDeltaHookRecorder {
             .lock()
             .expect("reasoning delta timeline lock")
             .push(ReasoningDeltaTimelineItem::Hook(ReasoningDeltaSnapshot {
-                id: event.id.to_string(),
-                provider_id: event.provider_id.map(str::to_owned),
+                part: event.part.index(),
                 delta: event.delta.to_owned(),
                 aggregated: Some(event.aggregated.to_owned()),
                 turn: ctx.turn(),
@@ -137,48 +119,47 @@ impl AgentHook for ReasoningDeltaHookRecorder {
 
 /// Drive one real provider stream through the managed agent surface and pin
 /// the `ReasoningDelta` hook contract against the emitted normalized deltas.
-pub async fn run_reasoning_delta_hook_streaming<M>(
-    model: M,
+pub async fn run_reasoning_delta_hook_streaming(
+    model: impl Into<rig_core::DynModel<rig_core::operation::Completion>>,
     additional_params: serde_json::Value,
     provider: &str,
-) where
-    M: CompletionModel + 'static,
-{
+) {
+    run_reasoning_delta_hook_streaming_with(
+        model,
+        |builder| builder.additional_params(additional_params),
+        provider,
+    )
+    .await;
+}
+
+/// [`run_reasoning_delta_hook_streaming`], with `configure` setting the
+/// agent's request options instead of raw parameters.
+pub async fn run_reasoning_delta_hook_streaming_with(
+    model: impl Into<rig_core::DynModel<rig_core::operation::Completion>>,
+    configure: impl FnOnce(AgentBuilder) -> AgentBuilder,
+    provider: &str,
+) {
     let hook = ReasoningDeltaHookRecorder::default();
     let probe = hook.clone();
-    let agent = AgentBuilder::new(model)
-        .preamble("Reason carefully before giving a concise final answer.")
-        .max_tokens(4096)
-        .additional_params(additional_params)
-        .build();
+    let agent = configure(
+        AgentBuilder::new(model)
+            .preamble("Reason carefully before giving a concise final answer.")
+            .max_tokens(4096),
+    )
+    .build();
     let mut stream = agent
         .prompt(REASONING_DELTA_HOOK_PROMPT)
         .add_hook(hook)
         .stream();
     let mut final_text = None;
-    // The provider reasoning id is announced once at the block's start; the
-    // deltas carry only the block id.
-    let mut block_provider_ids = HashMap::<String, String>::new();
 
     while let Some(item) = stream.next().await {
         match item.unwrap_or_else(|error| panic!("[{provider}] agent stream failed: {error}")) {
-            MultiTurnStreamItem::StreamAssistantItem(StreamEvent::BlockStart {
-                id,
-                kind:
-                    BlockKind::Reasoning {
-                        provider_id: Some(provider_id),
-                    },
-                ..
-            }) => {
-                block_provider_ids.insert(id.to_string(), provider_id);
-            }
-            MultiTurnStreamItem::StreamAssistantItem(StreamEvent::BlockDelta {
-                id,
-                delta: Delta::Reasoning { text: reasoning },
-            }) => {
-                let id = id.to_string();
-                let provider_id = block_provider_ids.get(&id).cloned();
-                probe.record_stream_delta(id, provider_id, reasoning);
+            MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::Reasoning {
+                part,
+                text: reasoning,
+            })) => {
+                probe.record_stream_delta(part.index(), reasoning);
             }
             MultiTurnStreamItem::FinalResponse(response) => {
                 final_text = Some(response.output().to_owned());
@@ -204,8 +185,7 @@ pub async fn run_reasoning_delta_hook_streaming<M>(
         "[{provider}] every hooked reasoning delta must be emitted"
     );
 
-    let mut aggregates = HashMap::<String, String>::new();
-    let mut provider_ids = HashMap::<String, String>::new();
+    let mut aggregates = HashMap::<usize, String>::new();
     for pair in timeline.chunks_exact(2) {
         let (ReasoningDeltaTimelineItem::Hook(hooked), ReasoningDeltaTimelineItem::Stream(emitted)) =
             (&pair[0], &pair[1])
@@ -216,30 +196,16 @@ pub async fn run_reasoning_delta_hook_streaming<M>(
         };
 
         assert_eq!(hooked.turn, 1, "[{provider}] unexpected hook turn");
-        assert_eq!(hooked.id, emitted.id, "[{provider}] correlator drift");
-        assert_eq!(
-            hooked.provider_id, emitted.provider_id,
-            "[{provider}] provider reasoning id drift"
-        );
+        assert_eq!(hooked.part, emitted.part, "[{provider}] part drift");
         assert_eq!(hooked.delta, emitted.delta, "[{provider}] delta drift");
 
-        let expected_aggregate = aggregates.entry(hooked.id.clone()).or_default();
+        let expected_aggregate = aggregates.entry(hooked.part).or_default();
         expected_aggregate.push_str(&hooked.delta);
         assert_eq!(
             hooked.aggregated.as_deref(),
             Some(expected_aggregate.as_str()),
             "[{provider}] aggregate must contain exactly this part's deltas through the current fragment"
         );
-
-        if let Some(provider_id) = &hooked.provider_id {
-            let prior = provider_ids
-                .entry(hooked.id.clone())
-                .or_insert_with(|| provider_id.clone());
-            assert_eq!(
-                prior, provider_id,
-                "[{provider}] one Rig correlator mapped to multiple provider reasoning ids"
-            );
-        }
     }
 }
 
@@ -253,13 +219,17 @@ Now suppose both trains slow down by 10 km/h after traveling half \
 the original distance. When do they meet now?";
 
 /// Model and request configuration for a two-turn reasoning-history check.
-pub struct ReasoningRoundtripAgent<M: CompletionModel> {
+pub struct ReasoningRoundtripAgent {
     /// Completion model used for both turns.
-    pub model: M,
+    pub model: rig_core::DynModel<rig_core::operation::Completion>,
     /// System instruction included in the roundtrip requests.
     pub preamble: String,
     /// Provider-specific parameters included in both requests.
     pub additional_params: Option<serde_json::Value>,
+    /// Generation options included in both requests.
+    pub options: rig_core::completion::GenerationOptions,
+    /// Typed provider options included in both requests.
+    pub provider_options: rig_core::completion::ProviderOptions,
     /// Opt-in capability flag. Most providers stream reasoning as unsigned
     /// deltas (or emit none at all), so the shared roundtrip only records
     /// reasoning for diagnostics. A provider whose wire is known to carry a
@@ -269,18 +239,40 @@ pub struct ReasoningRoundtripAgent<M: CompletionModel> {
     pub expects_signed_reasoning_block: bool,
 }
 
-impl<M> ReasoningRoundtripAgent<M>
-where
-    M: CompletionModel,
-{
+impl ReasoningRoundtripAgent {
     /// Configure the roundtrip with the shared preamble and unsigned-reasoning default.
-    pub fn new(model: M, additional_params: Option<serde_json::Value>) -> Self {
+    pub fn new(
+        model: impl Into<rig_core::DynModel<rig_core::operation::Completion>>,
+        additional_params: Option<serde_json::Value>,
+    ) -> Self {
+        let model: rig_core::DynModel<rig_core::operation::Completion> = model.into();
         Self {
             model,
             preamble: ROUNDTRIP_PREAMBLE.to_owned(),
             additional_params,
+            options: rig_core::completion::GenerationOptions::default(),
+            provider_options: rig_core::completion::ProviderOptions::new(),
             expects_signed_reasoning_block: false,
         }
+    }
+
+    /// Both requests carry `options`.
+    pub fn with_options(mut self, options: rig_core::completion::GenerationOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Both requests carry `options` as their typed provider options.
+    pub fn with_provider_options(mut self, options: rig_core::completion::ProviderOptions) -> Self {
+        self.provider_options = options;
+        self
+    }
+
+    /// Set this configuration's parameters and options on `request`.
+    fn apply(&self, request: &mut completion::CompletionRequest) {
+        request.additional_params = self.additional_params.clone();
+        request.options = self.options.clone();
+        request.provider_options = self.provider_options.clone();
     }
 
     /// See [`ReasoningRoundtripAgent::expects_signed_reasoning_block`].
@@ -291,148 +283,80 @@ where
 }
 
 /// Run and assert the two-turn streaming reasoning-history roundtrip.
-pub async fn run_reasoning_roundtrip_streaming<M>(agent: ReasoningRoundtripAgent<M>)
-where
-    M: CompletionModel,
-{
+pub async fn run_reasoning_roundtrip_streaming(agent: ReasoningRoundtripAgent) {
     run_reasoning_roundtrip_streaming_with_final(agent, |_| {}).await;
 }
 
-/// Run the streaming roundtrip and inspect each provider final with a custom oracle.
-pub async fn run_reasoning_roundtrip_streaming_with_final<M, F>(
-    agent: ReasoningRoundtripAgent<M>,
+/// Run the streaming roundtrip and inspect turn 1's response with a custom oracle.
+pub async fn run_reasoning_roundtrip_streaming_with_final<F>(
+    agent: ReasoningRoundtripAgent,
     mut inspect_final: F,
 ) where
-    M: CompletionModel,
-    F: FnMut(&rig_core::streaming::StreamFinal),
+    F: FnMut(&completion::CompletionResponse),
 {
     let turn1_prompt = Message::User {
         content: vec![UserContent::text(ROUNDTRIP_TURN1_TEXT)],
     };
 
-    let request = completion::CompletionRequest {
-        chat_history: vec![
-            Message::system(agent.preamble.clone()),
-            turn1_prompt.clone(),
-        ],
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: agent.additional_params.clone(),
-        model: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    };
+    let mut request = completion::CompletionRequest::from(vec![
+        Message::system(agent.preamble.clone()),
+        turn1_prompt.clone(),
+    ]);
+    agent.apply(&mut request);
 
-    let mut stream = agent.model.stream(request).await.expect("Turn 1 stream");
+    let mut stream = agent.model.stream(request).expect("Turn 1 stream");
 
-    let mut assistant_content = Vec::new();
-    let mut saw_reasoning_block = false;
-    let mut reasoning_delta_text = String::new();
     let mut streamed_text = String::new();
 
     while let Some(chunk) = stream.next().await {
         match chunk {
-            Ok(StreamEvent::BlockDelta {
-                delta: Delta::Text { text },
-                ..
-            }) => {
-                streamed_text.push_str(&text);
-            }
-            Ok(StreamEvent::BlockEnd {
-                end: BlockClose::Reasoning { .. },
-                block: Some(AssistantContent::Reasoning(reasoning)),
-                ..
-            }) => {
-                saw_reasoning_block = true;
-                assistant_content.push(AssistantContent::Reasoning(reasoning));
-            }
-            Ok(StreamEvent::BlockDelta {
-                delta: Delta::Reasoning { text },
-                ..
-            }) => {
-                reasoning_delta_text.push_str(&text);
-            }
-            Ok(StreamEvent::Final(response)) => inspect_final(&response),
+            Ok(Item::Event(StreamEvent::Text { text, .. })) => streamed_text.push_str(&text),
             Ok(_) => {}
             Err(error) => panic!("Turn 1 stream error: {error}"),
         }
     }
+    let response = stream.finish().await.expect("Turn 1 finishes");
+    inspect_final(&response);
 
     if agent.expects_signed_reasoning_block {
-        assert!(
-            saw_reasoning_block,
-            "Provider opted into signed reasoning but streamed no complete Reasoning block \
-             (reasoning deltas seen: {} chars). A signature-only block must not be dropped.",
-            reasoning_delta_text.len()
-        );
-
-        let signed = assistant_content.iter().any(|content| match content {
-            AssistantContent::Reasoning(reasoning) => reasoning
-                .content
-                .iter()
-                .any(|block| matches!(block, ReasoningContent::Text { signature, .. } if signature.is_some())),
+        let signed = response.choice.iter().any(|content| match content {
+            AssistantContent::Reasoning(reasoning) => reasoning.native.is_some(),
             _ => false,
         });
         assert!(
             signed,
-            "Provider opted into signed reasoning but no streamed Reasoning block carried a \
-             signature: {assistant_content:#?}"
+            "Provider opted into signed reasoning but no streamed Reasoning part carried a \
+             signature (a signature-only part must not be dropped): {:#?}",
+            response.choice
         );
-    }
-
-    // Providers like Gemini 2.5 emit thinking as deltas without signatures,
-    // so turn the deltas into a single reasoning block before round-tripping.
-    if !saw_reasoning_block && !reasoning_delta_text.is_empty() {
-        assistant_content.push(AssistantContent::Reasoning(Reasoning::new(
-            &reasoning_delta_text,
-        )));
     }
 
     assert!(!streamed_text.is_empty(), "Turn 1 produced no text output.");
 
-    assistant_content.push(AssistantContent::text(&streamed_text));
-
-    let turn1_assistant = Message::Assistant {
-        id: stream.message_id.clone(),
-        content: assistant_content,
-    };
+    // The history replays the turn exactly as it arrived.
+    let turn1_assistant = response.message().expect("Turn 1 produced content");
 
     let turn2_prompt = Message::User {
         content: vec![UserContent::text(ROUNDTRIP_TURN2_TEXT)],
     };
 
-    let request2 = completion::CompletionRequest {
-        chat_history: vec![
+    let request2 = {
+        let mut request = completion::CompletionRequest::from(vec![
             Message::system(agent.preamble.clone()),
             turn1_prompt,
             turn1_assistant,
             turn2_prompt,
-        ],
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: agent.additional_params.clone(),
-        model: None,
-        output_schema: None,
-        record_telemetry_content: false,
+        ]);
+        agent.apply(&mut request);
+        request
     };
 
-    let mut stream2 = agent.model.stream(request2).await.expect("Turn 2 stream");
+    let mut stream2 = agent.model.stream(request2).expect("Turn 2 stream");
     let mut turn2_text = String::new();
 
     while let Some(chunk) = stream2.next().await {
         match chunk {
-            Ok(StreamEvent::BlockDelta {
-                delta: Delta::Text { text },
-                ..
-            }) => {
-                turn2_text.push_str(&text);
-            }
+            Ok(Item::Event(StreamEvent::Text { text, .. })) => turn2_text.push_str(&text),
             Ok(_) => {}
             Err(error) => panic!("Turn 2 stream error: {error}"),
         }
@@ -455,93 +379,57 @@ pub async fn run_reasoning_roundtrip_streaming_with_final<M, F>(
 }
 
 /// Run and assert the two-turn nonstreaming reasoning-history roundtrip.
-pub async fn run_reasoning_roundtrip_nonstreaming<M>(agent: ReasoningRoundtripAgent<M>)
-where
-    M: CompletionModel,
-{
+pub async fn run_reasoning_roundtrip_nonstreaming(agent: ReasoningRoundtripAgent) {
     let turn1_prompt = Message::User {
         content: vec![UserContent::text(ROUNDTRIP_TURN1_TEXT)],
     };
 
-    let request = completion::CompletionRequest {
-        chat_history: vec![
-            Message::system(agent.preamble.clone()),
-            turn1_prompt.clone(),
-        ],
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: agent.additional_params.clone(),
-        model: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    };
+    let mut request = completion::CompletionRequest::from(vec![
+        Message::system(agent.preamble.clone()),
+        turn1_prompt.clone(),
+    ]);
+    agent.apply(&mut request);
 
-    let response = agent
-        .model
-        .completion(request)
-        .await
-        .expect("Turn 1 completion");
+    let response = agent.model.call(request).await.expect("Turn 1 completion");
 
-    let mut text_parts = String::new();
-
-    for content in response.choice.iter() {
-        match content {
-            AssistantContent::Reasoning(_) => {}
-            AssistantContent::Text(text) => {
-                text_parts.push_str(&text.text);
-            }
-            _ => {}
-        }
-    }
+    let text_parts: String = response
+        .choice
+        .iter()
+        .filter_map(crate::support::block_text)
+        .collect();
 
     assert!(
         !text_parts.is_empty(),
         "Turn 1 non-streaming response has no text output."
     );
 
-    let turn1_assistant = Message::Assistant {
-        id: response.message_id,
-        content: response.choice,
-    };
+    let turn1_assistant = response.message().expect("Turn 1 produced content");
 
     let turn2_prompt = Message::User {
         content: vec![UserContent::text(ROUNDTRIP_TURN2_TEXT)],
     };
 
-    let request2 = completion::CompletionRequest {
-        chat_history: vec![
+    let request2 = {
+        let mut request = completion::CompletionRequest::from(vec![
             Message::system(agent.preamble.clone()),
             turn1_prompt,
             turn1_assistant,
             turn2_prompt,
-        ],
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: agent.additional_params.clone(),
-        model: None,
-        output_schema: None,
-        record_telemetry_content: false,
+        ]);
+        agent.apply(&mut request);
+        request
     };
 
     let response2 = agent
         .model
-        .completion(request2)
+        .call(request2)
         .await
         .expect("Turn 2 completion - provider may have rejected reasoning in chat history");
 
     let turn2_text: String = response2
         .choice
         .iter()
-        .filter_map(|content| match content {
-            AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
+        .filter_map(crate::support::block_text)
         .collect();
 
     assert!(
@@ -633,11 +521,10 @@ Based on the weather conditions, should I pack an umbrella or sunscreen? \
 Use the get_weather tool to check before answering.";
 
 /// Reasoning, tool, text, and termination observations from an agent stream.
+#[derive(Default)]
 pub struct StreamStats {
     /// Number of complete reasoning blocks observed.
     pub reasoning_block_count: usize,
-    /// Number of reasoning deltas observed.
-    pub reasoning_delta_count: usize,
     /// Reasoning content variant names in observation order.
     pub reasoning_content_types: Vec<&'static str>,
     /// Whether any reasoning text carried a signature.
@@ -658,86 +545,68 @@ pub struct StreamStats {
     pub got_final_response: bool,
     /// Formatted stream errors in observation order.
     pub errors: Vec<String>,
-    /// Event-kind labels in stream order for ordering assertions.
-    pub events: Vec<&'static str>,
 }
 
-impl StreamStats {
-    fn new() -> Self {
-        Self {
-            reasoning_block_count: 0,
-            reasoning_delta_count: 0,
-            reasoning_content_types: vec![],
-            reasoning_has_signature: false,
-            reasoning_has_encrypted: false,
-            tool_calls_in_stream: vec![],
-            tool_results_in_stream: 0,
-            text_chunks: 0,
-            final_turn_text: String::new(),
-            final_response_text: None,
-            got_final_response: false,
-            errors: vec![],
-            events: vec![],
-        }
-    }
-
-    /// Count complete reasoning blocks and reasoning deltas together.
-    pub fn total_reasoning(&self) -> usize {
-        self.reasoning_block_count + self.reasoning_delta_count
-    }
-
-    /// Whether reasoning was observed before the first tool call, or without a call.
-    pub fn reasoning_before_first_tool_call(&self) -> bool {
-        let first_reasoning = self
-            .events
-            .iter()
-            .position(|event| event.starts_with("reasoning"));
-        let first_tool_call = self.events.iter().position(|event| *event == "tool_call");
-
-        match (first_reasoning, first_tool_call) {
-            (Some(reasoning), Some(tool_call)) => reasoning < tool_call,
-            (Some(_), None) => true,
-            _ => false,
-        }
-    }
-}
-
-fn record_reasoning(stats: &mut StreamStats, reasoning: &Reasoning, provider: &str) {
+fn record_reasoning(
+    stats: &mut StreamStats,
+    reasoning: &rig_core::message::Reasoning,
+    provider: &str,
+) {
     stats.reasoning_block_count += 1;
-    stats.events.push("reasoning_block");
 
-    for content in &reasoning.content {
-        let type_name = match content {
-            ReasoningContent::Text { signature, .. } => {
-                if signature.is_some() {
-                    stats.reasoning_has_signature = true;
-                }
+    let item = reasoning.native.as_ref().map(|native| &native.item);
+    let has = |key: &str| {
+        item.and_then(|item| item.get(key))
+            .is_some_and(|value| value.as_str().is_none_or(|value| !value.is_empty()))
+    };
+    stats.reasoning_has_signature |= has("signature") || has("thoughtSignature");
+    stats.reasoning_has_encrypted |= has("encrypted_content");
+    stats.reasoning_content_types.push(if reasoning.redacted {
+        "Redacted"
+    } else {
+        "Text"
+    });
+
+    eprintln!(
+        "[{provider}] Reasoning block: item={:?}, types={:?}",
+        item.and_then(|item| item.get("type")),
+        stats.reasoning_content_types
+    );
+}
+
+/// Keep the known structured reasoning categories the original helper
+/// observed, through their actual current carried representation.
+fn record_carried_reasoning(
+    stats: &mut StreamStats,
+    reasoning: &rig_core::message::CarriedReasoning,
+) {
+    use rig_core::message::CarriedReasoningPart;
+    stats.reasoning_block_count += 1;
+    for part in &reasoning.content {
+        let kind = match part {
+            CarriedReasoningPart::Text { signature, .. } => {
+                stats.reasoning_has_signature |= signature.is_some();
                 "Text"
             }
-            ReasoningContent::Encrypted(_) => {
+            CarriedReasoningPart::Summary(_) => "Summary",
+            CarriedReasoningPart::Encrypted(_) => {
                 stats.reasoning_has_encrypted = true;
                 "Encrypted"
             }
-            ReasoningContent::Summary(_) => "Summary",
-            ReasoningContent::Redacted { .. } => "Redacted",
-            ReasoningContent::OpaqueSummary(_) => "OpaqueSummary",
-            ReasoningContent::OpaqueContent(_) => "OpaqueContent",
+            CarriedReasoningPart::Redacted { .. } => "Redacted",
+            CarriedReasoningPart::OpaqueSummary(_) => "OpaqueSummary",
+            CarriedReasoningPart::OpaqueContent(_) => "OpaqueContent",
         };
-        stats.reasoning_content_types.push(type_name);
+        stats.reasoning_content_types.push(kind);
     }
-
-    eprintln!(
-        "[{provider}] Reasoning block: id={:?}, types={:?}",
-        reasoning.id, stats.reasoning_content_types
-    );
 }
 
 /// Drain an agent stream into observations, retaining errors for later assertions.
 pub async fn collect_stream_stats(
-    stream: impl futures::Stream<Item = Result<MultiTurnStreamItem, StreamingError>>,
+    stream: impl futures::Stream<Item = Result<MultiTurnStreamItem, PromptError>>,
     provider: &str,
 ) -> StreamStats {
-    let mut stats = StreamStats::new();
+    let mut stats = StreamStats::default();
 
     futures::pin_mut!(stream);
 
@@ -746,64 +615,29 @@ pub async fn collect_stream_stats(
             Ok(MultiTurnStreamItem::ToolCall { ref tool_call, .. }) => {
                 stats
                     .tool_calls_in_stream
-                    .push(tool_call.function.name.clone());
-                stats.events.push("tool_call");
+                    .push(tool_call.function.name.clone().into());
             }
             Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => match content {
-                StreamEvent::BlockEnd {
-                    end: BlockClose::Reasoning { .. },
-                    block: Some(AssistantContent::Reasoning(ref reasoning)),
+                Item::Event(StreamEvent::End {
+                    content: AssistantContent::Reasoning(ref reasoning),
                     ..
-                } => {
+                }) => {
                     record_reasoning(&mut stats, reasoning, provider);
                 }
-                StreamEvent::BlockDelta {
-                    delta: Delta::Reasoning { .. },
+                Item::Event(StreamEvent::End {
+                    content: AssistantContent::CarriedReasoning(ref reasoning),
                     ..
-                } => {
-                    stats.reasoning_delta_count += 1;
-                    if stats.events.last() != Some(&"reasoning_delta") {
-                        stats.events.push("reasoning_delta");
-                    }
-                }
-                StreamEvent::BlockDelta {
-                    delta: Delta::Text { ref text },
-                    ..
-                } => {
+                }) => record_carried_reasoning(&mut stats, reasoning),
+                Item::Event(StreamEvent::Text { ref text, .. }) => {
                     stats.text_chunks += 1;
                     stats.final_turn_text.push_str(text);
-                    if stats.events.last() != Some(&"text") {
-                        stats.events.push("text");
-                    }
                 }
-                StreamEvent::BlockDelta {
-                    delta: Delta::ToolName { .. } | Delta::ToolArguments { .. },
-                    ..
-                } => {
-                    if stats.events.last() != Some(&"tool_call_delta") {
-                        stats.events.push("tool_call_delta");
-                    }
-                }
-                StreamEvent::Final(_) => {
-                    stats.events.push("final");
-                }
-                StreamEvent::Unknown(_) => {
-                    stats.events.push("unknown");
-                }
-                StreamEvent::BlockStart { .. }
-                | StreamEvent::BlockDelta {
-                    delta: Delta::TextMeta { .. },
-                    ..
-                }
-                | StreamEvent::BlockEnd { .. } => {}
+                Item::Event(_) | Item::Unknown(_) => {}
             },
-            Ok(MultiTurnStreamItem::StreamUserItem(ref content)) => match content {
-                StreamedUserContent::ToolResult { .. } => {
-                    stats.tool_results_in_stream += 1;
-                    stats.final_turn_text.clear();
-                    stats.events.push("tool_result");
-                }
-            },
+            Ok(MultiTurnStreamItem::ToolResult { .. }) => {
+                stats.tool_results_in_stream += 1;
+                stats.final_turn_text.clear();
+            }
             Ok(MultiTurnStreamItem::FinalResponse(response)) => {
                 stats.final_response_text = Some(response.output().to_owned());
                 stats.got_final_response = true;
@@ -974,7 +808,7 @@ pub fn assert_chat_history_preserves_reasoning_tool_roundtrip(
                     }
                 }
             }
-            Message::Assistant { content, .. } => {
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
                 let mut assistant_text = String::new();
 
                 for item in content.iter() {

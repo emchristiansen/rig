@@ -11,10 +11,12 @@
 //! ```
 
 use std::fmt;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    completion::UnsupportedOption,
     http_client,
     memory::MemoryError,
     observe::AdapterErrorBoundary,
@@ -119,7 +121,7 @@ pub struct ErrorReport {
     /// A provider- or tool-specific machine code, when one was reported:
     /// for a provider's reply, the transport's own code when it gave one
     /// apart from the body, else the code the body names
-    /// (`provider_response::body_code`).
+    /// ([`ProviderResponseError::machine_code`]).
     pub code: Option<String>,
     /// The HTTP status, when the failure had one.
     pub http_status: Option<u16>,
@@ -188,14 +190,25 @@ pub struct MalformedToolInput {
     pub name: String,
     /// Durable correlation ID retained from the call for recovery actions,
     /// including tool results and rollback.
-    pub id: crate::message::ToolCallId,
+    pub id: crate::message::CallId,
     /// The provider's own call id(s), when the wire supplied any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<crate::message::ProviderCallId>,
+    pub provider: Option<ProviderCallEvidence>,
     /// The raw argument text, byte-for-byte as accumulated.
     pub raw: String,
     /// The JSON parser's description of what was wrong.
     pub error: String,
+}
+
+/// Provider-issued identifiers retained independently in a malformed-input diagnostic.
+/// The call correlator and the output-item id occupy their original protocol slots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderCallEvidence {
+    /// The nonempty call-correlation identifier the provider expects echoed back.
+    pub call_id: crate::message::ProviderCallId,
+    /// The exact output-item id, when the provider supplied one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
 }
 
 impl ErrorReport {
@@ -348,6 +361,16 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 #[cfg(target_family = "wasm")]
 pub type BoxError = Box<dyn std::error::Error + 'static>;
 
+/// A request-building failure shared by every clone of the error that holds
+/// it.
+#[cfg(not(target_family = "wasm"))]
+pub type SharedError = Arc<dyn std::error::Error + Send + Sync + 'static>;
+
+/// A request-building failure shared by every clone of the error that holds
+/// it.
+#[cfg(target_family = "wasm")]
+pub type SharedError = Arc<dyn std::error::Error + 'static>;
+
 /// A frame the provider sent that this client could not decode, with what
 /// was kept of it, labelled by how faithful it is.
 ///
@@ -387,8 +410,7 @@ pub struct CorruptFrame {
 pub enum FrameEvidence {
     /// The frame's text, exactly as received.
     Text(String),
-    /// The frame's bytes, exactly as received. They are not valid UTF-8, so
-    /// there is no exact text.
+    /// The frame's bytes, exactly as received, whether or not they are UTF-8.
     Bytes(Vec<u8>),
     /// Text decoded from bytes that were not all valid UTF-8, each invalid
     /// sequence replaced with U+FFFD before this client saw the frame, as the
@@ -400,6 +422,17 @@ pub enum FrameEvidence {
 }
 
 impl CorruptFrame {
+    /// Preserve a companion transport's received frame and its actual decode
+    /// reason. The bytes are kept before its decoder consumes them; this does
+    /// not parse them again or substitute a JSON parsing diagnostic.
+    #[doc(hidden)]
+    pub fn received_bytes(bytes: Vec<u8>, reason: impl fmt::Display) -> Self {
+        Self::bytes(
+            bytes,
+            <serde_json::Error as serde::de::Error>::custom(reason),
+        )
+    }
+
     /// A text frame that failed to decode, with the discriminator value the
     /// classifier read from it, if any.
     pub(crate) fn text(
@@ -499,7 +532,7 @@ impl fmt::Display for CorruptFrame {
         match &self.evidence {
             FrameEvidence::Text(text) => write!(f, "; frame: {text}"),
             FrameEvidence::Bytes(bytes) => {
-                write!(f, "; frame bytes (not UTF-8): {}", bytes.escape_ascii())
+                write!(f, "; frame bytes: {}", bytes.escape_ascii())
             }
             FrameEvidence::Decoded(text) => {
                 write!(f, "; frame decoded with U+FFFD replacement: {text}")
@@ -539,43 +572,40 @@ impl std::error::Error for CorruptFrame {
 ///     }
 /// }
 /// ```
-#[derive(Debug, thiserror::Error)]
+///
+/// Errors are `Clone`: sources are shared, so a stream that already yielded
+/// an error can hand the same error to a later caller.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
 pub enum ProviderError {
     /// A transport failure that produced no provider reply: a reset
     /// connection, a timeout, an unreadable response. A reply the server
     /// made is [`Self::ProviderResponse`].
-    #[error("HttpError: {0}")]
-    Http(http_client::Error),
+    Http(Arc<http_client::Error>),
     /// JSON serialization or deserialization failed.
-    #[error("JsonError: {0}")]
-    Json(#[from] serde_json::Error),
+    Json(Arc<serde_json::Error>),
     /// A frame of the provider's reply failed to decode. What was kept of the
     /// frame travels with it; see [`CorruptFrame`].
-    #[error("CorruptFrameError: {0}")]
-    CorruptFrame(#[source] CorruptFrame),
+    CorruptFrame(Arc<CorruptFrame>),
     /// A URL could not be parsed.
-    #[error("UrlError: {0}")]
-    Url(#[from] url::ParseError),
+    Url(url::ParseError),
     /// The request could not be built.
-    #[error("RequestError: {0}")]
-    Request(#[from] BoxError),
+    Request(SharedError),
     /// The reply decoded but does not answer the request.
-    #[error("ResponseError: {0}")]
     Response(String),
-    /// The provider reported a failure without a preserved reply.
-    #[error("ProviderError: {0}")]
+    /// The provider reported a failure without a preserved reply: a Rig
+    /// diagnostic, never classified as retryable. A provider's own error
+    /// payload belongs in [`Self::ProviderResponse`], whose envelope decides
+    /// its code and retry verdict; never put provider JSON here.
     Provider(String),
     /// The provider's reply, preserved: a non-success status with its body, a
     /// 2xx error envelope, or a non-HTTP transport's error payload.
-    #[error("ProviderResponseError: {0}")]
     ProviderResponse(ProviderResponseError),
     /// The provider rejected the configured credentials with 401 or 403.
-    #[error("invalid authentication: {0}")]
     InvalidAuthentication(ProviderResponseError),
     /// A request for an existing context-cache handle answered 403 or 404.
     /// The reply's body is the provider's explanation, which can name a
     /// cause other than expiry, such as a credential or quota failure.
-    #[error("cached content `{name}` is expired or was deleted: {}", response.body)]
     CacheExpired {
         /// The cache handle the request named.
         name: String,
@@ -583,13 +613,8 @@ pub enum ProviderError {
         response: ProviderResponseError,
     },
     /// The provider returned vectors of a width other than the one the caller
-    /// declared through
-    /// [`embedding`](crate::driver::HasEmbedding::embedding)'s `ndims`
-    /// argument. Raised only when the width was set explicitly.
-    #[error(
-        "{provider} embedding response returned {returned}-dimension vectors, but the model was \
-         created with {requested} dimensions; this provider does not resize embeddings"
-    )]
+    /// declared through an embedding wire's `ndims` argument. Raised only
+    /// when the width was set explicitly.
     MismatchedDimensions {
         /// Provider whose response disagreed with the declared width.
         provider: String,
@@ -598,9 +623,82 @@ pub enum ProviderError {
         /// Width the provider actually returned.
         returned: usize,
     },
+    /// A failure a relay delivered as its report, such as a stream relayed
+    /// over the effect bus. It reports as the relayed report, unchanged.
+    Relayed(Box<ErrorReport>),
+    /// The reply stopped before the provider ended it: its frames ran out,
+    /// or the runtime stopped, without the provider's end.
+    Truncated,
+    /// A [`GenerationOptions`](crate::completion::GenerationOptions) field
+    /// the wire or model cannot honour, under
+    /// [`OnUnsupported::Error`](crate::completion::OnUnsupported::Error).
+    UnsupportedOption(UnsupportedOption),
+}
+
+impl fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Http(error) => write!(f, "HttpError: {error}"),
+            Self::Json(error) => write!(f, "JsonError: {error}"),
+            Self::CorruptFrame(error) => write!(f, "CorruptFrameError: {error}"),
+            Self::Url(error) => write!(f, "UrlError: {error}"),
+            Self::Request(error) => write!(f, "RequestError: {error}"),
+            Self::Response(message) => write!(f, "ResponseError: {message}"),
+            Self::Provider(message) => write!(f, "ProviderError: {message}"),
+            Self::ProviderResponse(response) => write!(f, "ProviderResponseError: {response}"),
+            Self::InvalidAuthentication(response) => {
+                write!(f, "invalid authentication: {response}")
+            }
+            Self::CacheExpired { name, response } => write!(
+                f,
+                "cached content `{name}` is expired or was deleted: {}",
+                response.body
+            ),
+            Self::MismatchedDimensions {
+                provider,
+                requested,
+                returned,
+            } => write!(
+                f,
+                "{provider} embedding response returned {returned}-dimension vectors, but the \
+                 model was created with {requested} dimensions; this provider does not resize \
+                 embeddings"
+            ),
+            Self::Relayed(report) => f.write_str(&report.message),
+            Self::Truncated => {
+                f.write_str("ResponseError: the reply ended before the provider ended it")
+            }
+            Self::UnsupportedOption(option) => write!(f, "RequestError: {option}"),
+        }
+    }
+}
+
+/// The source is the shared error itself, not its `Arc`, so callers can
+/// downcast it.
+impl std::error::Error for ProviderError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Json(error) => Some(&**error),
+            Self::CorruptFrame(error) => Some(&**error),
+            Self::Url(error) => Some(error),
+            Self::Request(error) => Some(&**error),
+            _ => None,
+        }
+    }
+}
+
+impl From<url::ParseError> for ProviderError {
+    fn from(error: url::ParseError) -> Self {
+        Self::Url(error)
+    }
 }
 
 impl ProviderError {
+    /// A request that could not be built, for the given reason.
+    pub fn request(reason: impl Into<BoxError>) -> Self {
+        Self::Request(Arc::from(reason.into()))
+    }
+
     /// Preserves the status and verbatim body as [`Self::ProviderResponse`],
     /// including error envelopes returned with 2xx statuses.
     pub fn from_http_response(status: http::StatusCode, body: impl Into<String>) -> Self {
@@ -608,9 +706,9 @@ impl ProviderError {
     }
 
     /// Preserves a verbatim provider error body with no HTTP status as
-    /// [`Self::ProviderResponse`].
+    /// [`Self::ProviderResponse`] (see [`ProviderResponseError::from_body`]).
     pub fn from_provider_body(body: impl Into<String>) -> Self {
-        Self::ProviderResponse(ProviderResponseError::without_status(body))
+        Self::ProviderResponse(ProviderResponseError::from_body(body))
     }
 
     /// Converts a non-success reply the transport reported as an error to
@@ -623,7 +721,7 @@ impl ProviderError {
                 body,
                 headers,
             } => Self::from_http_response(status, body).with_response_headers(Some(headers)),
-            other => Self::Http(other),
+            other => Self::Http(Arc::new(other)),
         }
     }
 
@@ -633,23 +731,30 @@ impl ProviderError {
             Self::Http(_) => ErrorKind::Http,
             Self::Json(_) | Self::CorruptFrame(_) => ErrorKind::Json,
             Self::Url(_) => ErrorKind::Url,
-            Self::Request(_) => ErrorKind::Request,
-            Self::Response(_) | Self::MismatchedDimensions { .. } => ErrorKind::Response,
+            Self::Request(_) | Self::UnsupportedOption(_) => ErrorKind::Request,
+            Self::Response(_) | Self::MismatchedDimensions { .. } | Self::Truncated => {
+                ErrorKind::Response
+            }
             Self::Provider(_) => ErrorKind::Provider,
             Self::ProviderResponse(_)
             | Self::InvalidAuthentication(_)
             | Self::CacheExpired { .. } => ErrorKind::ProviderResponse,
+            Self::Relayed(report) => report.kind,
         }
     }
 
     /// Classifies transport failures with [`transient_transport`] and
-    /// preserved replies with [`ProviderResponseError::is_retryable`]. Every
-    /// other failure, rejected credentials and expired caches included, is not
-    /// retryable.
+    /// preserved replies with [`ProviderResponseError::is_retryable`]; a
+    /// truncated reply is retryable. Every other failure, rejected
+    /// credentials and expired caches included, is not retryable.
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Http(error) => transient_transport(error),
             Self::ProviderResponse(response) => response.is_retryable(),
+            Self::Relayed(report) => report.retryable,
+            // A reply cut short, by its transport or its runtime, may end on
+            // the next attempt.
+            Self::Truncated => true,
             _ => false,
         }
     }
@@ -660,6 +765,7 @@ impl ProviderError {
             Self::ProviderResponse(response)
             | Self::InvalidAuthentication(response)
             | Self::CacheExpired { response, .. } => Some(response),
+            Self::Relayed(report) => report.provider_response.as_ref(),
             _ => None,
         }
     }
@@ -784,8 +890,37 @@ impl ProviderError {
                 name,
                 response: map(response),
             },
+            // The report restates what it read from the reply it preserves,
+            // so what the map fills reaches both. What it held is kept.
+            Self::Relayed(mut report) => {
+                if let Some(response) = report.provider_response.take() {
+                    let response = map(response);
+                    report.request_id = report
+                        .request_id
+                        .or_else(|| response.provider_request_id.clone());
+                    report.http_status = report
+                        .http_status
+                        .or_else(|| response.status.map(|status| status.as_u16()));
+                    report.code = report.code.or_else(|| response.machine_code());
+                    report.refusal |= response.refusal;
+                    report.provider_response = Some(response);
+                }
+                Self::Relayed(report)
+            }
             other => other,
         }
+    }
+}
+
+impl From<serde_json::Error> for ProviderError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(Arc::new(error))
+    }
+}
+
+impl From<BoxError> for ProviderError {
+    fn from(error: BoxError) -> Self {
+        Self::Request(Arc::from(error))
     }
 }
 
@@ -797,8 +932,10 @@ impl From<http_client::Error> for ProviderError {
 
 /// A failure to build a provider request, returned by
 /// [`Wire::encode`](crate::wire::Wire::encode). It converts only into
-/// [`ProviderError::Request`], so every provider classifies its encode
+/// [`ProviderError::Request`] or [`ProviderError::UnsupportedOption`], both
+/// of kind [`ErrorKind::Request`], so every provider classifies its encode
 /// failures alike.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 #[error(transparent)]
 pub struct EncodeError(ProviderError);
@@ -806,7 +943,20 @@ pub struct EncodeError(ProviderError);
 impl EncodeError {
     /// A request that could not be built, for the given reason.
     pub fn request(reason: impl Into<BoxError>) -> Self {
-        Self(ProviderError::Request(reason.into()))
+        Self(ProviderError::request(reason))
+    }
+
+    /// A request that sets an option the wire or model cannot honour.
+    pub fn unsupported(option: UnsupportedOption) -> Self {
+        Self(ProviderError::UnsupportedOption(option))
+    }
+
+    /// The refused option, when this error is a refusal.
+    pub fn unsupported_option(&self) -> Option<&UnsupportedOption> {
+        match &self.0 {
+            ProviderError::UnsupportedOption(option) => Some(option),
+            _ => None,
+        }
     }
 }
 
@@ -847,32 +997,35 @@ impl From<crate::message::UnreplayableProviderItem> for EncodeError {
     }
 }
 
+impl From<crate::message::UnrepresentableOpaqueContent> for EncodeError {
+    fn from(error: crate::message::UnrepresentableOpaqueContent) -> Self {
+        Self::request(error)
+    }
+}
+
+impl From<crate::message::CarriedTextReplayError> for EncodeError {
+    fn from(error: crate::message::CarriedTextReplayError) -> Self {
+        Self::request(error)
+    }
+}
+
 impl From<BoxError> for EncodeError {
     fn from(error: BoxError) -> Self {
-        Self(ProviderError::Request(error))
+        Self(ProviderError::from(error))
     }
 }
 
 impl From<http::Error> for ProviderError {
     fn from(error: http::Error) -> Self {
-        Self::Request(Box::new(error))
-    }
-}
-
-/// A client that could not be built: transport-configuration failures keep
-/// their HTTP identity, anything else (a missing key, an unreadable
-/// environment variable) is reported as a provider error.
-impl From<crate::client::ProviderClientError> for ProviderError {
-    fn from(error: crate::client::ProviderClientError) -> Self {
-        match error {
-            crate::client::ProviderClientError::Http(error) => Self::Http(error),
-            other => Self::Provider(other.to_string()),
-        }
+        Self::request(error)
     }
 }
 
 impl From<&ProviderError> for ErrorReport {
     fn from(error: &ProviderError) -> Self {
+        if let ProviderError::Relayed(report) = error {
+            return (**report).clone();
+        }
         let response = error.provider_response();
         ErrorReport {
             kind: error.kind(),
@@ -941,6 +1094,48 @@ impl From<ToolExecutionError> for ErrorReport {
     }
 }
 
+/// Rebuilds a tool failure from a dispatch report.
+///
+/// An [`ErrorKind::Tool`] report keeps its tool kind; other kinds map to the
+/// closest [`ToolErrorKind`]. Retryability, code, HTTP status, and refusal are
+/// copied, the message is model-visible, and the report is the `source()`.
+impl From<ErrorReport> for ToolExecutionError {
+    fn from(report: ErrorReport) -> Self {
+        let kind = match report.kind {
+            ErrorKind::Tool(kind) => kind,
+            ErrorKind::Timeout => ToolErrorKind::Timeout,
+            ErrorKind::Cancelled => ToolErrorKind::Cancelled,
+            ErrorKind::Denied => ToolErrorKind::PermissionDenied,
+            ErrorKind::HandlerUnavailable => ToolErrorKind::NotFound,
+            ErrorKind::Http => ToolErrorKind::Network,
+            ErrorKind::Provider | ErrorKind::ProviderResponse => ToolErrorKind::Provider,
+            ErrorKind::Json
+            | ErrorKind::Url
+            | ErrorKind::Request
+            | ErrorKind::Response
+            | ErrorKind::MemoryBackend
+            | ErrorKind::MemoryPolicy
+            | ErrorKind::Internal
+            | ErrorKind::BusClosed
+            | ErrorKind::Divergence
+            | ErrorKind::Other => ToolErrorKind::Other,
+        };
+        let mut error = if report.refusal {
+            ToolExecutionError::refused(report.message.clone())
+        } else {
+            ToolExecutionError::new(kind, report.message.clone())
+        }
+        .with_retryable(report.retryable);
+        if let Some(code) = &report.code {
+            error = error.with_code(code.clone());
+        }
+        if let Some(status) = report.http_status {
+            error = error.with_http_status(status);
+        }
+        error.with_source(report)
+    }
+}
+
 impl MemoryError {
     /// The wire form of this error.
     pub fn report(&self) -> ErrorReport {
@@ -988,7 +1183,7 @@ impl From<&VectorStoreError> for ErrorReport {
             }
             VectorStoreError::JsonError(_) => (ErrorKind::Json, None),
             VectorStoreError::DatastoreError(_) => (ErrorKind::Provider, None),
-            VectorStoreError::FilterError(_) | VectorStoreError::BuilderError(_) => {
+            VectorStoreError::FilterError(_) | VectorStoreError::SamplesOutOfRange { .. } => {
                 (ErrorKind::Request, None)
             }
             VectorStoreError::MissingIdError(_) => (ErrorKind::Response, None),
@@ -1055,6 +1250,10 @@ const _: fn() = || {
 };
 
 #[cfg(test)]
+mod carried_tests;
+#[cfg(test)]
 mod encode_tests;
+#[cfg(test)]
+mod received_bytes_tests;
 #[cfg(test)]
 mod tests;

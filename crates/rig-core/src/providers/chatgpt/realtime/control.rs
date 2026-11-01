@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use super::call::{CallId, LiveCalls};
 use super::{ClientEvent, ContextChannel, ServerEvent};
-use crate::driver::realtime::reply_error;
 use crate::error::{CorruptFrame, ProviderError};
 use crate::ws_client::{
     BoxedWebSocketConnection, ConnectOptions, Frame, WebSocketClientExt, WebSocketConnection,
@@ -65,7 +64,15 @@ impl LiveCalls {
         let connection = backend
             .connect(request, ConnectOptions::new().with_timeout(timeout))
             .await
-            .map_err(|error| reply_error(error, self.request_id_header()))?;
+            .map_err(|error| {
+                let request_id = error.non_success_headers().and_then(|headers| {
+                    crate::driver::http_transport::request_id_from(
+                        headers,
+                        self.request_id_header(),
+                    )
+                });
+                ProviderError::from_transport_error(error).with_provider_request_id(request_id)
+            })?;
         Ok(ControlSocket::from_connection(connection, call_id))
     }
 }
@@ -105,7 +112,9 @@ impl ControlSocket {
                 Some(Frame::Binary(bytes)) => {
                     String::from_utf8(bytes.to_vec()).map_err(|error| {
                         let reason = serde::de::Error::custom(error.utf8_error());
-                        ProviderError::CorruptFrame(CorruptFrame::bytes(error.into_bytes(), reason))
+                        ProviderError::CorruptFrame(
+                            CorruptFrame::bytes(error.into_bytes(), reason).into(),
+                        )
                     })?
                 }
             };

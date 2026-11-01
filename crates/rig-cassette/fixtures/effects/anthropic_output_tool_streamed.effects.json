@@ -1,6 +1,109 @@
 {
   "header": {
-    "run_spec": 1030837007388641174,
+    "stream_done": {
+      "1": [
+        {
+          "item": 24,
+          "response": {
+            "choice": [
+              {
+                "type": "toolcall",
+                "id": {
+                  "provider": "toolu_0131dNkHGcu6fHpwsL6M8Xiz"
+                },
+                "function": {
+                  "name": "final_result",
+                  "arguments": {
+                    "title": "Seattle Rust Meetup",
+                    "category": "Technology / Programming",
+                    "summary": "A local gathering for Rust programming language enthusiasts in Seattle. Attendees share projects, discuss best practices, explore new Rust features, and network with fellow developers passionate about systems programming and memory-safe software development."
+                  }
+                },
+                "native": {
+                  "item": {
+                    "caller": {
+                      "type": "direct"
+                    },
+                    "id": "toolu_0131dNkHGcu6fHpwsL6M8Xiz",
+                    "input": {
+                      "title": "Seattle Rust Meetup",
+                      "category": "Technology / Programming",
+                      "summary": "A local gathering for Rust programming language enthusiasts in Seattle. Attendees share projects, discuss best practices, explore new Rust features, and network with fellow developers passionate about systems programming and memory-safe software development."
+                    },
+                    "name": "final_result",
+                    "type": "tool_use"
+                  },
+                  "fingerprint": "7a0e472bffd84d95"
+                }
+              }
+            ],
+            "usage": {
+              "input_tokens": 679,
+              "output_tokens": 138,
+              "total_tokens": 817,
+              "cached_input_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cost": {
+                "input": 0.002037,
+                "output": 0.00207,
+                "cache_read": 0.0,
+                "cache_write": 0.0,
+                "total": 0.0041069999999999995
+              }
+            },
+            "message_id": "msg_011CfikXC1uPLVYewF8YV1eA",
+            "origin": {
+              "api": "anthropic.messages",
+              "provider": "anthropic",
+              "model": "claude-sonnet-4-6",
+              "response_model": "claude-sonnet-4-6",
+              "response_id": "msg_011CfikXC1uPLVYewF8YV1eA"
+            },
+            "provider_request_id": "req_011CfikXBfKKq9ELyVwkpAuo",
+            "finish_reason": "tool_calls",
+            "raw": {
+              "container": null,
+              "content": [
+                {
+                  "caller": {
+                    "type": "direct"
+                  },
+                  "id": "toolu_0131dNkHGcu6fHpwsL6M8Xiz",
+                  "input": {
+                    "title": "Seattle Rust Meetup",
+                    "category": "Technology / Programming",
+                    "summary": "A local gathering for Rust programming language enthusiasts in Seattle. Attendees share projects, discuss best practices, explore new Rust features, and network with fellow developers passionate about systems programming and memory-safe software development."
+                  },
+                  "name": "final_result",
+                  "type": "tool_use"
+                }
+              ],
+              "diagnostics": null,
+              "id": "msg_011CfikXC1uPLVYewF8YV1eA",
+              "model": "claude-sonnet-4-6",
+              "role": "assistant",
+              "stop_details": null,
+              "stop_reason": "tool_use",
+              "stop_sequence": null,
+              "type": "message",
+              "usage": {
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 0,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "inference_geo": "global",
+                "input_tokens": 679,
+                "output_tokens": 138,
+                "service_tier": "standard"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "run_spec": 14716740328437968975,
     "handlers": [
       {
         "key": "golden/model:default",
@@ -91,11 +194,7 @@
             {
               "type": "toolcall",
               "id": {
-                "origin": "explicit",
-                "id": "toolu_01GgNEUDumBo7WZMM6qMidZn"
-              },
-              "provider": {
-                "call_id": "toolu_01GgNEUDumBo7WZMM6qMidZn"
+                "provider": "toolu_0131dNkHGcu6fHpwsL6M8Xiz"
               },
               "function": {
                 "name": "final_result",
@@ -105,8 +204,22 @@
                   "summary": "A local gathering for Rust programming language enthusiasts in Seattle. Attendees share projects, discuss best practices, explore new Rust features, and network with fellow developers passionate about systems programming and memory-safe software development."
                 }
               },
-              "signature": null,
-              "additional_params": null
+              "native": {
+                "item": {
+                  "caller": {
+                    "type": "direct"
+                  },
+                  "id": "toolu_0131dNkHGcu6fHpwsL6M8Xiz",
+                  "input": {
+                    "title": "Seattle Rust Meetup",
+                    "category": "Technology / Programming",
+                    "summary": "A local gathering for Rust programming language enthusiasts in Seattle. Attendees share projects, discuss best practices, explore new Rust features, and network with fellow developers passionate about systems programming and memory-safe software development."
+                  },
+                  "name": "final_result",
+                  "type": "tool_use"
+                },
+                "fingerprint": "7a0e472bffd84d95"
+              }
             }
           ],
           "usage": {
@@ -114,515 +227,298 @@
             "output_tokens": 138,
             "total_tokens": 817,
             "cached_input_tokens": 0,
-            "cache_creation_input_tokens": 0
+            "cache_creation_input_tokens": 0,
+            "cost": {
+              "input": 0.002037,
+              "output": 0.00207,
+              "cache_read": 0.0,
+              "cache_write": 0.0,
+              "total": 0.0041069999999999995
+            }
           },
-          "message_id": "msg_011CfLccqL7BL1hUWEhUi3xw",
-          "response_id": null,
-          "provider_request_id": "req_011CfLccoe9uGkgpsPVD2Zmn",
+          "message_id": "msg_011CfikXC1uPLVYewF8YV1eA",
+          "origin": {
+            "api": "anthropic.messages",
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-6",
+            "response_model": "claude-sonnet-4-6",
+            "response_id": "msg_011CfikXC1uPLVYewF8YV1eA"
+          },
+          "provider_request_id": "req_011CfikXBfKKq9ELyVwkpAuo",
           "finish_reason": "tool_calls",
-          "provider": "anthropic",
-          "model": "claude-sonnet-4-6",
           "raw": {
-            "usage": {
-              "output_tokens": 138,
-              "input_tokens": 679,
-              "cache_creation_input_tokens": 0,
-              "cache_creation": {
-                "ephemeral_5m_input_tokens": 0,
-                "ephemeral_1h_input_tokens": 0
-              },
-              "cache_read_input_tokens": 0
-            },
+            "container": null,
+            "content": [
+              {
+                "caller": {
+                  "type": "direct"
+                },
+                "id": "toolu_0131dNkHGcu6fHpwsL6M8Xiz",
+                "input": {
+                  "title": "Seattle Rust Meetup",
+                  "category": "Technology / Programming",
+                  "summary": "A local gathering for Rust programming language enthusiasts in Seattle. Attendees share projects, discuss best practices, explore new Rust features, and network with fellow developers passionate about systems programming and memory-safe software development."
+                },
+                "name": "final_result",
+                "type": "tool_use"
+              }
+            ],
+            "diagnostics": null,
+            "id": "msg_011CfikXC1uPLVYewF8YV1eA",
+            "model": "claude-sonnet-4-6",
+            "role": "assistant",
+            "stop_details": null,
             "stop_reason": "tool_use",
-            "message_id": "msg_011CfLccqL7BL1hUWEhUi3xw",
-            "model": "claude-sonnet-4-6"
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 0,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "inference_geo": "global",
+              "input_tokens": 679,
+              "output_tokens": 138,
+              "service_tier": "standard"
+            }
           }
         }
       },
       "events": [
         {
-          "event": "block_start",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "kind": {
-            "kind": "tool_call"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_name",
+          "item": "event",
+          "value": {
+            "event": "start",
+            "part": 0,
+            "kind": "tool_call",
+            "source_order": {
+              "primary": 0,
+              "secondary": 0
+            },
             "name": "final_result"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": ""
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "{\"title\": \"Seattle"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "{\"title"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " Rust Meetup"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "\": \"Sea"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "\", \"category\": \"Technology"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "ttle Ru"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " /"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "st Meet"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " Programming"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "up\""
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "\", \"summary\": \"A local gathering"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": ", \"cate"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " for Rust programming"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "gory\": "
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " language"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "\"Techno"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " enthusiasts in Seattle. Attend"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "logy / "
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "ees share"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "Program"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " projects"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "ming\""
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": ", discuss best"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": ", \"summ"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " practices, explore"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "ary\": \""
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " new"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "A local"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " Rust features, and network"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " gather"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " with fellow developers passionate"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "ing for"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " about systems"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " Rust p"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " programming and memory"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "rogramm"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "-"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "ing lan"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "safe software"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "guage e"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " development."
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "nthusia"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "\"}"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "sts in "
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "Seattle"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": ". Atten"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "dees sh"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "are pro"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "jects, "
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "discuss"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " best p"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "ractice"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "s, expl"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "ore new"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " Rust f"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "eatures"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": ", and n"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "etwork "
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "with fe"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "llow de"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "veloper"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "s passi"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "onate a"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "bout sy"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "stems p"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "rogramm"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "ing and"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " memory"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "-safe s"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "oftware"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " develo"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "pment.\"}"
-          }
-        },
-        {
-          "event": "block_end",
-          "id": "wire:toolu_01GgNEUDumBo7WZMM6qMidZn",
-          "end": {
-            "close": "tool_call",
-            "on_unparseable": "error"
-          },
-          "block": {
-            "type": "toolcall",
-            "id": {
-              "origin": "explicit",
-              "id": "toolu_01GgNEUDumBo7WZMM6qMidZn"
-            },
-            "provider": {
-              "call_id": "toolu_01GgNEUDumBo7WZMM6qMidZn"
-            },
-            "function": {
-              "name": "final_result",
-              "arguments": {
-                "title": "Seattle Rust Meetup",
-                "category": "Technology / Programming",
-                "summary": "A local gathering for Rust programming language enthusiasts in Seattle. Attendees share projects, discuss best practices, explore new Rust features, and network with fellow developers passionate about systems programming and memory-safe software development."
-              }
-            },
-            "signature": null,
-            "additional_params": null
-          }
-        },
-        {
-          "event": "final",
-          "usage": {
-            "input_tokens": 679,
-            "output_tokens": 138,
-            "total_tokens": 817,
-            "cached_input_tokens": 0,
-            "cache_creation_input_tokens": 0
-          },
-          "finish_reason": "tool_calls",
-          "message_id": "msg_011CfLccqL7BL1hUWEhUi3xw",
-          "response_id": null,
-          "provider_request_id": "req_011CfLccoe9uGkgpsPVD2Zmn",
-          "provider": "anthropic",
-          "model": "claude-sonnet-4-6",
-          "raw": {
-            "usage": {
-              "output_tokens": 138,
-              "input_tokens": 679,
-              "cache_creation_input_tokens": 0,
-              "cache_creation": {
-                "ephemeral_5m_input_tokens": 0,
-                "ephemeral_1h_input_tokens": 0
+          "item": "event",
+          "value": {
+            "event": "end",
+            "part": 0,
+            "content": {
+              "type": "toolcall",
+              "id": {
+                "provider": "toolu_0131dNkHGcu6fHpwsL6M8Xiz"
               },
-              "cache_read_input_tokens": 0
-            },
-            "stop_reason": "tool_use",
-            "message_id": "msg_011CfLccqL7BL1hUWEhUi3xw",
-            "model": "claude-sonnet-4-6"
+              "function": {
+                "name": "final_result",
+                "arguments": {
+                  "title": "Seattle Rust Meetup",
+                  "category": "Technology / Programming",
+                  "summary": "A local gathering for Rust programming language enthusiasts in Seattle. Attendees share projects, discuss best practices, explore new Rust features, and network with fellow developers passionate about systems programming and memory-safe software development."
+                }
+              },
+              "native": {
+                "item": {
+                  "caller": {
+                    "type": "direct"
+                  },
+                  "id": "toolu_0131dNkHGcu6fHpwsL6M8Xiz",
+                  "input": {
+                    "title": "Seattle Rust Meetup",
+                    "category": "Technology / Programming",
+                    "summary": "A local gathering for Rust programming language enthusiasts in Seattle. Attendees share projects, discuss best practices, explore new Rust features, and network with fellow developers passionate about systems programming and memory-safe software development."
+                  },
+                  "name": "final_result",
+                  "type": "tool_use"
+                },
+                "fingerprint": "7a0e472bffd84d95"
+              }
+            }
           }
         }
-      ]
+      ],
+      "stream_origin": {
+        "api": "anthropic.messages",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6"
+      }
     }
   ]
 }

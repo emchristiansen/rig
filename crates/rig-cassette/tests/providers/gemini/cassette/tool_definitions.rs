@@ -6,16 +6,13 @@
 //! replay fails with a body mismatch.
 
 use rig::completion::Message;
-use rig::prelude::*;
 use rig::providers::gemini;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::super::agent_run_support::tool_result_texts;
-use super::super::support::with_gemini_cassette;
+use super::super::request_witness_support::{NamedCase, with_gemini_request_witness_cassette};
 use super::super::tools_support::MathError;
-use crate::support::assert_nonempty_response;
 
 #[derive(Deserialize, Serialize)]
 struct TripArgs {
@@ -87,84 +84,24 @@ impl Tool for PlanTrip {
     }
 }
 
-/// Two tools sharing one name with different descriptions and behaviors, to
-/// pin which registration wins on the wire and at execution time.
-#[derive(Clone, Default)]
-struct LegacyEcho;
-
-#[derive(Deserialize, Serialize)]
-struct EchoArgs {
-    text: String,
-}
-
-impl Tool for LegacyEcho {
-    const NAME: &'static str = "echo";
-    type Error = MathError;
-    type Args = EchoArgs;
-    type Output = String;
-
-    fn description(&self) -> String {
-        "LEGACY echo implementation.".to_string()
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "text": { "type": "string", "description": "Text to echo" }
-            },
-            "required": ["text"]
-        })
-    }
-
-    async fn call(
-        &self,
-        _context: &mut rig::tool::ToolContext,
-        args: Self::Args,
-    ) -> Result<Self::Output, Self::Error> {
-        Ok(format!("legacy:{}", args.text))
-    }
-}
-
-#[derive(Clone, Default)]
-struct ModernEcho;
-
-impl Tool for ModernEcho {
-    const NAME: &'static str = "echo";
-    type Error = MathError;
-    type Args = EchoArgs;
-    type Output = String;
-
-    fn description(&self) -> String {
-        "Echo the provided text back to the caller.".to_string()
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "text": { "type": "string", "description": "Text to echo" }
-            },
-            "required": ["text"]
-        })
-    }
-
-    async fn call(
-        &self,
-        _context: &mut rig::tool::ToolContext,
-        args: Self::Args,
-    ) -> Result<Self::Output, Self::Error> {
-        Ok(format!("modern:{}", args.text))
-    }
-}
-
+/// A schema with nested objects, arrays and enums is one the projected
+/// `parameters` subset represents faithfully, so Gemini receives it as
+/// `parameters`, not as the recorded `parametersJsonSchema`.
+///
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 5,
+/// mec-rig-schema-route-1 item 1(b)): the recording is unchanged; the only
+/// request difference is that declaration 0's recorded `parametersJsonSchema`
+/// is sent, value unchanged, as `parameters`, and replay refuses interaction
+/// 0. Named losses: the plan_trip call deserializing and executing ("itinerary
+/// booked: 2 travellers to Lyon by train via Dijon -> Macon") and the
+/// non-empty confirmation, both from the refused and later interactions.
 #[tokio::test]
-async fn rich_json_schema_survives_gemini_conversion() {
-    with_gemini_cassette(
-        "tool_definitions/rich_json_schema_survives_gemini_conversion",
-        |client| async move {
-            let agent = client
-                .agent(gemini::completion::GEMINI_2_5_FLASH)
+async fn rich_json_schema_reaches_gemini_unchanged() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
+        "tool_definitions/rich_json_schema_reaches_gemini_unchanged",
+        NamedCase::RichJsonSchema,
+        |client, _clock| async move {
+            let agent = rig::AgentBuilder::new(client.completion(gemini::completion::GEMINI_2_5_FLASH))
                 .preamble("You are a travel planner. You must use the plan_trip tool to plan trips, then confirm the booking to the user.")
                 .temperature(0.0)
                 .tool(PlanTrip)
@@ -172,72 +109,28 @@ async fn rich_json_schema_survives_gemini_conversion() {
                 .build();
 
             let mut history = Vec::<Message>::new();
-            let response = agent
+            let result = agent
                 .chat(
                     "Plan a trip for 2 travellers to Lyon by train, passing through Dijon and then Macon, no notes.",
                     &mut history,
                 )
                 .await
-                .expect("rich-schema tool prompt should succeed");
-
-            let texts: Vec<String> = history.iter().flat_map(tool_result_texts).collect();
-            assert_eq!(
-                texts,
-                vec!["itinerary booked: 2 travellers to Lyon by train via Dijon -> Macon".to_string()],
-                "arguments matching the rich schema should deserialize and execute"
-            );
-            assert_nonempty_response(&response.output);
+                .map(|_| ());
+            drop(agent);
+            Ok(result)
         },
     )
-    .await;
-}
-
-/// Registering two tools under one name dedupes to a single wire declaration:
-/// the last registration's implementation and definition win, keeping the
-/// first registration's position. (Previously both declarations were sent and
-/// Gemini rejected the request with a 400.)
-#[tokio::test]
-async fn duplicate_tool_name_uses_last_registration() {
-    with_gemini_cassette(
-        "tool_definitions/duplicate_tool_name_uses_last_registration",
-        |client| async move {
-            let agent = client
-                .agent(gemini::completion::GEMINI_2_5_FLASH)
-                .preamble("You must use the echo tool, then report its output exactly.")
-                .temperature(0.0)
-                .tool(LegacyEcho)
-                .tool(ModernEcho)
-                .default_max_turns(2)
-                .build();
-
-            let mut history = Vec::<Message>::new();
-            let response = agent
-                .chat("Echo the word 'lantern'.", &mut history)
-                .await
-                .expect("the duplicated name should dedupe to one declaration");
-
-            let texts: Vec<String> = history.iter().flat_map(tool_result_texts).collect();
-            assert_eq!(
-                texts,
-                vec!["modern:lantern".to_string()],
-                "the last registration of a duplicated tool name should execute"
-            );
-            assert!(
-                response.output.to_ascii_lowercase().contains("lantern"),
-                "final answer should report the echoed word: {response:?}"
-            );
-        },
-    )
-    .await;
+    .await
 }
 
 mod derive_macro {
     use rig::completion::Message;
     use rig::rig_tool;
 
-    use super::super::super::agent_run_support::tool_result_texts;
-    use super::super::super::support::with_gemini_cassette;
-    use rig::prelude::*;
+    use super::super::super::request_witness_support::{
+        NamedCase, with_gemini_request_witness_cassette,
+    };
+
     use rig::providers::gemini;
 
     #[rig_tool(
@@ -264,13 +157,21 @@ mod derive_macro {
         }
     }
 
+    /// Exact named mismatch witness (mec-rig-132-dispositions-1 item 5,
+    /// mec-rig-schema-route-1 item 1(b)): the recording is unchanged; the
+    /// only request difference is that declaration 0's recorded
+    /// `parametersJsonSchema` is sent as `parameters`, less exactly the
+    /// schemars members the projected subset does not carry (named in
+    /// `NamedCase::MacroToolSchema`), and replay refuses interaction 0. Named
+    /// losses: the macro tool executing with the model's arguments (result
+    /// "42") and the final answer reporting 42.
     #[tokio::test]
-    async fn rig_tool_macro_schema_round_trips() {
-        with_gemini_cassette(
+    async fn rig_tool_macro_schema_round_trips() -> anyhow::Result<()> {
+        with_gemini_request_witness_cassette(
             "tool_definitions/rig_tool_macro_schema_round_trips",
-            |client| async move {
-                let agent = client
-                    .agent(gemini::completion::GEMINI_2_5_FLASH)
+            NamedCase::MacroToolSchema,
+            |client, _clock| async move {
+                let agent = rig::AgentBuilder::new(client.completion(gemini::completion::GEMINI_2_5_FLASH))
                     .preamble("You must use the macro_calculator tool for arithmetic, then report the result.")
                     .temperature(0.0)
                     .tool(MacroCalculator)
@@ -278,23 +179,14 @@ mod derive_macro {
                     .build();
 
                 let mut history = Vec::<Message>::new();
-                let response = agent
+                let result = agent
                     .chat("Multiply 6 by 7.", &mut history)
                     .await
-                    .expect("macro tool prompt should succeed");
-
-                let texts: Vec<String> = history.iter().flat_map(tool_result_texts).collect();
-                assert_eq!(
-                    texts,
-                    vec!["42".to_string()],
-                    "the macro-generated tool should execute with the model's arguments"
-                );
-                assert!(
-                    response.output.contains("42"),
-                    "final answer should report 42: {response:?}"
-                );
+                    .map(|_| ());
+                drop(agent);
+                Ok(result)
             },
         )
-        .await;
+        .await
     }
 }

@@ -10,8 +10,8 @@
 //! |---|---|
 //! | no `.await`, `async fn`, or `async` block | a provider owning its transport |
 //! | no `Arc`, `Box<dyn`, or `impl Future` in an `impl Wire` block | a wire that is not data |
-//! | no `struct`/`enum` parameter bounded by `HttpClientExt` or defaulted to `BoxedHttpClient` | the transport parameter returning |
-//! | no consumer-trait impl | a second way to be a model |
+//! | no `struct`/`enum` parameter bounded by `HttpClientExt` or defaulted to `DynHttpClient` | the transport parameter returning |
+//! | no `Transport` impl | a provider owning how its payloads are sent |
 //!
 //! `openai/responses_api/websocket.rs`, its Codex session, and GPT-Live's
 //! `chatgpt/realtime/control.rs` are exempt because each session spans many
@@ -24,7 +24,7 @@
 //! macro invocations, the `.await` rule runs a second pass over the raw token
 //! stream. Test files and `tests/` directories are skipped.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
@@ -66,28 +66,13 @@ const CREDENTIAL_EXCHANGES: &[&str] = &[
     "internal/auth.rs",
 ];
 
-/// The traits a consumer calls a model through. `driver::Bound` is the only
-/// implementation of each; providers contribute wires instead.
-const CONSUMER_TRAITS: &[&str] = &[
-    "CompletionModel",
-    "EmbeddingModel",
-    "ImageEmbeddingModel",
-    "TranscriptionModel",
-    "ImageGenerationModel",
-    "AudioGenerationModel",
-    "RerankModel",
-    "ModelLister",
-];
-
 /// Run the check over `crates/rig-core/src/providers/`.
 pub(crate) fn check(workspace: &Path) -> Result<(), String> {
     let providers = workspace.join("crates/rig-core/src/providers");
     if !providers.is_dir() {
         return Err(format!("{} is not a directory", providers.display()));
     }
-    let mut files = Vec::new();
-    walk(&providers, &mut files)?;
-    files.sort();
+    let files = crate::support::files_under(&providers, Some("rs"))?;
 
     let mut offenders = Vec::new();
     for path in &files {
@@ -122,21 +107,6 @@ pub(crate) fn check(workspace: &Path) -> Result<(), String> {
     ))
 }
 
-/// Every `.rs` file under `dir`, recursively.
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
-    let entries = std::fs::read_dir(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
-    for entry in entries {
-        let entry = entry.map_err(|error| format!("{}: {error}", dir.display()))?;
-        let path = entry.path();
-        if path.is_dir() {
-            walk(&path, out)?;
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
 struct Wires {
     file: String,
     /// Whether `async` and `.await` are allowed, as in a session or a
@@ -165,7 +135,7 @@ impl Wires {
     /// Rejects transport parameters, recognized by their bounds rather than
     /// their names: a parameter bounded by `HttpClientExt`, whether in its own
     /// bound list or the item's `where` clause, or defaulted to
-    /// `BoxedHttpClient`. Parameters without such a bound are ordinary data.
+    /// `DynHttpClient`. Parameters without such a bound are ordinary data.
     fn check_type_params(&mut self, kind: &str, ident: &syn::Ident, generics: &syn::Generics) {
         if self.session {
             return;
@@ -176,7 +146,7 @@ impl Wires {
             }
             self.report(&format!(
                 "`{kind} {ident}<{}>` — a wire holds no transport, and that parameter is \
-                 bounded by `HttpClientExt` or defaulted to `BoxedHttpClient`",
+                 bounded by `HttpClientExt` or defaulted to `DynHttpClient`",
                 parameter.ident
             ));
         }
@@ -234,7 +204,7 @@ fn source_text(node: &impl ToTokens) -> String {
 
 /// Whether `parameter` is the socket rather than parametric data: bounded by
 /// `HttpClientExt` in its own bounds or in `generics`' `where` clause, or
-/// defaulted to `BoxedHttpClient`.
+/// defaulted to `DynHttpClient`.
 fn is_transport_parameter(parameter: &syn::TypeParam, generics: &syn::Generics) -> bool {
     // Every bound stated for this parameter, wherever it was stated: the
     // inline list and each `where` predicate naming it are one bound set.
@@ -255,7 +225,7 @@ fn is_transport_parameter(parameter: &syn::TypeParam, generics: &syn::Generics) 
         || parameter
             .default
             .as_ref()
-            .is_some_and(|default| source_text(default).contains("BoxedHttpClient"))
+            .is_some_and(|default| source_text(default).contains("DynHttpClient"))
 }
 
 impl<'ast> Visit<'ast> for Wires {
@@ -304,9 +274,10 @@ impl<'ast> Visit<'ast> for Wires {
             .map(|segment| segment.ident.to_string());
 
         if let Some(name) = &implemented {
-            if CONSUMER_TRAITS.contains(&name.as_str()) {
+            if name == "Transport" {
                 self.report(&format!(
-                    "`impl {name} for {}` — the one implementation is `driver::Bound`",
+                    "`impl Transport for {}` — providers are wires; the HTTP transport is \
+                     `driver::http_transport`",
                     source_text(&item.self_ty)
                 ));
             }

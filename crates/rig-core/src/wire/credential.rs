@@ -129,7 +129,7 @@ impl std::error::Error for CredentialUnavailable {
 
 impl From<CredentialUnavailable> for ProviderError {
     fn from(refusal: CredentialUnavailable) -> Self {
-        ProviderError::Request(Box::new(refusal))
+        ProviderError::request(refusal)
     }
 }
 
@@ -233,8 +233,8 @@ impl CredentialStamp {
 /// names the problem, never the value.
 fn header_value(value: &str) -> Result<http::HeaderValue, ProviderError> {
     http::HeaderValue::from_str(value).map_err(|_| {
-        ProviderError::Request(
-            "the credential source supplied a value that cannot be sent in a header".into(),
+        ProviderError::request(
+            "the credential source supplied a value that cannot be sent in a header",
         )
     })
 }

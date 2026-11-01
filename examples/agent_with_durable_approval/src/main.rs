@@ -29,10 +29,9 @@
 
 use anyhow::Result;
 use rig::agent::InvalidToolCallAction;
-use rig::agent::run::{AgentRun, AgentRunStep, ModelTurn, ModelTurnOutcome};
-use rig::completion::CompletionModel;
+use rig::agent::run::{AgentRun, AgentRunStep, ModelTurn, ModelTurnOutcome, TurnPolicy};
+use rig::completion::CompletionRequest;
 use rig::message::{ToolResultContent, UserContent};
-use rig::prelude::*;
 use rig::providers::openai::{self, OpenAI};
 use rig::tool::{Tool, ToolSet};
 use serde::Deserialize;
@@ -148,7 +147,7 @@ async fn main() -> Result<()> {
     // A serializable `AgentRun` is a sans-IO protocol primitive. This example
     // intentionally supplies raw model transport and tool dispatch explicitly;
     // configured `Agent` execution instead always goes through `AgentRunner`.
-    let model = OpenAI::from_env()?.bound()?.completion(openai::GPT_4O);
+    let model = OpenAI::from_env()?.completion(openai::GPT_4O);
     let preamble = "You are a banking assistant. Use the tools to carry out the user's request. \
                     Call one tool at a time.";
     let mut tools = ToolSet::default();
@@ -174,22 +173,22 @@ async fn main() -> Result<()> {
             } => {
                 println!("\n→ model call #{turn}");
                 let response = model
-                    .completion_request(prompt)
-                    .messages(history)
-                    .preamble(preamble.to_string())
-                    .tools(tool_definitions.clone())
-                    .send()
+                    .call(
+                        CompletionRequest::new(prompt)
+                            .messages(history)
+                            .preamble(preamble.to_string())
+                            .tools(tool_definitions.clone()),
+                    )
                     .await?;
                 let tool_names: BTreeSet<String> = tool_definitions
                     .iter()
-                    .map(|def| def.name.clone())
+                    .map(|def| def.name.to_string())
                     .collect();
                 let mut outcome = run.model_response(ModelTurn::new(
-                    response.message_id.clone(),
+                    response.head(),
                     response.choice.clone(),
                     response.usage,
-                    tool_names.clone(),
-                    tool_names,
+                    TurnPolicy::new(tool_names, None, None)?,
                     response.raw.clone(),
                 ))?;
                 while let ModelTurnOutcome::NeedsResolution(context) = outcome {
@@ -222,9 +221,8 @@ async fn main() -> Result<()> {
                         continue;
                     }
                     let id = call.tool_call.id.clone();
-                    let provider = call.tool_call.provider.clone();
                     let name = call.tool_call.function.name.clone();
-                    let args = call.tool_call.function.arguments.to_string();
+                    let args = call.tool_call.function.arguments_value().to_string();
 
                     println!("\n⏸  approval required: {name}({args})");
                     match ask("     [a]pprove / [d]eny / [e]dit args / a[b]ort? ")
@@ -235,9 +233,8 @@ async fn main() -> Result<()> {
                             let execution = tools
                                 .execute(&name, args, &mut rig::tool::ToolContext::new())
                                 .await;
-                            results.push(UserContent::tool_result_for(
+                            results.push(UserContent::tool_result(
                                 id,
-                                provider,
                                 name,
                                 execution.output().clone().into_content(),
                             ));
@@ -256,23 +253,17 @@ async fn main() -> Result<()> {
                                             &mut rig::tool::ToolContext::new(),
                                         )
                                         .await;
-                                    results.push(UserContent::tool_result_for(
+                                    results.push(UserContent::tool_result(
                                         id,
-                                        provider,
                                         name,
                                         execution.output().clone().into_content(),
                                     ));
                                 }
                                 _ => {
                                     println!("     ! no valid JSON; denying instead");
-                                    results.push(UserContent::tool_result_for(
-                                        id,
-                                        provider,
-                                        name,
-                                        vec![ToolResultContent::text(
+                                    results.push(UserContent::tool_result(id, name, vec![ToolResultContent::text(
                                             "denied: the reviewer supplied no valid JSON to edit with",
-                                        )],
-                                    ));
+                                        )]));
                                 }
                             }
                         }
@@ -291,9 +282,8 @@ async fn main() -> Result<()> {
                             } else {
                                 "denied: no clear approval given".to_string()
                             };
-                            results.push(UserContent::tool_result_for(
+                            results.push(UserContent::tool_result(
                                 id,
-                                provider,
                                 name,
                                 vec![ToolResultContent::text(reason)],
                             ));
@@ -313,7 +303,7 @@ async fn main() -> Result<()> {
             }
 
             AgentRunStep::Done(response) => {
-                println!("\n✓ {}", response.output);
+                println!("\n✓ {}", response.output());
                 return Ok(());
             }
         }

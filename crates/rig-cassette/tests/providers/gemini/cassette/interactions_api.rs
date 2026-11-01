@@ -1,15 +1,30 @@
 //! Migrated from `examples/gemini_interactions_api.rs`.
 
-use futures::StreamExt;
-use rig::completion::CompletionModel;
 use rig::message::{
     AssistantContent, Message, ToolCall, ToolChoice, ToolResultContent, UserContent,
 };
-use rig::providers::gemini::interactions_api::{AdditionalParameters, Interaction, Tool};
-use rig::streaming::{Delta, StreamEvent};
-use serde::Deserialize;
 
 use crate::support::assert_nonempty_response;
+use rig::completion::CompletionRequest;
+use rig::providers::gemini::extension::{GeminiOptions, InteractionsOptions};
+
+/// Whether the interaction's steps carry a Google Search call or result, as a
+/// step of its own or as an item of a model output step.
+fn has_google_search_exchange(steps: &[serde_json::Value]) -> bool {
+    let is_search = |item: &serde_json::Value| {
+        matches!(
+            item["type"].as_str(),
+            Some("google_search_call" | "google_search_result")
+        )
+    };
+    steps.iter().any(|step| {
+        is_search(step)
+            || (step["type"] == "model_output"
+                && step["content"]
+                    .as_array()
+                    .is_some_and(|items| items.iter().any(is_search)))
+    })
+}
 
 fn extract_text(choice: &[AssistantContent]) -> String {
     choice
@@ -34,18 +49,12 @@ async fn basic_interaction_returns_id() {
     super::super::support::with_gemini_interactions_cassette(
         "interactions_api/basic_interaction_returns_id",
         |client| async move {
-            let model = client.map_wire(|config| config.interactions("gemini-3-flash-preview"));
-            let params = AdditionalParameters {
-                store: Some(true),
-                ..Default::default()
-            };
-            let request = model
-                .completion_request("Give me two fun facts about hummingbirds.")
-                .preamble("Be concise.".to_string())
-                .additional_params(serde_json::to_value(params).expect("params should serialize"))
-                .build();
+            let model = client.interactions("gemini-3-flash-preview");
+            let request = CompletionRequest::new("Give me two fun facts about hummingbirds.")
+                .preamble("Be concise.")
+                .provider_option(GeminiOptions::new().store(true));
             let response = model
-                .completion(request)
+                .call(request)
                 .await
                 .expect("completion should succeed");
 
@@ -54,15 +63,16 @@ async fn basic_interaction_returns_id() {
             // `previous_interaction_id`), not an assistant message id: it is
             // on the interaction document `raw` carries, and the decoder
             // reports that very value as the response id.
-            let document = Interaction::deserialize(&response.raw)
+            let id = response.raw["id"]
+                .as_str()
                 .expect("raw is the Interactions API's own document");
             assert!(
-                !document.id.is_empty(),
+                !id.is_empty(),
                 "interactions api should return an interaction id"
             );
             assert_eq!(
-                response.response_id.as_deref(),
-                Some(document.id.as_str()),
+                response.response_id(),
+                Some(id),
                 "the continuation handle is what the normalized response names"
             );
         },
@@ -75,19 +85,11 @@ async fn followup_with_previous_interaction_id() {
     super::super::support::with_gemini_interactions_cassette(
         "interactions_api/followup_with_previous_interaction_id",
         |client| async move {
-            let model = client.map_wire(|config| config.interactions("gemini-3-flash-preview"));
+            let model = client.interactions("gemini-3-flash-preview");
             let initial = model
-                .completion(
-                    model
-                        .completion_request("Give me one short fact about hummingbirds.")
-                        .additional_params(
-                            serde_json::to_value(AdditionalParameters {
-                                store: Some(true),
-                                ..Default::default()
-                            })
-                            .expect("params should serialize"),
-                        )
-                        .build(),
+                .call(
+                    CompletionRequest::new("Give me one short fact about hummingbirds.")
+                        .provider_option(GeminiOptions::new().store(true)),
                 )
                 .await
                 .expect("initial completion should succeed");
@@ -95,23 +97,15 @@ async fn followup_with_previous_interaction_id() {
             // decoder reports as the response id; it is what
             // `previous_interaction_id` echoes back.
             let interaction_id = initial
-                .response_id
-                .clone()
+                .response_id()
+                .map(str::to_owned)
                 .expect("expected an interaction id");
             assert!(!interaction_id.is_empty(), "expected an interaction id");
 
             let followup = model
-                .completion(
-                    model
-                        .completion_request("Now answer with a short analogy.")
-                        .additional_params(
-                            serde_json::to_value(AdditionalParameters {
-                                previous_interaction_id: Some(interaction_id),
-                                ..Default::default()
-                            })
-                            .expect("params should serialize"),
-                        )
-                        .build(),
+                .call(
+                    CompletionRequest::new("Now answer with a short analogy.")
+                        .provider_option(continuing(interaction_id)),
                 )
                 .await
                 .expect("followup completion should succeed");
@@ -127,31 +121,25 @@ async fn google_search_tool_interaction() {
     super::super::support::with_gemini_interactions_cassette(
         "interactions_api/google_search_tool_interaction",
         |client| async move {
-            let model = client.map_wire(|config| config.interactions("gemini-3-flash-preview"));
+            let model = client.interactions("gemini-3-flash-preview");
             // The hosted-tool exchange log is provider-specific, so this
             // asserts against the interaction document `raw` carries and then
             // against the normalized view the decoder folded from the same
             // bytes — one request, exactly as the cassette recorded it.
             let response = model
-                .completion(
-                    model
-                        .completion_request("Who won the Euro 2024 tournament?")
-                        .additional_params(
-                            serde_json::to_value(AdditionalParameters {
-                                tools: Some(vec![Tool::GoogleSearch]),
-                                ..Default::default()
-                            })
-                            .expect("params should serialize"),
-                        )
-                        .build(),
+                .call(
+                    CompletionRequest::new("Who won the Euro 2024 tournament?").additional_params(
+                        serde_json::json!({ "tools": [{ "type": "google_search" }] }),
+                    ),
                 )
                 .await
                 .expect("search completion should succeed");
 
-            let document = Interaction::deserialize(&response.raw)
+            let steps = response.raw["steps"]
+                .as_array()
                 .expect("raw is the Interactions API's own document");
             assert!(
-                !document.google_search_exchanges().is_empty(),
+                has_google_search_exchange(steps),
                 "expected a search-backed exchange"
             );
 
@@ -166,9 +154,9 @@ async fn tool_result_roundtrip() {
     super::super::support::with_gemini_interactions_cassette(
         "interactions_api/tool_result_roundtrip",
         |client| async move {
-            let model = client.map_wire(|config| config.interactions("gemini-3-flash-preview"));
+            let model = client.interactions("gemini-3-flash-preview");
             let tool = rig::completion::ToolDefinition {
-                name: "add".to_string(),
+                name: rig_core::message::ToolName::new("add").expect("tool name"),
                 description: "Add two numbers together".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
@@ -181,19 +169,11 @@ async fn tool_result_roundtrip() {
             };
 
             let initial = model
-                .completion(
-                    model
-                        .completion_request("Use the add tool to sum 7 and 11.")
+                .call(
+                    CompletionRequest::new("Use the add tool to sum 7 and 11.")
                         .tool(tool)
                         .tool_choice(ToolChoice::Required)
-                        .additional_params(
-                            serde_json::to_value(AdditionalParameters {
-                                store: Some(true),
-                                ..Default::default()
-                            })
-                            .expect("params should serialize"),
-                        )
-                        .build(),
+                        .provider_option(GeminiOptions::new().store(true)),
                 )
                 .await
                 .expect("tool call completion should succeed");
@@ -202,30 +182,21 @@ async fn tool_result_roundtrip() {
             // reports as the response id, and the same response supplies the
             // tool call — so this still costs one interaction.
             let interaction_id = initial
-                .response_id
-                .clone()
+                .response_id()
+                .map(str::to_owned)
                 .expect("expected an interaction id");
             assert!(!interaction_id.is_empty(), "expected an interaction id");
 
             let tool_call = first_tool_call(&initial.choice).expect("expected a tool call");
 
             let followup = model
-                .completion(
-                    model
-                        .completion_request(Message::from(UserContent::tool_result_for(
-                            tool_call.id.clone(),
-                            tool_call.provider.clone(),
-                            tool_call.function.name.clone(),
-                            vec![ToolResultContent::json(serde_json::json!({ "sum": 18.0 }))],
-                        )))
-                        .additional_params(
-                            serde_json::to_value(AdditionalParameters {
-                                previous_interaction_id: Some(interaction_id),
-                                ..Default::default()
-                            })
-                            .expect("params should serialize"),
-                        )
-                        .build(),
+                .call(
+                    CompletionRequest::new(Message::from(UserContent::tool_result(
+                        tool_call.id.clone(),
+                        tool_call.function.name.clone(),
+                        vec![ToolResultContent::json(serde_json::json!({ "sum": 18.0 }))],
+                    )))
+                    .provider_option(continuing(interaction_id)),
                 )
                 .await
                 .expect("tool result followup should succeed");
@@ -236,142 +207,358 @@ async fn tool_result_roundtrip() {
     .await;
 }
 
-#[tokio::test]
-async fn streaming_interaction() {
-    super::super::support::with_gemini_interactions_cassette(
-        "interactions_api/streaming_interaction",
-        |client| async move {
-            let model = client.map_wire(|config| config.interactions("gemini-3-flash-preview"));
-            let request = model
-                .completion_request("Write a 3-line poem about rust and rivers.")
-                .temperature(0.4)
-                .build();
-            let mut stream = model.stream(request).await.expect("stream should start");
-
-            let mut text = String::new();
-            let mut saw_usage = false;
-            while let Some(chunk) = stream.next().await {
-                match chunk.expect("stream chunk should succeed") {
-                    StreamEvent::BlockDelta {
-                        delta: Delta::Text { text: delta },
-                        ..
-                    } => text.push_str(&delta),
-                    StreamEvent::Final(response) => {
-                        saw_usage = response.usage.is_reported();
-                    }
-                    _ => {}
-                }
-            }
-
-            assert_nonempty_response(&text);
-            assert!(
-                saw_usage,
-                "expected the final response to expose token usage"
-            );
-        },
+/// The code-execution request both tool-use cells send.
+fn code_execution_request() -> CompletionRequest {
+    CompletionRequest::new(
+        "Use code execution to compute the sum of the first 50 prime numbers, then state it.",
     )
-    .await;
+    .provider_option(GeminiOptions::new().store(false))
+    .additional_params(serde_json::json!({ "tools": [{ "type": "code_execution" }] }))
 }
 
-#[tokio::test]
-async fn streaming_final_metadata_exposes_model_version() {
-    super::super::support::with_gemini_interactions_cassette(
-        "interactions_api/streaming_final_metadata_exposes_model_version",
-        |client| async move {
-            let model = client.map_wire(|config| config.interactions("gemini-3-flash-preview"));
-            let request = model
-                .completion_request("Reply with exactly: interaction metadata ok")
-                .temperature(0.0)
-                .build();
-            let mut stream = model.stream(request).await.expect("stream should start");
-
-            let mut text = String::new();
-            let mut final_model_version = None;
-            let mut final_response_count = 0;
-            let mut saw_usage = false;
-            while let Some(chunk) = stream.next().await {
-                match chunk.expect("stream chunk should succeed") {
-                    StreamEvent::BlockDelta {
-                        delta: Delta::Text { text: delta },
-                        ..
-                    } => text.push_str(&delta),
-                    StreamEvent::Final(response) => {
-                        final_response_count += 1;
-                        saw_usage = response.usage.is_reported();
-                        final_model_version = response.model.clone();
-                    }
-                    _ => {}
-                }
-            }
-
-            assert_nonempty_response(&text);
-            assert_eq!(
-                final_response_count, 1,
-                "stream should yield exactly one final response"
-            );
-            assert_eq!(
-                final_model_version.as_deref(),
-                Some("gemini-3-flash-preview"),
-                "expected Interactions stream final response to expose Interaction.model"
-            );
-            assert!(
-                saw_usage,
-                "expected final response to expose Interactions token usage"
-            );
-        },
-    )
-    .await;
+/// Continue the stored interaction `id`.
+fn continuing(id: String) -> GeminiOptions {
+    GeminiOptions::new().interactions(InteractionsOptions::new().previous_interaction_id(id))
 }
 
-/// The Interactions surface must surface every token counter it is sent.
-///
-/// Replays a cassette recorded long before this assertion existed, which is what
-/// makes it a genuine regression cell: the recorded wire reports
-/// `total_input_tokens: 14`, `total_output_tokens: 34`, `total_tokens: 270` and
-/// `total_thought_tokens: 222`. Rig's `InteractionUsage` had three fields, so
-/// the 222 thinking tokens — the *majority* of the spend — were dropped on the
-/// floor, and the normalized triple could not explain its own total. The wire
-/// also carries `total_cached_tokens`, which meant `cached_input_tokens` was
-/// structurally zero on this surface no matter what Gemini reported.
-///
-/// On `origin/main` this fails with `reasoning_tokens == 0`.
-#[tokio::test]
-async fn interactions_usage_surfaces_thinking_and_cached_tokens() {
-    super::super::support::with_gemini_interactions_cassette(
-        "interactions_api/basic_interaction_returns_id",
-        |client| async move {
-            let model = client.map_wire(|config| config.interactions("gemini-3-flash-preview"));
-            let params = AdditionalParameters {
-                store: Some(true),
-                ..Default::default()
-            };
-            let request = model
-                .completion_request("Give me two fun facts about hummingbirds.")
-                .preamble("Be concise.".to_string())
-                .additional_params(serde_json::to_value(params).expect("params should serialize"))
-                .build();
+/// Rig's `Usage` against the Interactions `usage` object the reply carried:
+/// the tool-use prompt is input beside `total_input_tokens`, thinking is
+/// output beside `total_output_tokens`, and input plus output is the
+/// provider's own `total_tokens`. That last equality is what shows the
+/// tool-use tokens sit outside `total_input_tokens` rather than inside it.
+/// Interactions keeps its counters independent (G225; MEC132-1 item 3;
+/// mec-rig-132-dispositions-2 item 1): input, output, reasoning and tool-use
+/// prompt tokens are each the provider's own, and together they are its
+/// total. The cost prices the tool-use prompt as input and the reasoning as
+/// output at the model's catalog rates (mec-rig-port-answers-1 Q8).
+fn assert_tool_use_usage(usage: &rig::completion::Usage, raw: &serde_json::Value) {
+    let wire = raw.get("usage").expect("the reply carries its usage");
+    let count = |field: &str| {
+        wire.get(field)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
+    let tool_use = count("total_tool_use_tokens");
+    assert!(
+        tool_use > 0,
+        "code execution reports tool-use tokens, or this cell proves nothing: {wire}"
+    );
+    // The recorded counters: 135 + 171 + 182 + 526 = 1014.
+    assert_eq!(
+        (
+            count("total_input_tokens"),
+            count("total_output_tokens"),
+            count("total_thought_tokens"),
+            tool_use,
+            count("total_tokens"),
+        ),
+        (135, 171, 182, 526, 1014),
+        "the recording's counters: {wire}"
+    );
+    assert_eq!(usage.tool_use_prompt_tokens, Some(tool_use), "{wire}");
+    assert_eq!(
+        usage.input_tokens,
+        Some(count("total_input_tokens")),
+        "input is the provider's input, the tool-use prompt beside it: {wire}"
+    );
+    assert_eq!(
+        usage.output_tokens,
+        Some(count("total_output_tokens")),
+        "output is the provider's output, the thinking beside it: {wire}"
+    );
+    assert_eq!(
+        usage.reasoning_tokens,
+        Some(count("total_thought_tokens")),
+        "reasoning is the provider's thinking: {wire}"
+    );
+    assert_eq!(
+        usage.total_tokens,
+        Some(count("total_tokens")),
+        "the total is the provider's: {wire}"
+    );
+    assert_eq!(
+        [
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.reasoning_tokens,
+            usage.tool_use_prompt_tokens,
+        ]
+        .into_iter()
+        .sum::<Option<u64>>(),
+        usage.total_tokens,
+        "input, output, reasoning and tool use add up to the total: {usage:?}"
+    );
 
-            let response = rig::completion::CompletionModel::completion(&model, request)
+    let pricing = rig::catalog::Catalog::builtin()
+        .resolve("gcp.gemini/gemini-3-flash-preview")
+        .and_then(|spec| spec.pricing)
+        .expect("the catalog prices gemini-3-flash-preview");
+    let price = |tokens: u64, per_million: f64| tokens as f64 * per_million / 1_000_000.0;
+    let cost = usage.cost.expect("a priced model's reply carries a cost");
+    let (input, output) = (
+        count("total_input_tokens") + tool_use,
+        count("total_output_tokens") + count("total_thought_tokens"),
+    );
+    assert_eq!((input, output), (661, 353));
+    assert_eq!(
+        cost.input,
+        Some(price(input, pricing.input)),
+        "the tool-use prompt is priced as input: {cost:?}"
+    );
+    assert_eq!(
+        cost.output,
+        Some(price(output, pricing.output)),
+        "the thinking is priced as output: {cost:?}"
+    );
+}
+
+/// A hosted tool's prompt is input: Interactions reports it as
+/// `total_tool_use_tokens` beside `total_input_tokens`, and its own total
+/// counts it. Rig keeps it as its own counter beside input, and the cost
+/// prices it as input. Recorded because no other Interactions cassette
+/// carries a non-zero tool-use count (Google Search reports zero).
+#[tokio::test]
+async fn code_execution_usage_counts_the_tool_use_prompt_as_input() {
+    super::super::support::with_gemini_interactions_cassette(
+        "interactions_api/code_execution_usage",
+        |client| async move {
+            let model = client.interactions("gemini-3-flash-preview");
+            let response = model
+                .call(code_execution_request())
                 .await
-                .expect("completion should succeed");
-            let usage = response.usage;
-
-            assert!(
-                usage.reasoning_tokens.is_some_and(|n| n > 0),
-                "the recorded interaction reports total_thought_tokens; dropping it loses the \
-                 largest component of the spend. got {usage:?}"
-            );
-            assert_eq!(
-                Some(
-                    usage.input_tokens.unwrap_or(0)
-                        + usage.output_tokens.unwrap_or(0)
-                        + usage.reasoning_tokens.unwrap_or(0)
-                ),
-                usage.total_tokens,
-                "on this surface thinking is reported beside input/output, so the components \
-                 should account for the provider's own total: {usage:?}"
-            );
+                .expect("code-execution completion should succeed");
+            assert_nonempty_response(&extract_text(&response.choice));
+            assert_tool_use_usage(&response.usage, &response.raw);
         },
     )
     .await;
+}
+
+/// Every recorded whole interaction of this family.
+const RECORDED_INTERACTIONS: &[&str] = &[
+    "interactions_api/basic_interaction_returns_id",
+    "interactions_api/code_execution_usage",
+    "interactions_api/followup_with_previous_interaction_id",
+    "interactions_api/google_search_tool_interaction",
+    "interactions_api/tool_result_roundtrip",
+    "interactions_raw_capture_matrix/raw_exposes_lifecycle_fields",
+    "interactions_raw_capture_matrix/raw_roundtrips_interaction",
+];
+
+/// `document`, a whole interaction, restated as the events a stream of it
+/// carries: each step starts bare, its content arrives as deltas, and it
+/// stops.
+fn restated(document: &serde_json::Value) -> Vec<rig_core::wire::WireFrame> {
+    use serde_json::{Value, json};
+    let frame = |value: Value| rig_core::wire::WireFrame::Text(value.to_string());
+    let mut envelope = document.clone();
+    let steps = envelope
+        .as_object_mut()
+        .and_then(|document| document.shift_remove("steps"))
+        .unwrap_or_else(|| json!([]));
+    let mut frames = Vec::new();
+    for (index, step) in steps.as_array().into_iter().flatten().enumerate() {
+        let mut head = step.as_object().cloned().unwrap_or_default();
+        let deltas: Vec<Value> = match step["type"].as_str() {
+            Some("thought") => {
+                let summary = head.shift_remove("summary").unwrap_or_else(|| json!([]));
+                let signature = head.shift_remove("signature");
+                summary
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|content| json!({"type": "thought_summary", "content": content}))
+                    .chain(signature.map(
+                        |signature| json!({"type": "thought_signature", "signature": signature}),
+                    ))
+                    .collect()
+            }
+            Some("model_output") => head
+                .shift_remove("content")
+                .and_then(|content| content.as_array().cloned())
+                .unwrap_or_default(),
+            Some("function_call") => {
+                let arguments = head.insert("arguments".to_owned(), json!({}));
+                arguments
+                    .map(|arguments| {
+                        json!({"type": "arguments_delta", "arguments": arguments.to_string()})
+                    })
+                    .into_iter()
+                    .collect()
+            }
+            _ => {
+                head.retain(|key, _| key == "type");
+                vec![step.clone()]
+            }
+        };
+        frames.push(frame(
+            json!({"event_type": "step.start", "index": index, "step": head}),
+        ));
+        for delta in deltas {
+            frames.push(frame(
+                json!({"event_type": "step.delta", "index": index, "delta": delta}),
+            ));
+        }
+        frames.push(frame(json!({"event_type": "step.stop", "index": index})));
+    }
+    frames.push(frame(
+        json!({"event_type": "interaction.completed", "interaction": envelope}),
+    ));
+    frames
+}
+
+/// Each recorded interaction decodes to the same turn whole and restated
+/// as a stream, and the same model gets its steps back verbatim, hosted
+/// search and code execution included.
+#[test]
+fn recorded_interactions_agree_in_both_modes_and_replay_verbatim() {
+    use rig_core::wire::{Mode, Operation as _, Wire};
+
+    let wire = rig::providers::gemini::interactions_api::Interactions::new(
+        rig_core::providers::gemini::GeminiConfig::new("test-key"),
+        "gemini-3-flash-preview",
+    );
+    let mut turns = 0;
+    for scenario in RECORDED_INTERACTIONS {
+        for (_, document) in crate::cassettes::recorded_json_turns("gemini", scenario) {
+            turns += 1;
+            let whole = [rig_core::wire::WireFrame::Text(document.to_string())];
+            rig_core::test_utils::history::assert_restated_agrees(
+                &wire,
+                whole.clone(),
+                restated(&document),
+            );
+            let response = rig_core::test_utils::history::decode(&wire, Mode::Unary, whole)
+                .unwrap_or_else(|error| panic!("{scenario} decodes: {error}"));
+            // The request declares the tools the turn called, so its calls
+            // go back as calls.
+            let tools = response
+                .tool_calls()
+                .map(|call| rig_core::completion::ToolDefinition {
+                    name: call.function.name.clone(),
+                    description: String::new(),
+                    parameters: serde_json::json!({"type": "object", "properties": {}}),
+                })
+                .collect();
+            let history = vec![
+                Message::user("again"),
+                response.message().expect("the reply is a turn"),
+            ];
+            let request = rig_core::operation::Completion::prepare(
+                CompletionRequest::from(history).tools(tools),
+                &wire.describe(),
+            )
+            .expect("the request is valid");
+            let encoded = wire.encode(request, Mode::Unary).expect("it encodes");
+            let rig_core::wire::Body::Bytes(body) = encoded.request.body() else {
+                panic!("the request has a body");
+            };
+            let body: serde_json::Value = serde_json::from_slice(&body[..]).expect("a JSON body");
+            let sent: Vec<_> = body["input"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .skip(1)
+                .filter(|step| step["type"] != "function_result")
+                .cloned()
+                .collect();
+            assert_eq!(
+                Some(&sent),
+                document["steps"].as_array(),
+                "{scenario}: the same model gets its steps back verbatim"
+            );
+        }
+    }
+    assert_eq!(turns, 9, "every recorded turn was checked");
+}
+
+/// The recorded Google Search interaction cites its answer: each
+/// `url_citation` covers whole bullet lines when its offsets count bytes,
+/// as the API documents, and the en dash before them would shift them by
+/// two had they counted characters. A stream that sends the annotations
+/// after the text, as `text_annotation_delta`, cites the same and folds
+/// into the same turn.
+#[test]
+fn the_recorded_search_interaction_cites_its_answer_in_both_modes() {
+    use rig_core::wire::{Mode, WireFrame};
+    use serde_json::json;
+
+    let wire = rig::providers::gemini::interactions_api::Interactions::new(
+        rig_core::providers::gemini::GeminiConfig::new("test-key"),
+        "gemini-3-flash-preview",
+    );
+    let [(_, document)] = &crate::cassettes::recorded_json_turns(
+        "gemini",
+        "interactions_api/google_search_tool_interaction",
+    )[..] else {
+        panic!("the scenario records one turn");
+    };
+    // The same stream as `restated`, with each text item's annotations in
+    // a delta of their own after its text.
+    let streamed: Vec<WireFrame> = restated(document)
+        .into_iter()
+        .flat_map(|frame| {
+            let WireFrame::Text(text) = &frame else {
+                return vec![frame];
+            };
+            let mut event: serde_json::Value = serde_json::from_str(text).expect("JSON");
+            let annotations = event["delta"]
+                .as_object_mut()
+                .filter(|delta| delta.get("type") == Some(&json!("text")))
+                .and_then(|delta| delta.shift_remove("annotations"));
+            let Some(annotations) = annotations else {
+                return vec![frame];
+            };
+            let annotation = json!({
+                "event_type": "step.delta",
+                "index": event["index"],
+                "delta": {"type": "text_annotation_delta", "annotations": annotations},
+            });
+            vec![
+                WireFrame::Text(event.to_string()),
+                WireFrame::Text(annotation.to_string()),
+            ]
+        })
+        .collect();
+    let whole = [WireFrame::Text(document.to_string())];
+    rig_core::test_utils::history::assert_restated_agrees(&wire, whole.clone(), streamed.clone());
+    for (mode, frames) in [(Mode::Unary, whole.to_vec()), (Mode::Streaming, streamed)] {
+        let response = rig_core::test_utils::history::decode(&wire, mode, frames)
+            .unwrap_or_else(|error| panic!("{mode:?} decodes: {error}"));
+        let text = response
+            .choice
+            .iter()
+            .find_map(|block| match block {
+                AssistantContent::Text(text) if !text.citations().is_empty() => Some(text),
+                _ => None,
+            })
+            .expect("a cited answer");
+        let cited: Vec<_> = text
+            .citations()
+            .iter()
+            .map(|citation| {
+                let cited = text.cited(citation).expect("a span");
+                let [source] = &citation.sources[..] else {
+                    panic!("one source a citation");
+                };
+                let rig::message::SourceLocation::Url { url } = &source.location else {
+                    panic!("a web source: {source:?}");
+                };
+                assert!(url.starts_with("https://vertexaisearch.cloud.google.com/"));
+                (cited, source.title.as_deref())
+            })
+            .collect();
+        let record = "*   **Record-Breaking Title:** This was Spain's fourth European Championship title (following wins in 1964, 2008, and 2012), making them the most successful team in the tournament's history.";
+        let run = "*   **Perfect Run:** Spain became the first team to win all seven matches in a single European Championship tournament.";
+        assert_eq!(
+            cited,
+            [
+                (record, Some("wikipedia.org")),
+                (run, Some("youtube.com")),
+                (run, Some("youtube.com")),
+                (run, Some("wikipedia.org")),
+            ],
+            "{mode:?}"
+        );
+    }
 }

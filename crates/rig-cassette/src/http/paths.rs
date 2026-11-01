@@ -45,7 +45,6 @@ fn independent_downstream_graph_excludes_smithy_and_agent_runtimes() {
     for forbidden in [
         "rig",
         "rig-agent",
-        "rig-ecs",
         "aws-smithy-eventstream",
         "aws-smithy-types",
     ] {
@@ -221,7 +220,7 @@ async fn both_constructors_replay_from_an_external_fixture_root() {
     for direct in [false, true] {
         let cassette = if direct {
             ProviderCassette::start_via(
-                Transport::Direct,
+                RecordVia::Direct,
                 &root,
                 "example",
                 "unary",
@@ -247,4 +246,129 @@ async fn both_constructors_replay_from_an_external_fixture_root() {
         );
         cassette.finish().await;
     }
+}
+
+const TEXT_REQUEST: &str = "\
+when:
+  path: /v1/answer
+  method: POST
+  body: not json
+then:
+  status: 200
+  body: '{}'
+";
+
+const TWO_TURNS: &str = "\
+when:
+  path: /v1/answer
+  method: POST
+  body: '{}'
+then:
+  status: 200
+  body: '{}'
+---
+when:
+  path: /v1/answer
+  method: POST
+  body: '{}'
+then:
+  status: 200
+  body: '{}'
+";
+
+/// Run `read`, which must panic, and return its message.
+fn panic_text(read: impl FnOnce()) -> String {
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(read))
+        .expect_err("the reader panics");
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+        .expect("a string panic payload")
+}
+
+#[test]
+fn a_missing_fixture_panics_naming_its_path_and_the_read_error() {
+    let scratch = assert_fs::TempDir::new().expect("temporary fixtures");
+    let root = scratch.path().join("cassettes");
+    let path = cassette_path(&root, "example", "absent");
+    let error = fs::read_to_string(&path).expect_err("no fixture was written");
+
+    assert_eq!(
+        panic_text(|| {
+            let _ = recorded_request_paths(&root, "example", "absent");
+        }),
+        format!(
+            "provider cassette {} should be readable: {error}",
+            path.display()
+        )
+    );
+}
+
+#[test]
+fn json_readers_panic_naming_the_body_that_is_not_json() {
+    let scratch = assert_fs::TempDir::new().expect("temporary fixtures");
+    let root = scratch.path().join("cassettes");
+    write_fixture(&root, "plain", "not json");
+    write_fixture(&root, "stream", "data: not json\n\n");
+    write_raw_fixture(&root, "text-request", TEXT_REQUEST);
+    let not_json = serde_json::from_str::<Value>("not json").expect_err("plain text is not JSON");
+
+    assert_eq!(
+        panic_text(|| {
+            let _ = recorded_json_turns(&root, "example", "text-request");
+        }),
+        format!("cassette example/text-request request should be JSON: {not_json}")
+    );
+    assert_eq!(
+        panic_text(|| {
+            let _ = recorded_json_turns(&root, "example", "plain");
+        }),
+        format!("cassette example/plain response should be JSON: {not_json}")
+    );
+    assert_eq!(
+        panic_text(|| {
+            let _ = recorded_json_request(&root, "example", "text-request");
+        }),
+        format!("cassette example/text-request request should be JSON: {not_json}")
+    );
+    assert_eq!(
+        panic_text(|| {
+            let _ = recorded_json_response(&root, "example", "plain");
+        }),
+        format!("cassette example/plain response should be JSON: {not_json}")
+    );
+    assert_eq!(
+        panic_text(|| {
+            let _ = recorded_sse_json_frames(&root, "example", "stream");
+        }),
+        format!("cassette example/stream SSE frame should be JSON: {not_json}")
+    );
+}
+
+#[test]
+fn a_single_turn_reader_panics_on_a_fixture_of_two_turns() {
+    let scratch = assert_fs::TempDir::new().expect("temporary fixtures");
+    let root = scratch.path().join("cassettes");
+    write_raw_fixture(&root, "pair", TWO_TURNS);
+
+    assert_eq!(
+        panic_text(|| {
+            let _ = recorded_json_turn(&root, "example", "pair");
+        }),
+        "assertion `left == right` failed: cassette example/pair should hold a single completion turn\n  left: 2\n right: 1"
+    );
+}
+
+/// A scenario segment keeps ASCII letters, digits, `_` and `-`; every other
+/// character becomes `_`.
+#[test]
+fn fixture_paths_replace_other_scenario_characters() {
+    assert_eq!(
+        cassette_path(Path::new("root"), "example", "a b/c.d"),
+        Path::new("root")
+            .join("example")
+            .join("a_b")
+            .join("c_d.yaml")
+    );
 }

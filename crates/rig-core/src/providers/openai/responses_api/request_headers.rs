@@ -92,7 +92,7 @@ pub enum InvalidRequestHeader {
 
 impl From<InvalidRequestHeader> for ProviderError {
     fn from(error: InvalidRequestHeader) -> Self {
-        ProviderError::Request(Box::new(error))
+        ProviderError::request(error)
     }
 }
 

@@ -40,8 +40,8 @@
 use rig::providers::perplexity;
 
 use crate::cache_conformance::{
-    CacheAccounting, CacheProbe, CacheSupport, assert_no_meaningful_prefix_cache,
-    assert_prefix_stable, run_cache_probe, run_cache_probe_streaming,
+    CacheProbe, CacheSupport, assert_no_meaningful_prefix_cache, assert_prefix_stable,
+    run_cache_probe, run_cache_probe_streaming,
 };
 
 use super::super::support::with_perplexity_prompt_caching_cassette;
@@ -50,7 +50,6 @@ const CACHE_MODEL: &str = perplexity::SONAR;
 
 const PERPLEXITY_CACHE_SUPPORT: CacheSupport = CacheSupport {
     provider: "perplexity",
-    accounting: CacheAccounting::Subset,
     explicit_breakpoints: false,
     reports_writes: false,
     min_cacheable_tokens: 1024,
@@ -68,7 +67,7 @@ async fn blocking_probe_observes_no_meaningful_prefix_cache() {
 
     with_perplexity_prompt_caching_cassette("prompt_caching/blocking_probe", |client| async move {
         let model = client.completion(CACHE_MODEL);
-        let observation = run_cache_probe(&model, &probe()).await;
+        let observation = run_cache_probe(model, &probe()).await;
         assert_no_meaningful_prefix_cache(
             &observation,
             &PERPLEXITY_CACHE_SUPPORT,
@@ -88,7 +87,7 @@ async fn streaming_probe_observes_no_meaningful_prefix_cache() {
         "prompt_caching/streaming_probe",
         |client| async move {
             let model = client.completion(CACHE_MODEL);
-            let observation = run_cache_probe_streaming(&model, &probe()).await;
+            let observation = run_cache_probe_streaming(model, &probe()).await;
             assert_no_meaningful_prefix_cache(
                 &observation,
                 &PERPLEXITY_CACHE_SUPPORT,

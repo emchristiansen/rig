@@ -46,8 +46,8 @@
 use rig::providers::mistral;
 
 use crate::cache_conformance::{
-    CacheAccounting, CacheProbe, CacheSupport, assert_cache_read_is_surfaced, assert_prefix_stable,
-    run_cache_probe, run_cache_probe_streaming,
+    CacheProbe, CacheSupport, assert_cache_read_is_surfaced, assert_prefix_stable, run_cache_probe,
+    run_cache_probe_streaming,
 };
 
 use super::support::with_mistral_prompt_caching_cassette;
@@ -56,7 +56,6 @@ const CACHE_MODEL: &str = mistral::MISTRAL_LARGE;
 
 const MISTRAL_CACHE_SUPPORT: CacheSupport = CacheSupport {
     provider: "mistral",
-    accounting: CacheAccounting::Subset,
     explicit_breakpoints: false,
     reports_writes: false,
     min_cacheable_tokens: 1024,
@@ -81,7 +80,7 @@ async fn blocking_probe_surfaces_the_cache_read_mistral_reports() {
 
     with_mistral_prompt_caching_cassette("prompt_caching/blocking_probe", |client| async move {
         let model = client.completion(CACHE_MODEL);
-        let observation = run_cache_probe(&model, &probe()).await;
+        let observation = run_cache_probe(model, &probe()).await;
         assert_cache_read_is_surfaced(&observation, &MISTRAL_CACHE_SUPPORT, "blocking probe");
     })
     .await;
@@ -95,7 +94,7 @@ async fn streaming_probe_surfaces_the_cache_read_mistral_reports() {
 
     with_mistral_prompt_caching_cassette("prompt_caching/streaming_probe", |client| async move {
         let model = client.completion(CACHE_MODEL);
-        let observation = run_cache_probe_streaming(&model, &probe()).await;
+        let observation = run_cache_probe_streaming(model, &probe()).await;
         assert_cache_read_is_surfaced(&observation, &MISTRAL_CACHE_SUPPORT, "streaming probe");
     })
     .await;

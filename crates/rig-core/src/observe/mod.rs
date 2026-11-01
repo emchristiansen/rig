@@ -20,17 +20,17 @@ use serde::{Deserialize, Serialize};
 use crate::{
     effect::{EffectFamily, EffectId, HandlerKey, Outcome},
     error::ErrorReport,
-    streaming::StreamEvent,
     wasm_compat::{WasmCompatSend, WasmCompatSync},
 };
 
 mod adapter;
+pub(crate) mod sse_tail;
 pub use adapter::{
     AdapterAnalysis, AdapterContext, AdapterEnding, AdapterErrorBoundary, AdapterErrorEnvelope,
-    AdapterEvent, AdapterObservation, AdapterUsage, AdapterVerdict, diagnostic_url_secrets,
-    scrub_diagnostic,
+    AdapterEvent, AdapterObservation, AdapterUsage, AdapterVerdict, ObservationSink,
+    diagnostic_url_secrets, scrub_diagnostic,
 };
-pub(crate) use adapter::{AdapterSlot, ObservedError, lenient_count};
+pub(crate) use adapter::{AdapterSlot, ObservedError};
 
 #[cfg(test)]
 mod tests;
@@ -131,7 +131,7 @@ pub enum Stage {
 /// represents unavailable attribution; it is not inferred from the outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Emitter {
-    /// The emitter's stable name (`rig-ecs/bus`, a layer's name, a host
+    /// The emitter's stable name (a bus's name, a layer's name, a host
     /// system's name).
     pub name: String,
     /// Its declared version, when it has one.
@@ -286,8 +286,11 @@ pub enum Action {
     StreamTruncated {
         /// Items the consumer had received.
         delivered: usize,
-        /// The last events seen, bounded, for after-the-fact classification.
-        tail: Vec<StreamEvent>,
+        /// What the last items seen were ([`StreamEvent::name`], or
+        /// `"Unknown"`), bounded, for after-the-fact classification.
+        ///
+        /// [`StreamEvent::name`]: crate::streaming::StreamEvent::name
+        tail: Vec<String>,
         /// Error items seen in the stream, if any.
         errors: Vec<Reason>,
     },
@@ -324,11 +327,7 @@ pub const LARGEST_PAYLOAD_BYTES: usize = 64 * 1024;
 impl Action {
     /// A truncation observation whose `tail` is cut from the front until it
     /// fits [`LARGEST_PAYLOAD_BYTES`]; `delivered` and `errors` are kept.
-    pub fn stream_truncated(
-        delivered: usize,
-        mut tail: Vec<StreamEvent>,
-        errors: Vec<Reason>,
-    ) -> Self {
+    pub fn stream_truncated(delivered: usize, mut tail: Vec<String>, errors: Vec<Reason>) -> Self {
         while !tail.is_empty()
             && serde_json::to_vec(&tail).map_or(usize::MAX, |bytes| bytes.len())
                 > LARGEST_PAYLOAD_BYTES

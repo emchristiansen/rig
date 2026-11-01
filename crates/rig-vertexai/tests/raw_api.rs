@@ -1,22 +1,37 @@
+use google_cloud_aiplatform_v1::model::GenerateContentResponse;
+use rig_core::Model;
 use rig_core::completion::{CompletionRequest, CompletionResponse};
+use rig_core::driver::{Exchange, Opened, Opening, Transport};
 use rig_core::error::ProviderError;
 use rig_core::message::AssistantContent;
-use rig_vertexai::completion::{CompletionModel, VertexGenerateContentOutput};
+use rig_vertexai::completion::{GEMINI_2_5_FLASH, GenerateContent};
 
-struct SavedResponse(VertexGenerateContentOutput);
+/// Answers with one stored reply instead of calling Vertex AI.
+#[derive(Clone)]
+struct Stored(GenerateContentResponse);
 
-async fn capture(
-    model: &CompletionModel,
-    request: CompletionRequest,
-) -> Result<SavedResponse, ProviderError> {
-    Ok(SavedResponse(model.raw_completion(request).await?))
+impl Transport<GenerateContent> for Stored {
+    fn send(
+        &self,
+        _payload: google_cloud_aiplatform_v1::model::GenerateContentRequest,
+        _exchange: Exchange,
+    ) -> Opening<GenerateContentResponse> {
+        Opening::ready(Opened::new(futures::stream::iter([Ok(self.0.clone())])))
+    }
 }
 
+fn complete(reply: GenerateContentResponse) -> Result<CompletionResponse, ProviderError> {
+    futures::executor::block_on(
+        Model::new(GenerateContent::new(GEMINI_2_5_FLASH), Stored(reply))
+            .call(CompletionRequest::new("hello")),
+    )
+}
+
+/// A normalized response's `raw` is Vertex AI's own reply: it stores and
+/// reads back as the SDK type.
 #[test]
 fn typed_raw_response_can_be_stored_and_recovered() -> anyhow::Result<()> {
-    // Tie the named type to the real method without constructing a client or making an RPC.
-    let _ = capture;
-    let raw: VertexGenerateContentOutput = serde_json::from_value(serde_json::json!({
+    let wire: GenerateContentResponse = serde_json::from_value(serde_json::json!({
         "responseId": "offline-vertex-response",
         "candidates": [{
             "content": {"role": "model", "parts": [{"text": "hello"}]},
@@ -24,8 +39,6 @@ fn typed_raw_response_can_be_stored_and_recovered() -> anyhow::Result<()> {
             "avgLogprobs": -0.25
         }]
     }))?;
-    let saved = SavedResponse(raw);
-    let VertexGenerateContentOutput(wire) = saved.0;
     anyhow::ensure!(wire.response_id == "offline-vertex-response");
     anyhow::ensure!(
         wire.candidates
@@ -34,15 +47,14 @@ fn typed_raw_response_can_be_stored_and_recovered() -> anyhow::Result<()> {
             == Some(-0.25)
     );
 
-    let response: CompletionResponse = VertexGenerateContentOutput(wire).try_into()?;
+    let response = complete(wire)?;
     anyhow::ensure!(
         matches!(response.choice.as_slice(), [AssistantContent::Text(text)] if text.text == "hello")
     );
-    let restored: VertexGenerateContentOutput = serde_json::from_value(response.raw)?;
-    anyhow::ensure!(restored.0.response_id == "offline-vertex-response");
+    let restored: GenerateContentResponse = serde_json::from_value(response.raw)?;
+    anyhow::ensure!(restored.response_id == "offline-vertex-response");
     anyhow::ensure!(
         restored
-            .0
             .candidates
             .first()
             .map(|candidate| candidate.avg_logprobs)

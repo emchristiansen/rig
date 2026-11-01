@@ -627,7 +627,7 @@ impl super::wire::Responses {
     ///
     /// The request is this wire's ordinary streamed request: the same
     /// encoding, provider credential, caller identity and headers as
-    /// [`driver::stream`](crate::driver::stream). The returned stream owns
+    /// [`Model::stream`](crate::driver::Model::stream). The returned stream owns
     /// `writer`, so dropping it before a terminal state records the operation
     /// as cancelled. A request that cannot be encoded is a
     /// [`ObservedFailureKind::Provider`] failure and nothing is sent; the
@@ -648,7 +648,7 @@ impl super::wire::Responses {
             Ok(source) => Ok(ObservedResponsesStream::new(
                 Box::pin(source),
                 writer,
-                self.name(),
+                self.describe().name,
             )),
             Err(error) => Err(ObservedFailure::provider(error, &mut writer)),
         }

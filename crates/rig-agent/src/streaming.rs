@@ -1,8 +1,15 @@
 //! Portable streaming types re-exported for classic runtime users.
 //!
 //! ```
-//! let accumulator = rig_agent::streaming::BlockAccumulator::new();
-//! assert!(accumulator.snapshot().is_empty());
+//! use rig_agent::streaming::{Item, StreamEvent};
+//!
+//! fn text(item: &Item<StreamEvent>) -> Option<&str> {
+//!     match item {
+//!         Item::Event(StreamEvent::Text { text, .. }) => Some(text),
+//!         _ => None,
+//!     }
+//! }
+//! # let _ = text;
 //! ```
 
 pub use rig_core::streaming::*;

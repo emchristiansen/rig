@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 10072942899351225430,
+    "run_spec": 11761598427705777809,
     "handlers": [
       {
         "key": "golden/model:default",
@@ -75,21 +75,27 @@
       },
       "events": [
         {
-          "event": "block_start",
-          "id": "minted:text:0",
-          "kind": {
+          "item": "event",
+          "value": {
+            "event": "start",
+            "part": 0,
             "kind": "text"
           }
         },
         {
-          "event": "block_delta",
-          "id": "minted:text:0",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": "Rust originated as a personal project by Graydon Hoare at Mozilla Research in 2006. Hoare's motivation stemmed from frustrations"
           }
         }
-      ]
+      ],
+      "stream_origin": {
+        "api": "gemini.generate_content",
+        "provider": "gcp.gemini",
+        "model": "gemini-2.5-flash"
+      }
     }
   ]
 }

@@ -3,7 +3,7 @@
 //! ```no_run
 //! # async fn example(agent: rig_agent::Agent) -> Result<(), rig_agent::completion::PromptError> {
 //! let response = agent.prompt("Explain ownership.").await?;
-//! println!("{}", response.output);
+//! println!("{}", response.output());
 //! # Ok(())
 //! # }
 //! ```
@@ -14,10 +14,7 @@ use super::runner::AgentRunner;
 use super::typed::TypedRun;
 use crate::bus::{BusDriver, Dispatcher, ModelHandle};
 use crate::{
-    completion::{
-        CompletionModel, CompletionRequest, CompletionRequestBuilder, Document, Message,
-        PromptError, ToolDefinition,
-    },
+    completion::{CompletionRequest, Document, Message, PromptError, ToolDefinition},
     run::response::PromptResponse,
     tool::{
         ToolCatalog,
@@ -31,15 +28,13 @@ use rig_core::id::ConversationId;
 
 use super::drive::AgentBus;
 use rig_core::{message::ToolChoice, wasm_compat::WasmCompatSend};
-use std::{collections::BTreeSet, sync::Arc};
+use std::sync::Arc;
 
 use super::UNKNOWN_AGENT_NAME;
 
-/// A prepared completion request plus the executable Rig tool names advertised
-/// to the provider for this turn.
+/// What a completion request was prepared with, including the executable Rig
+/// tool names advertised to the provider for this turn.
 pub(crate) struct PreparedCompletionRequest {
-    /// Request prepared against the selected model's capabilities.
-    pub(crate) request: CompletionRequest,
     /// The messages telemetry records for this attempt.
     pub(crate) telemetry_messages: Vec<Message>,
     /// The typed view the request is dispatched to.
@@ -49,11 +44,8 @@ pub(crate) struct PreparedCompletionRequest {
     /// The definitions the request carries (executable tools plus, in Tool
     /// output mode, the synthetic output tool), for the run's `TurnTools`.
     pub(crate) advertised_tools: Vec<ToolDefinition>,
-    pub(crate) executable_tool_names: BTreeSet<String>,
-    pub(crate) allowed_tool_names: BTreeSet<String>,
-    /// When Tool output mode is active, the name of the synthetic output tool
-    /// advertised to the model, allowed but not executable.
-    pub(crate) output_tool_name: Option<String>,
+    /// The turn's tool policy, fed back to the run with the response.
+    pub(crate) policy: crate::run::TurnPolicy,
     /// Effective structured output-token cap after runner overrides and request
     /// patches. Does not interpret caps passed through additional parameters.
     pub(crate) max_tokens: Option<u64>,
@@ -70,7 +62,7 @@ pub(crate) async fn build_prepared_completion_request(
     chat_history: &[Message],
     committed_output_tool: Option<&str>,
     request_patch: Option<&RequestPatch>,
-) -> Result<PreparedCompletionRequest, ProviderError> {
+) -> Result<(CompletionRequest, PreparedCompletionRequest), ProviderError> {
     let record_telemetry_content = runner.config.record_telemetry_content;
     let tool_server_handle = &runner.tool_server_handle;
 
@@ -85,23 +77,17 @@ pub(crate) async fn build_prepared_completion_request(
     // for hooks unless one opts in), recorded like every other effect.
     let mut dynamic_tool_ids = Vec::new();
     for (key, kind) in tool_server_handle.retrieval_effects(retrieval_query) {
-        let ids = crate::agent::engine::dispatch_effect(
-            &runner.config.hooks,
-            ctx,
-            runner.config.bus.dispatcher(),
-            &key,
-            kind,
-        )
-        .await
-        .and_then(|outcome| match outcome {
-            rig_core::effect::Outcome::Documents(rig_core::effect::RetrievedDocuments::Ids(
-                ids,
-            )) => Ok(ids.into_iter().map(|(_, id)| id).collect::<Vec<String>>()),
-            other => Err(crate::agent::engine::wrong_outcome("retrieved ids", &other)),
-        })
-        .map_err(|report| {
-            ProviderError::Request(format!("Failed to get tool definitions: {report}").into())
-        })?;
+        let ids = crate::agent::engine::dispatch_effect(runner, ctx, &key, kind)
+            .await
+            .and_then(|outcome| match outcome {
+                rig_core::effect::Outcome::Documents(
+                    rig_core::effect::RetrievedDocuments::Ids(ids),
+                ) => Ok(ids.into_iter().map(|(_, id)| id).collect::<Vec<String>>()),
+                other => Err(crate::agent::engine::wrong_outcome("retrieved ids", &other)),
+            })
+            .map_err(|report| {
+                ProviderError::request(format!("Failed to get tool definitions: {report}"))
+            })?;
         dynamic_tool_ids.extend(ids);
     }
     let mut tool_snapshot = tool_server_handle.snapshot_with_dynamic(&dynamic_tool_ids);
@@ -110,10 +96,16 @@ pub(crate) async fn build_prepared_completion_request(
     spec.output_tool_description
         .clone_from(&runner.output_tool_description);
     spec.augment_output_preamble = runner.augment_output_preamble;
+    let capabilities = model.capabilities();
+    let committed_output_tool = if unforce_output_tool(runner, &capabilities, &mut spec) {
+        None
+    } else {
+        committed_output_tool
+    };
 
     let prepared = crate::run::prepare::prepare_request(
         &spec,
-        &model.capabilities(),
+        &capabilities,
         chat_history,
         tool_snapshot.take_definitions(),
         committed_output_tool,
@@ -123,39 +115,71 @@ pub(crate) async fn build_prepared_completion_request(
     // Narrow dispatch to the tools actually advertised this turn (a per-turn
     // `active_tools` allow-list), so the implementation behind every definition
     // the provider received is the one that runs.
-    tool_snapshot.retain_names(&prepared.executable_tool_names);
+    tool_snapshot.retain_names(prepared.policy.executable());
 
     let advertised_tools = prepared.tools.clone();
-    let executable_tool_names = prepared.executable_tool_names.clone();
-    let allowed_tool_names = prepared.allowed_tool_names.clone();
-    let output_tool_name = prepared.output_tool_name.clone();
+    let policy = prepared.policy.clone();
     let max_tokens = prepared.max_tokens;
-    let builder = prepared
-        .apply(CompletionRequestBuilder::unbound(prompt))
-        .record_content_telemetry(record_telemetry_content);
+    // The agent records the input itself, so the request the provider sees
+    // carries the telemetry flag off: one span, no double recording.
+    let request = prepared
+        .apply(CompletionRequest::new(prompt))
+        .accept_unknown_finish_reasons(runner.config.accept_unknown_finish_reasons);
     let telemetry_messages = if record_telemetry_content {
-        builder.messages_for_telemetry()
+        request.messages_for_telemetry()
     } else {
         Vec::new()
     };
-    // The agent records the input itself, so the request the provider sees
-    // carries the flag off: one span, no double recording.
-    let request = builder.record_content_telemetry(false).build();
-    // The same guard the builder's own `send`/`stream` apply: an empty
-    // history or content block is a local, named error, not a remote 400.
-    request.validate_message_content()?;
-
-    Ok(PreparedCompletionRequest {
-        request,
+    let prepared = PreparedCompletionRequest {
         telemetry_messages,
         model: model.clone(),
         tool_snapshot: Arc::new(tool_snapshot),
         advertised_tools,
-        executable_tool_names,
-        allowed_tool_names,
-        output_tool_name,
+        policy,
         max_tokens,
-    })
+    };
+    Ok((request, prepared))
+}
+
+/// Rig's own structured-output flow (the extractor) forces its output tool.
+/// For a model that rejects a forced tool choice, drop that force: use native
+/// structured output where the wire composes it with tools, else keep the
+/// output tool at `auto`, and say so in the preamble either way. A caller's
+/// own forced choice outside that flow is left alone. Returns whether the
+/// output tool was replaced by native output.
+fn unforce_output_tool(
+    runner: &crate::agent::AgentRunner,
+    capabilities: &rig_core::completion::ProviderCapabilities,
+    spec: &mut crate::run::spec::RunSpec,
+) -> bool {
+    let Some(name) = runner.output_tool_name.as_deref() else {
+        return false;
+    };
+    let forced = matches!(
+        spec.tool_choice,
+        Some(ToolChoice::Required | ToolChoice::Specific { .. })
+    );
+    if !capabilities.rejects_forced_tool_choice || !forced || spec.output_schema.is_none() {
+        return false;
+    }
+    spec.tool_choice = None;
+    let native = capabilities.composes_native_output_with_tools;
+    let line = if native {
+        format!(
+            "The `{name}` tool is not available for this model. Reply with only the JSON \
+             object you would have passed to it."
+        )
+    } else {
+        format!("Call the `{name}` tool with your answer instead of replying in text.")
+    };
+    spec.preamble = Some(match spec.preamble.take() {
+        Some(preamble) => format!("{preamble}\n\n{line}"),
+        None => line,
+    });
+    if native {
+        spec.output_mode = OutputMode::Native;
+    }
+    native
 }
 
 /// Configured model, request settings, hooks, memory, and tool registry for runs.
@@ -167,14 +191,12 @@ pub(crate) async fn build_prepared_completion_request(
 /// # Example
 /// ```no_run
 /// use rig_agent::prelude::*;
-/// use rig_core::providers::openai::{self, OpenAI};
-/// use rig_reqwest::prelude::*;
+/// use rig_core::{Model, providers::openai::{self, OpenAI}};
 ///
 /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-/// let openai = OpenAI::from_env()?.bound()?;
+/// let model = OpenAI::from_env()?.completion(openai::GPT_5_2);
 ///
-/// let comedian_agent = openai
-///     .agent(openai::GPT_5_2)
+/// let comedian_agent = AgentBuilder::new(model)
 ///     .preamble("You are a comedian here to entertain the user using humour and jokes.")
 ///     .temperature(0.9)
 ///     .build();
@@ -206,6 +228,21 @@ pub(crate) struct AgentConfig {
     pub(crate) static_context: Vec<Document>,
     /// Additional parameters to be passed to the model
     pub(crate) additional_params: Option<serde_json::Value>,
+    /// Portable generation options every request carries.
+    pub(crate) options: rig_core::completion::GenerationOptions,
+    /// Typed per-provider options every request carries.
+    pub(crate) provider_options: rig_core::completion::ProviderOptions,
+    /// The catalog entry of the agent's model, which each model call's
+    /// options are checked against when the call goes to that model.
+    pub(crate) model_spec: Option<rig_core::catalog::ModelSpec>,
+    /// The key of the model [`Self::model_spec`] describes: the default
+    /// model the agent was built with.
+    pub(crate) model_spec_key: Option<Key<family::Completion>>,
+    /// The default model's provider and model id when the agent was built.
+    pub(crate) model_spec_id: Option<super::drive::ModelId>,
+    /// The provider and model id of each model the builder registers from
+    /// a model value, by key suffix, until build records them on the bus.
+    pub(crate) pending_model_ids: Vec<(String, super::drive::ModelId)>,
     /// Whether to record sensitive request, response, and tool content on GenAI spans.
     ///
     /// Defaults to `false`. Enabling this can expose prompts, retrieved context,
@@ -213,6 +250,9 @@ pub(crate) struct AgentConfig {
     /// through OpenTelemetry span attributes, which can increase observability
     /// backend storage and query costs.
     pub(crate) record_telemetry_content: bool,
+    /// Whether a finish reason outside the normalized vocabulary ends a turn
+    /// as a normal stop.
+    pub(crate) accept_unknown_finish_reasons: bool,
     /// Maximum number of tokens for the completion
     pub(crate) max_tokens: Option<u64>,
     /// Temperature of the model
@@ -258,7 +298,14 @@ impl AgentConfig {
             preamble: None,
             static_context: vec![],
             additional_params: None,
+            options: rig_core::completion::GenerationOptions::default(),
+            provider_options: rig_core::completion::ProviderOptions::default(),
+            model_spec: None,
+            model_spec_key: None,
+            model_spec_id: None,
+            pending_model_ids: Vec::new(),
             record_telemetry_content: false,
+            accept_unknown_finish_reasons: false,
             max_tokens: None,
             temperature: None,
             tool_choice: None,
@@ -281,7 +328,7 @@ impl AgentConfig {
 
     /// The default model's label as registered now (the key's tail when
     /// nothing serves it).
-    pub(crate) fn model_ref(&self) -> ModelRef {
+    pub(crate) fn model_label(&self) -> ModelRef {
         match self
             .bus
             .dispatcher()
@@ -324,6 +371,89 @@ impl AgentConfig {
 }
 
 impl AgentConfig {
+    /// Check `options`, which a call to the model `label` names is about to
+    /// send, against that model's catalog entry ([`AgentBuilder::model_spec`]):
+    /// a refused option fails under `OnUnsupported::Error`, and is dropped
+    /// from the call with a warning under `Ignore`. Nothing is checked
+    /// without a model spec, and a model whose entry cannot be found is let
+    /// through with a warning.
+    ///
+    /// [`AgentBuilder::model_spec`]: crate::agent::AgentBuilder::model_spec
+    pub(crate) fn check_call_options(
+        &self,
+        label: &ModelRef,
+        options: &mut rig_core::completion::GenerationOptions,
+    ) -> Result<(), rig_core::error::ProviderError> {
+        use rig_core::completion::OnUnsupported;
+        use rig_core::error::ProviderError;
+        let Some(declared) = self.model_spec.as_ref() else {
+            return Ok(());
+        };
+        let key = self.bus.model_key(label.as_str());
+        let id = self.bus.model_id(key.raw().as_str());
+        let spec = match &self.model_spec_key {
+            Some(own) if own.raw() == key.raw() && self.model_spec_id == id => Some(declared),
+            _ => self.catalog_entry(&key, label),
+        };
+        let Some(spec) = spec else {
+            tracing::warn!(
+                model = %label,
+                "the model this call goes to has no catalog entry rig can find; its generation options are not checked"
+            );
+            return Ok(());
+        };
+        while let Err(refused) = spec.validate(options) {
+            match options.unsupported_policy() {
+                OnUnsupported::Ignore => {
+                    let option: &str = refused.option.as_ref();
+                    tracing::warn!(
+                        option,
+                        provider = %refused.provider,
+                        model = %refused.model,
+                        reason = %refused.reason,
+                        "unsupported option ignored"
+                    );
+                    match option {
+                        "reasoning" => options.reasoning = None,
+                        "cache" => options.cache = None,
+                        _ => return Err(ProviderError::UnsupportedOption(refused)),
+                    }
+                }
+                _ => return Err(ProviderError::UnsupportedOption(refused)),
+            }
+        }
+        Ok(())
+    }
+
+    /// The built-in catalog's entry for the model registered under `key`:
+    /// by the provider and model id it was registered with, looked up as
+    /// the encoders look it up ([`Catalog::find`], so a dated snapshot id
+    /// finds its model), else by `label` read as a catalog reference
+    /// (`anthropic/claude-opus-4-8`).
+    ///
+    /// [`Catalog::find`]: rig_core::catalog::Catalog::find
+    fn catalog_entry(
+        &self,
+        key: &Key<family::Completion>,
+        label: &ModelRef,
+    ) -> Option<&'static rig_core::catalog::ModelSpec> {
+        use rig_core::catalog::Catalog;
+        use rig_core::providers::registry::ProviderId;
+        let catalog = Catalog::builtin();
+        match self.bus.model_id(key.raw().as_str()) {
+            Some(super::drive::ModelId {
+                provider,
+                model: Some(model),
+            }) => {
+                ProviderId::catalog(&provider).and_then(|provider| catalog.find(provider, &model))
+            }
+            Some(_) => None,
+            None => catalog.resolve(label.as_str()),
+        }
+    }
+}
+
+impl AgentConfig {
     /// The protocol-facing half of this configuration as plain data: what a
     /// driver needs to shape requests and budget a run, without the model,
     /// hooks, memory or identity this config also carries.
@@ -332,11 +462,14 @@ impl AgentConfig {
             preamble: self.preamble.clone(),
             static_context: self.static_context.clone(),
             additional_params: self.additional_params.clone(),
+            options: self.options.clone(),
+            provider_options: self.provider_options.clone(),
             max_tokens: self.max_tokens,
             temperature: self.temperature,
             tool_choice: self.tool_choice.clone(),
             max_turns: Some(self.max_turns),
             max_invalid_tool_call_retries: 0,
+            max_consecutive_malformed_tool_calls: None,
             output_schema: self
                 .output_schema
                 .as_ref()
@@ -346,6 +479,7 @@ impl AgentConfig {
             output_tool_description: None,
             augment_output_preamble: true,
             unhandled_invalid_tool_call: crate::run::spec::UnhandledInvalidToolCall::Fail,
+            accept_unknown_finish_reasons: self.accept_unknown_finish_reasons,
         }
     }
 }
@@ -395,7 +529,7 @@ impl Agent {
     }
 
     /// The label of this agent's default model, as registered now.
-    pub fn model_ref(&self) -> Option<ModelRef> {
+    pub fn model_label(&self) -> Option<ModelRef> {
         self.model_descriptor()
             .and_then(|descriptor| match descriptor.family {
                 rig_core::effect::FamilyDescriptor::Completion { model, .. } => Some(model),
@@ -410,10 +544,11 @@ impl Agent {
 
     /// Register `model` on this agent's bus under `label` and return the
     /// label a run selects it by.
-    pub fn register_model<M>(&self, label: impl Into<ModelRef>, model: M) -> ModelRef
-    where
-        M: CompletionModel + 'static,
-    {
+    pub fn register_model(
+        &self,
+        label: impl Into<ModelRef>,
+        model: impl Into<rig_core::DynModel<rig_core::operation::Completion>>,
+    ) -> ModelRef {
         let label = label.into();
         self.config.bus.register_model(&label, model);
         label
@@ -421,7 +556,7 @@ impl Agent {
 
     /// Make the model registered under `label` this agent value's default.
     /// Value semantics: clones of the agent keep their own default.
-    pub fn set_model_ref(&mut self, label: impl Into<ModelRef>) {
+    pub fn set_model_label(&mut self, label: impl Into<ModelRef>) {
         self.config.model_key = self.config.bus.model_key(label.into().as_str());
         self.config.anonymous_model = None;
     }
@@ -430,10 +565,10 @@ impl Agent {
     /// value's default. The registration is scoped to the values that
     /// select it (this agent, its clones, the runners it produces): it
     /// leaves the bus when the last of them drops or selects another model.
-    pub fn set_model<M>(&mut self, model: M)
-    where
-        M: CompletionModel + 'static,
-    {
+    pub fn set_model(
+        &mut self,
+        model: impl Into<rig_core::DynModel<rig_core::operation::Completion>>,
+    ) {
         let anonymous = self.config.bus.register_anonymous_model(model);
         self.config.model_key = anonymous.key().clone();
         self.config.anonymous_model = Some(anonymous);
@@ -447,17 +582,17 @@ impl Agent {
         self.config.bus.owner()
     }
 
-    /// [`Agent::set_model_ref`] by value.
-    pub fn with_model_ref(mut self, label: impl Into<ModelRef>) -> Self {
-        self.set_model_ref(label);
+    /// [`Agent::set_model_label`] by value.
+    pub fn with_model_label(mut self, label: impl Into<ModelRef>) -> Self {
+        self.set_model_label(label);
         self
     }
 
     /// [`Agent::set_model`] by value.
-    pub fn with_model<M>(mut self, model: M) -> Self
-    where
-        M: CompletionModel + 'static,
-    {
+    pub fn with_model(
+        mut self,
+        model: impl Into<rig_core::DynModel<rig_core::operation::Completion>>,
+    ) -> Self {
         self.set_model(model);
         self
     }
@@ -583,7 +718,7 @@ impl Agent {
     /// # use futures::StreamExt;
     /// # async fn example(agent: Agent) -> Result<(), Box<dyn std::error::Error>> {
     /// let response = agent.prompt("What is 2 + 2?").max_turns(3).await?;
-    /// println!("{}", response.output);
+    /// println!("{}", response.output());
     ///
     /// let mut stream = agent.prompt("And 3 + 3?").stream();
     /// while let Some(item) = stream.next().await {
@@ -603,8 +738,10 @@ impl Agent {
     /// resumed under this agent's hooks, tools, and bus, executing pending tool
     /// calls or requesting the next model turn.
     /// The run is authoritative for what it persisted: its prompt, its
-    /// history, its turn budget and its invalid-tool-call retry budget, so
-    /// [`history`](AgentRunner::history) and [`max_turns`](AgentRunner::max_turns)
+    /// history, its turn budget, its invalid-tool-call retry budget and its
+    /// unhandled-invalid-tool-call policy, so
+    /// [`history`](AgentRunner::history), [`max_turns`](AgentRunner::max_turns)
+    /// and [`unhandled_invalid_tool_call`](AgentRunner::unhandled_invalid_tool_call)
     /// on the returned runner have no effect. Everything else still comes
     /// from the agent and the runner: the request shape (preamble, documents,
     /// sampling parameters, additional params, tool choice, output mode),
@@ -612,17 +749,15 @@ impl Agent {
     /// [`tool_context`](AgentRunner::tool_context),
     /// [`tool_concurrency`](AgentRunner::tool_concurrency), the model
     /// selection and telemetry settings (inbound tool context is driver
-    /// state, never part of the persisted run). Two run-side values still show
-    /// through: the run's persisted tool choice is what invalid-call hooks
-    /// see and what gates a `Skip`, while the request's tool choice is the
-    /// runner's; and the output tool the run committed stays committed even
-    /// though the schema and mode advertising it are the runner's. The
-    /// unhandled-invalid-tool-call policy is the run's on the blocking path
-    /// and the runner's on the streamed path. Conversation memory is neither
-    /// loaded nor appended: the history is already in the run, and the driver
-    /// that persisted it owns memory persistence and appends the finished run's
-    /// `messages` itself, since a suspended run never reached the `Done`
-    /// append, so the response's `memory_append` is `None`. Pending tool
+    /// state, never part of the persisted run). Invalid-call hooks see, and a
+    /// `Skip` is gated by, the tool choice each turn was sent with. One
+    /// run-side value still shows through: the output tool the run pinned
+    /// stays pinned even though the schema and mode advertising it are the
+    /// runner's.
+    /// Conversation memory is not loaded: the history is already in the run.
+    /// With memory and a conversation configured, the newly produced messages
+    /// are appended once when the resumed run finishes, on either medium. The
+    /// response's `memory_append` reports the actual append result. Pending tool
     /// calls re-execute on resume: a tool that ran before the suspension and
     /// answered nothing runs again. Drive it like any runner: `.await`,
     /// [`stream`](AgentRunner::stream) or
@@ -660,9 +795,7 @@ impl Agent {
         let response = AgentRunner::from_agent(self, prompt)
             .history(chat_history.clone())
             .await?;
-        if let Some(messages) = &response.messages {
-            chat_history.extend(messages.iter().cloned());
-        }
+        chat_history.extend(response.messages.iter().cloned());
         Ok(response)
     }
 

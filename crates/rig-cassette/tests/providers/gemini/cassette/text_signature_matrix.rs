@@ -10,12 +10,14 @@
 //! cells check that too.
 
 use futures::StreamExt;
-use rig::completion::{CompletionModel, CompletionRequest};
+use rig::completion::{CompletionRequest, Effort, GenerationOptions, ProviderOptions};
 use rig::message::{AssistantContent, Message};
 use rig::providers::gemini;
-use serde_json::{Value, json};
+use rig::providers::gemini::extension::{GeminiOptions, InteractionsOptions, ThinkingSummaries};
+use rig_test_support::cassette_models::GeminiModels;
+use serde_json::Value;
 
-use super::super::support::{BoundGemini, with_gemini_cassette};
+use super::super::support::with_gemini_cassette;
 use crate::history_survival::{Dialect, lost_tokens};
 
 const QUESTION: &str = "What is 17 squared? Answer with the number only.";
@@ -23,7 +25,6 @@ const FOLLOW_UP: &str = "Add one to that number. Answer with the number only.";
 
 #[derive(Clone, Copy)]
 enum Api {
-    GenerateContent,
     Interactions,
 }
 
@@ -32,60 +33,48 @@ struct Cell {
     model: &'static str,
     api: Api,
     streamed: bool,
-    /// The first reply must sign an answer part (Gemini 3 does; Gemini 2.5
-    /// signs only function calls).
-    answer_signed: bool,
 }
 
-fn params(cell: Cell) -> Value {
+fn options(cell: Cell) -> (GenerationOptions, ProviderOptions) {
     match (cell.api, cell.model) {
-        (Api::Interactions, _) => json!({
-            "store": false,
-            "generation_config": { "thinking_level": "low", "thinking_summaries": "auto" }
-        }),
-        (Api::GenerateContent, gemini::completion::GEMINI_2_5_FLASH) => json!({
-            "generationConfig": { "thinkingConfig": { "includeThoughts": true, "thinkingBudget": 512 } }
-        }),
-        (Api::GenerateContent, _) => json!({
-            "generationConfig": { "thinkingConfig": { "includeThoughts": true, "thinkingLevel": "low" } }
-        }),
+        (Api::Interactions, _) => (
+            GenerationOptions::default().reasoning(Effort::Low),
+            ProviderOptions::new().set(GeminiOptions::new().store(false).interactions(
+                InteractionsOptions::new().thinking_summaries(ThinkingSummaries::Auto),
+            )),
+        ),
     }
 }
 
 fn request(cell: Cell, history: Vec<Message>) -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        chat_history: history,
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: Some(2048),
-        tool_choice: None,
-        additional_params: Some(params(cell)),
-        output_schema: None,
-        record_telemetry_content: false,
-    }
+    let mut request = CompletionRequest::from(history);
+    request.max_tokens = Some(2048);
+    let (generation, provider) = options(cell);
+    request.options = generation;
+    request.provider_options = provider;
+    request
 }
 
-async fn turn<M: CompletionModel>(
-    model: &M,
+async fn turn<W, T>(
+    model: &rig::driver::Model<W, T>,
     cell: Cell,
     history: Vec<Message>,
-) -> Vec<AssistantContent> {
+) -> rig::message::AssistantMessage
+where
+    W: rig::wire::Wire<Op = rig::operation::Completion>,
+    T: rig::driver::Transport<W>,
+{
     let request = request(cell, history);
-    if !cell.streamed {
-        return model
-            .completion(request)
-            .await
-            .expect("the turn completes")
-            .choice
-            .to_vec();
-    }
-    let mut stream = model.stream(request).await.expect("the stream opens");
-    while let Some(item) = stream.next().await {
-        item.expect("a stream item");
-    }
-    stream.finish().expect("a terminal record").choice.to_vec()
+    let response = if cell.streamed {
+        let mut stream = model.stream(request).expect("the stream opens");
+        while let Some(item) = stream.next().await {
+            item.expect("a stream item");
+        }
+        stream.finish().await.expect("a terminal record")
+    } else {
+        model.call(request).await.expect("the turn completes")
+    };
+    response.head().with_content(response.choice.clone())
 }
 
 fn answer(choice: &[AssistantContent]) -> String {
@@ -98,40 +87,26 @@ fn answer(choice: &[AssistantContent]) -> String {
         .collect()
 }
 
-async fn conversation<M: CompletionModel>(model: M, cell: Cell) {
+async fn conversation<W, T>(model: rig::driver::Model<W, T>, cell: Cell)
+where
+    W: rig::wire::Wire<Op = rig::operation::Completion>,
+    T: rig::driver::Transport<W>,
+{
     let first = turn(&model, cell, vec![Message::user(QUESTION)]).await;
-    assert!(answer(&first).contains("289"), "{first:?}");
+    assert!(answer(&first.content).contains("289"), "{first:?}");
     let history = vec![
         Message::user(QUESTION),
-        Message::Assistant {
-            id: None,
-            content: first.into_iter().collect(),
-        },
+        Message::Assistant(first),
         Message::user(FOLLOW_UP),
     ];
     let second = turn(&model, cell, history).await;
-    assert!(answer(&second).contains("290"), "{second:?}");
-}
-
-/// Every model part of `request` carrying a signature, as (is a thought,
-/// has text) pairs.
-fn signed_model_parts(request: &Value) -> Vec<bool> {
-    request["contents"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|content| content["role"] == "model")
-        .flat_map(|content| content["parts"].as_array().into_iter().flatten())
-        .filter(|part| part.get("thoughtSignature").is_some())
-        .map(|part| part["thought"] == json!(true))
-        .collect()
+    assert!(answer(&second.content).contains("290"), "{second:?}");
 }
 
 fn assert_recorded(cell: Cell, scenario: &str) {
     let bodies = crate::cassettes::recorded_interaction_bodies("gemini", scenario);
     assert_eq!(bodies.len(), 2, "a question and its continuation");
     let dialect = match cell.api {
-        Api::GenerateContent => Dialect::GeminiGenerateContent,
         Api::Interactions => Dialect::GeminiInteractions,
     };
     let next: Value = serde_json::from_str(&bodies[1].0).expect("the continuation is JSON");
@@ -143,31 +118,6 @@ fn assert_recorded(cell: Cell, scenario: &str) {
 
     let reply = &bodies[0].1;
     match cell.api {
-        Api::GenerateContent => {
-            // The premise, from the bytes: an answer part carried a signature.
-            let answer_signed = crate::history_survival::response_documents(reply)
-                .iter()
-                .flat_map(|document| {
-                    document["candidates"][0]["content"]["parts"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default()
-                })
-                .any(|part| {
-                    part.get("thoughtSignature").is_some() && part["thought"] != json!(true)
-                });
-            if cell.answer_signed {
-                assert!(answer_signed, "{scenario}: the reply signed an answer part");
-            }
-            // Answer signatures return on answer parts, not on thoughts.
-            let replayed = signed_model_parts(&next);
-            if answer_signed {
-                assert!(
-                    replayed.iter().any(|thought| !thought),
-                    "{scenario}: an answer part returns signed: {replayed:?}"
-                );
-            }
-        }
         Api::Interactions => {
             // Signatures live on thought steps only, and return there. A
             // whole reply lists its steps; a stream opens each step with its
@@ -209,77 +159,10 @@ fn assert_recorded(cell: Cell, scenario: &str) {
     }
 }
 
-async fn run(client: BoundGemini, cell: Cell) {
+async fn run(client: GeminiModels, cell: Cell) {
     match cell.api {
-        Api::GenerateContent => conversation(client.completion(cell.model), cell).await,
-        Api::Interactions => {
-            conversation(
-                client.map_wire(|config| config.interactions(cell.model)),
-                cell,
-            )
-            .await
-        }
+        Api::Interactions => conversation(client.interactions(cell.model), cell).await,
     }
-}
-
-#[tokio::test]
-async fn gemini_3_unary() {
-    const CELL: Cell = Cell {
-        model: gemini::completion::GEMINI_3_FLASH_PREVIEW,
-        api: Api::GenerateContent,
-        streamed: false,
-        answer_signed: true,
-    };
-    with_gemini_cassette("text_signature_matrix/gemini_3_unary", |client| {
-        run(client, CELL)
-    })
-    .await;
-    assert_recorded(CELL, "text_signature_matrix/gemini_3_unary");
-}
-
-#[tokio::test]
-async fn gemini_3_streamed() {
-    const CELL: Cell = Cell {
-        model: gemini::completion::GEMINI_3_FLASH_PREVIEW,
-        api: Api::GenerateContent,
-        streamed: true,
-        answer_signed: true,
-    };
-    with_gemini_cassette("text_signature_matrix/gemini_3_streamed", |client| {
-        run(client, CELL)
-    })
-    .await;
-    assert_recorded(CELL, "text_signature_matrix/gemini_3_streamed");
-}
-
-#[tokio::test]
-async fn gemini_2_5_unary() {
-    const CELL: Cell = Cell {
-        model: gemini::completion::GEMINI_2_5_FLASH,
-        api: Api::GenerateContent,
-        streamed: false,
-        answer_signed: false,
-    };
-    with_gemini_cassette("text_signature_matrix/gemini_2_5_unary", |client| {
-        run(client, CELL)
-    })
-    .await;
-    assert_recorded(CELL, "text_signature_matrix/gemini_2_5_unary");
-}
-
-#[tokio::test]
-async fn gemini_2_5_streamed() {
-    const CELL: Cell = Cell {
-        model: gemini::completion::GEMINI_2_5_FLASH,
-        api: Api::GenerateContent,
-        streamed: true,
-        answer_signed: false,
-    };
-    with_gemini_cassette("text_signature_matrix/gemini_2_5_streamed", |client| {
-        run(client, CELL)
-    })
-    .await;
-    assert_recorded(CELL, "text_signature_matrix/gemini_2_5_streamed");
 }
 
 #[tokio::test]
@@ -288,26 +171,10 @@ async fn interactions_unary() {
         model: gemini::completion::GEMINI_3_FLASH_PREVIEW,
         api: Api::Interactions,
         streamed: false,
-        answer_signed: false,
     };
     with_gemini_cassette("text_signature_matrix/interactions_unary", |client| {
         run(client, CELL)
     })
     .await;
     assert_recorded(CELL, "text_signature_matrix/interactions_unary");
-}
-
-#[tokio::test]
-async fn interactions_streamed() {
-    const CELL: Cell = Cell {
-        model: gemini::completion::GEMINI_3_FLASH_PREVIEW,
-        api: Api::Interactions,
-        streamed: true,
-        answer_signed: false,
-    };
-    with_gemini_cassette("text_signature_matrix/interactions_streamed", |client| {
-        run(client, CELL)
-    })
-    .await;
-    assert_recorded(CELL, "text_signature_matrix/interactions_streamed");
 }

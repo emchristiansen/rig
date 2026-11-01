@@ -17,9 +17,7 @@ async fn main() -> Result<()> {
     // depend on the `rig-memory` companion crate. Here we use the bare backend.
     let memory = InMemoryConversationMemory::new();
 
-    let agent = OpenAI::from_env()?
-        .bound()?
-        .agent(openai::GPT_4O)
+    let agent = AgentBuilder::new(OpenAI::from_env()?.completion(openai::GPT_4O))
         .preamble("You are a helpful assistant with persistent memory.")
         .memory(memory)
         .build();
@@ -28,14 +26,14 @@ async fn main() -> Result<()> {
         .prompt("My name is Alice.")
         .conversation("user-123")
         .await?
-        .output;
+        .output();
     println!("turn 1: {first}");
 
     let second = agent
         .prompt("What's my name?")
         .conversation("user-123")
         .await?
-        .output;
+        .output();
     println!("turn 2: {second}");
 
     Ok(())

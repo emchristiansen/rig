@@ -16,11 +16,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     completion::{CompletionRequest, CompletionResponse, Message, ModelRef, ProviderCapabilities},
-    embeddings::{EmbeddingResponse, ImageEmbeddingResponse},
+    embeddings::EmbeddingResponse,
     error::ErrorReport,
     id::ConversationId,
+    operation::RerankRequest,
     rerank::RerankResponse,
-    streaming::StreamEvent,
+    streaming::Transcript,
     tool::ToolResult,
     vector_store::request::{Filter, VectorSearchRequest},
     wasm_compat::WasmCompatSend,
@@ -29,8 +30,8 @@ use crate::{
 /// The identity of one dispatch, minted by the dispatcher.
 ///
 /// It is the correlation key between a bus-tap [`EffectRecord`], a hook
-/// observation, and a host's own bookkeeping (a Bevy driver maps it to an
-/// `Entity`). Ids are unique per dispatcher and strictly increasing.
+/// observation, and a host's own bookkeeping (a host driver maps it to its
+/// own handle). Ids are unique per dispatcher and strictly increasing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct EffectId(u64);
@@ -412,12 +413,12 @@ pub mod family {
 
     use super::{
         CustomEffect, EffectFamily, EffectKind, EmbedInputs, EmbedOutputs, Family, MemoryOp,
-        MemoryOutcome, Outcome, RerankRequest, RetrieveQuery, RetrievedDocuments, ToolCallRequest,
-        sealed::Sealed,
+        MemoryOutcome, Outcome, RetrieveQuery, RetrievedDocuments, ToolCallRequest, sealed::Sealed,
     };
     use crate::{
         completion::{CompletionRequest, CompletionResponse},
         error::{ErrorKind, ErrorReport},
+        operation::RerankRequest,
         rerank::RerankResponse,
         tool::ToolResult,
     };
@@ -783,8 +784,8 @@ impl EffectKind {
     }
 }
 
-/// The inputs of an embedding request: the transcription of
-/// `EmbeddingModel::embed_texts` and `ImageEmbeddingModel::embed_images`.
+/// The inputs of an embedding request: the texts or images an embedding
+/// model's call embeds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "modality", content = "inputs", rename_all = "snake_case")]
 pub enum EmbedInputs {
@@ -792,16 +793,6 @@ pub enum EmbedInputs {
     Texts(Vec<String>),
     /// Image bytes.
     Images(Vec<Vec<u8>>),
-}
-
-/// A reranking request: the transcription of
-/// [`RerankModel::rerank`](crate::rerank::RerankModel::rerank).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RerankRequest {
-    /// The query the documents are ranked against.
-    pub query: String,
-    /// The documents, in input order.
-    pub documents: Vec<String>,
 }
 
 /// A conversation-memory operation: the transcription of
@@ -897,7 +888,7 @@ pub enum EmbedOutputs {
     /// Text embeddings.
     Texts(EmbeddingResponse),
     /// Image embeddings.
-    Images(ImageEmbeddingResponse),
+    Images(EmbeddingResponse),
 }
 
 /// The answer to a [`MemoryOp`].
@@ -973,13 +964,18 @@ pub struct EffectRecord {
     pub kind: EffectKind,
     /// The answer.
     pub outcome: Result<Outcome, ErrorReport>,
-    /// A streamed dispatch's events, verbatim, when the recorder was asked
+    /// A streamed dispatch's items, verbatim, when the recorder was asked
     /// to keep them (`EffectLogRecorder::keeping_stream_events`); `None`
     /// otherwise, and the answer is the fold. A replayer re-emits these
-    /// when present, so a replayed consumer sees the original delta
-    /// boundaries.
+    /// when present, so a replayed consumer sees the original fragment
+    /// boundaries. They read back through [`Transcript::parse_prefix`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub events: Option<Vec<StreamEvent>>,
+    pub events: Option<Transcript>,
+    /// Who a streamed dispatch's reply was from, as its relay stated it
+    /// before the first item, when the items are kept. A replayer sends it
+    /// first, so a replayed stream cut short knows its origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_origin: Option<crate::message::Origin>,
     /// Parent dispatch for a nested handler call, or `None` for a root dispatch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<EffectId>,
@@ -1207,7 +1203,7 @@ const _: fn() = || {
     assert_wire::<RetrievedDocuments>();
     assert_wire::<EffectRecord>();
     assert_wire::<EffectRow>();
-    assert_wire::<StreamEvent>();
+    assert_wire::<Transcript>();
 };
 
 #[cfg(test)]

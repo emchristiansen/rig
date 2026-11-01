@@ -1,21 +1,45 @@
 //! Wire-conformance suite for the Gemini gRPC typed-event wire.
 //!
 //! Events-first (`WireInput::Event`): fixture frames are already-typed
-//! protobuf responses driven through
-//! [`rig_gemini_grpc::streaming::stream_from_events`] — the shared driver,
-//! canonical grammar, and terminal normalization — with no gRPC transport.
+//! protobuf responses replayed by a scripted transport through the
+//! `GenerateContent` wire — the shared driver, canonical grammar, and
+//! terminal normalization — with no gRPC channel.
 //! Frame-level malformed/unknown scenarios self-report as skipped: prost
 //! surfaces decode failures as transport `Status` errors, and its
 //! unknown-variant signal is the sub-frame `part.data` oneof decoding to
 //! `None`.
 
-use rig_core::completion::FinishReason;
+use rig_core::completion::{CompletionRequest, FinishReason};
+use rig_core::driver::{Exchange, Model, Opened, Opening, Transport};
 use rig_core::error::ProviderError;
 use rig_core::test_utils::streaming_conformance::{
     InterleavedReasoningFixture, ProviderWireFixture, WireDriver, WireInput, event_frame,
     fixtures::drain,
 };
+use rig_gemini_grpc::completion::GenerateContent;
 use rig_gemini_grpc::proto;
+
+/// Replays scripted protobuf chunks as a streamed reply.
+#[derive(Clone)]
+struct Scripted(
+    std::sync::Arc<std::sync::Mutex<Vec<Result<proto::GenerateContentResponse, ProviderError>>>>,
+);
+
+impl Transport<GenerateContent> for Scripted {
+    fn send(
+        &self,
+        _request: proto::GenerateContentRequest,
+        _exchange: Exchange,
+    ) -> Opening<proto::GenerateContentResponse> {
+        let chunks = match self.0.lock() {
+            Ok(mut chunks) => std::mem::take(&mut *chunks),
+            Err(_) => {
+                return Opening::failed(ProviderError::Provider("script lock poisoned".to_owned()));
+            }
+        };
+        Opening::ready(Opened::new(futures::stream::iter(chunks)))
+    }
+}
 
 fn driver() -> WireDriver {
     WireDriver::new("gemini-grpc", |chunks| {
@@ -32,11 +56,15 @@ fn driver() -> WireDriver {
                                     .to_string(),
                             )
                         }),
-                    Err(error) => Err(ProviderError::Http(error)),
+                    Err(error) => Err(ProviderError::Http(error.into())),
                 })
                 .collect();
-            let stream =
-                rig_gemini_grpc::streaming::stream_from_events(futures::stream::iter(events));
+            let request: CompletionRequest = CompletionRequest::new("hello");
+            let stream = Model::new(
+                GenerateContent::new("gemini-2.5-pro"),
+                Scripted(std::sync::Arc::new(std::sync::Mutex::new(events))),
+            )
+            .stream(request)?;
             Ok(drain(stream).await)
         })
     })
@@ -52,6 +80,7 @@ fn response(parts: Vec<proto::Part>, finish_reason: i32) -> proto::GenerateConte
             finish_reason,
             index: None,
             finish_message: None,
+            ..Default::default()
         }],
         prompt_feedback: None,
         usage_metadata: None,
@@ -65,16 +94,17 @@ fn text_part(text: &str) -> proto::Part {
         thought: false,
         thought_signature: Vec::new(),
         part_metadata: None,
+        metadata: None,
         data: Some(proto::part::Data::Text(text.to_string())),
     }
 }
 
 fn function_call_part(name: &str) -> proto::Part {
-    let args = proto::Struct {
+    let args = prost_types::Struct {
         fields: [(
             "city".to_string(),
-            proto::Value {
-                kind: Some(proto::value::Kind::StringValue("Tokyo".to_string())),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::StringValue("Tokyo".to_string())),
             },
         )]
         .into_iter()
@@ -84,6 +114,7 @@ fn function_call_part(name: &str) -> proto::Part {
         thought: false,
         thought_signature: Vec::new(),
         part_metadata: None,
+        metadata: None,
         data: Some(proto::part::Data::FunctionCall(proto::FunctionCall {
             name: name.to_string(),
             args: Some(args),
@@ -97,6 +128,7 @@ fn thought_part(text: &str) -> proto::Part {
         thought: true,
         thought_signature: Vec::new(),
         part_metadata: None,
+        metadata: None,
         data: Some(proto::part::Data::Text(text.to_string())),
     }
 }
@@ -115,7 +147,7 @@ fn usage(prompt: i32, candidates: i32, total: i32) -> proto::UsageMetadata {
         prompt_token_count: prompt,
         candidates_token_count: candidates,
         total_token_count: total,
-        cached_content_token_count: 0,
+        ..Default::default()
     }
 }
 

@@ -1,20 +1,20 @@
 //! ChatGPT subscription authentication and Responses-format dialect configuration.
 //!
-//! Use an exchanged access token from the environment, or sign in through [`auth`]
-//! and pass the resolved token to [`OpenAI::with_key`](crate::providers::openai::OpenAI::with_key).
-//! Every request carries the caller's exact identity, which the caller
-//! supplies: the dialect has none of its own. [`realtime`] creates GPT-Live
-//! calls over the same subscription.
+//! [`from_env`] reads an exchanged access token from the environment. Pass an
+//! [`auth::Authenticator`] to [`OpenAI::authenticate`](crate::providers::openai::OpenAI::authenticate)
+//! to resolve its token on a client of this dialect. Each request requires the
+//! caller's exact configured identity. [`realtime`] creates GPT-Live calls over
+//! the same subscription.
 //!
 //! ```no_run
 //! use rig_core::providers::chatgpt;
-//! use rig_core::providers::openai::OpenAI;
-//! use rig_core::providers::openai::wire::CallerIdentity;
+//! use rig_core::providers::openai::{OpenAIConfig, wire::CallerIdentity};
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let identity = CallerIdentity::new("my-originator", "my-user-agent/1.0", None)?;
-//! let model = OpenAI::from_env_with(&chatgpt::DIALECT)?
+//! let model = OpenAIConfig::from_env_with(&chatgpt::DIALECT)?
 //!     .with_caller_identity(identity)
+//!     .client()
 //!     .completion(chatgpt::GPT_5_3_CODEX);
 //! # let _ = model;
 //! # Ok(())
@@ -22,12 +22,10 @@
 //! ```
 
 pub mod auth;
+pub mod extension;
 pub mod realtime;
 
-/// The Codex Responses websocket session adapter, re-exported under the
-/// ChatGPT provider's websocket path. The session itself lives with the
-/// Responses wire it composes over, at
-/// [`responses_api::websocket::codex`](crate::providers::openai::responses_api::websocket::codex).
+/// The Codex Responses websocket session adapter.
 #[cfg(feature = "websocket")]
 #[cfg_attr(docsrs, doc(cfg(feature = "websocket")))]
 pub use crate::providers::openai::responses_api::websocket::codex as websocket;
@@ -60,7 +58,7 @@ pub const PROVIDER_NAME: &str = "chatgpt";
 ///
 /// It has no default caller identity. Every request, the Codex websocket
 /// handshake included, carries exactly the identity the caller supplies
-/// ([`OpenAI::with_caller_identity`](crate::providers::openai::OpenAI::with_caller_identity),
+/// ([`OpenAIConfig::with_caller_identity`](crate::providers::openai::OpenAIConfig::with_caller_identity),
 /// or both `CHATGPT_ORIGINATOR` and `CHATGPT_USER_AGENT`), and refuses with
 /// [`MissingCallerIdentity`](crate::providers::openai::wire::MissingCallerIdentity)
 /// before anything is sent when there is none.
@@ -86,6 +84,9 @@ pub const DIALECT: Dialect = Dialect {
         account_id_env: Some("CHATGPT_ACCOUNT_ID"),
         default_instructions: Some(DEFAULT_INSTRUCTIONS),
         instructions_env: Some("CHATGPT_DEFAULT_INSTRUCTIONS"),
+        // The subscription backend keeps no files, so no file id resolves
+        // there.
+        accepts_file_ids: false,
         identity: Some(Identity {
             originator_env: "CHATGPT_ORIGINATOR",
             user_agent_env: "CHATGPT_USER_AGENT",
@@ -105,3 +106,5 @@ pub const DIALECT: Dialect = Dialect {
 pub(crate) fn session_id() -> String {
     crate::id::generate()
 }
+
+crate::client::macros::openai_vendor!(DIALECT, "ChatGPT");

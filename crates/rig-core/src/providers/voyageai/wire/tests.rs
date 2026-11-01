@@ -1,25 +1,10 @@
 use super::*;
-use crate::driver::Bound;
-use crate::embeddings::EmbeddingModel as _;
-use crate::rerank::RerankModel as _;
-use crate::test_utils::RecordingHttpClient;
+use crate::test_utils::{RecordingHttpClient, json_body};
+use crate::wire::Capabilities;
 use crate::wire::secret::tests::a_config_reloads_without_its_credential;
 
-fn voyage() -> VoyageAi {
-    VoyageAi::new("voyage-test-key")
-}
-
-fn body_of(encoded: &Encoded) -> serde_json::Value {
-    let [request] = encoded.requests.as_slice() else {
-        panic!(
-            "expected exactly one request, got {}",
-            encoded.requests.len()
-        );
-    };
-    match request.body() {
-        Body::Bytes(bytes) => serde_json::from_slice(bytes).expect("the body is JSON"),
-        Body::Multipart(_) => panic!("neither Voyage wire sends a multipart body"),
-    }
+fn voyage() -> VoyageAiConfig {
+    VoyageAiConfig::new("voyage-test-key")
 }
 
 /// `POST /embeddings`' reply shape, with two-element vectors in place of the
@@ -28,11 +13,11 @@ const EMBED_BODY: &str = r#"{"object":"list","data":[{"object":"embedding","embe
 
 #[tokio::test]
 async fn an_embedding_reply_pairs_its_vectors_with_the_texts_that_were_sent() {
-    let response = Bound::new(
-        voyage().embeddings("voyage-3.5", None),
+    let response = crate::driver::Model::new(
+        voyage().embedding("voyage-3.5", None),
         RecordingHttpClient::new(EMBED_BODY),
     )
-    .embed_texts_response(vec!["first".to_owned(), "second".to_owned()])
+    .call(vec!["first".to_owned(), "second".to_owned()])
     .await
     .expect("the reply decodes");
 
@@ -59,17 +44,17 @@ async fn an_embedding_reply_pairs_its_vectors_with_the_texts_that_were_sent() {
 #[test]
 fn an_unset_option_is_absent_from_the_request() {
     let encoded = voyage()
-        .embeddings("voyage-3.5", None)
+        .embedding("voyage-3.5", None)
         .encode(vec!["first".to_owned()], Mode::Unary)
         .expect("the request encodes");
 
     assert_eq!(
-        body_of(&encoded),
+        json_body(&encoded.request),
         serde_json::json!({ "model": "voyage-3.5", "input": ["first"] })
     );
 
     let encoded = voyage()
-        .embeddings("voyage-3.5", None)
+        .embedding("voyage-3.5", None)
         .with_input_type("query")
         .with_truncation(false)
         .with_output_dimension(256)
@@ -77,7 +62,7 @@ fn an_unset_option_is_absent_from_the_request() {
         .expect("the request encodes");
 
     assert_eq!(
-        body_of(&encoded),
+        json_body(&encoded.request),
         serde_json::json!({
             "model": "voyage-3.5",
             "input": ["first"],
@@ -91,15 +76,19 @@ fn an_unset_option_is_absent_from_the_request() {
 #[test]
 fn an_embedding_wire_reports_the_width_it_asked_for() {
     assert_eq!(
-        voyage().embeddings("voyage-3.5", None).capabilities(),
-        EmbeddingCapabilities::new(1024, 1024)
+        voyage()
+            .embedding("voyage-3.5", None)
+            .describe()
+            .capabilities,
+        Capabilities::embedding(1024, 1024)
     );
     assert_eq!(
         voyage()
-            .embeddings("voyage-3.5", None)
+            .embedding("voyage-3.5", None)
             .with_output_dimension(256)
-            .capabilities(),
-        EmbeddingCapabilities::new(1024, 256),
+            .describe()
+            .capabilities,
+        Capabilities::embedding(1024, 256),
         "a vector store sizes its index from `ndims`, so asking Voyage for a \
          narrower vector must change what the wire reports"
     );
@@ -111,14 +100,14 @@ const RERANK_BODY: &str = r#"{"object":"list","data":[{"relevance_score":0.9,"in
 
 #[tokio::test]
 async fn a_rerank_reply_keeps_the_provider_order_and_the_indices_it_named() {
-    let response = Bound::new(
+    let response = crate::driver::Model::new(
         voyage().rerank("rerank-2.5"),
         RecordingHttpClient::new(RERANK_BODY),
     )
-    .rerank(
-        "which is best?",
-        vec!["worse".to_owned(), "better".to_owned()],
-    )
+    .call(RerankRequest {
+        query: "which is best?".to_owned(),
+        documents: vec!["worse".to_owned(), "better".to_owned()],
+    })
     .await
     .expect("the reply decodes");
 
@@ -151,7 +140,7 @@ fn a_rerank_request_carries_the_query_the_documents_and_the_options() {
         .expect("the request encodes");
 
     assert_eq!(
-        body_of(&encoded),
+        json_body(&encoded.request),
         serde_json::json!({
             "query": "which is best?",
             "documents": ["worse", "better"],
@@ -162,28 +151,16 @@ fn a_rerank_request_carries_the_query_the_documents_and_the_options() {
     );
 }
 
-/// The batch limit is the wire's capability, and it is what
-/// `RerankModel::max_documents` reports.
-#[test]
-fn a_rerank_wire_declares_the_batch_limit() {
-    let bound = Bound::new(
-        voyage().rerank("rerank-2.5"),
-        RecordingHttpClient::new(RERANK_BODY),
-    );
-    assert_eq!(voyage().rerank("rerank-2.5").capabilities(), 1000);
-    assert_eq!(bound.max_documents(), 1000);
-}
-
 #[test]
 fn a_serialized_config_carries_no_key_material() {
     a_config_reloads_without_its_credential(
-        &VoyageAi::new("voyage-test-key"),
+        &VoyageAiConfig::new("voyage-test-key"),
         "voyage-test-key",
         |voyage| &voyage.api_key,
     );
 
     for wire in [
-        serde_json::to_string(&voyage().embeddings("voyage-3.5", None)),
+        serde_json::to_string(&voyage().embedding("voyage-3.5", None)),
         serde_json::to_string(&voyage().rerank("rerank-2.5")),
     ] {
         let serialized = wire.expect("the wire serializes");

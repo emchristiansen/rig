@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 9072754608376111302,
+    "run_spec": 3116083730441856965,
     "handlers": [
       {
         "key": "golden/model:default",
@@ -117,12 +117,7 @@
             {
               "type": "toolcall",
               "id": {
-                "origin": "explicit",
-                "id": "call_7WcyMezOVARdQc2x7WzCZ5WC"
-              },
-              "provider": {
-                "call_id": "call_7WcyMezOVARdQc2x7WzCZ5WC",
-                "item_id": "fc_07afd8598d1db429006ab395f4b56c87d08afbdfa542e335e4"
+                "provider": "call_7WcyMezOVARdQc2x7WzCZ5WC"
               },
               "function": {
                 "name": "add",
@@ -131,8 +126,17 @@
                   "y": 25
                 }
               },
-              "signature": null,
-              "additional_params": null
+              "native": {
+                "item": {
+                  "arguments": "{\"x\":17,\"y\":25}",
+                  "call_id": "call_7WcyMezOVARdQc2x7WzCZ5WC",
+                  "id": "fc_07afd8598d1db429006ab395f4b56c87d08afbdfa542e335e4",
+                  "name": "add",
+                  "status": "completed",
+                  "type": "function_call"
+                },
+                "fingerprint": "8f13725e60ae3809"
+              }
             }
           ],
           "usage": {
@@ -140,14 +144,25 @@
             "output_tokens": 18,
             "total_tokens": 117,
             "cached_input_tokens": 0,
-            "reasoning_tokens": 0
+            "cache_creation_input_tokens": 0,
+            "reasoning_tokens": 0,
+            "cost": {
+              "input": 0.0002475,
+              "output": 0.00018,
+              "cache_read": 0.0,
+              "cache_write": 0.0,
+              "total": 0.00042750000000000004
+            }
           },
-          "message_id": null,
-          "response_id": "resp_07afd8598d1db429006ab395f4192487d0b420b46b2eb8f46b",
+          "origin": {
+            "api": "openai.responses",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "response_model": "gpt-4o-2024-08-06",
+            "response_id": "resp_07afd8598d1db429006ab395f4192487d0b420b46b2eb8f46b"
+          },
           "provider_request_id": "req_4d22ddd9327245a1b37015549b247fc3",
           "finish_reason": "tool_calls",
-          "provider": "openai",
-          "model": "gpt-4o-2024-08-06",
           "raw": {
             "access_programs": null,
             "background": false,

@@ -26,16 +26,20 @@ use rig_core::{
     completion::{CompletionRequest, ProviderCapabilities},
     effect::{
         CustomEffect, EffectId, EffectKind, EmbedInputs, EmbedModality, EmbedOutputs, Family,
-        FamilyDescriptor, HandlerDescriptor, HandlerKey, MemoryOp, MemoryOutcome, RerankRequest,
-        RetrieveQuery, RetrievedDocuments, family,
+        FamilyDescriptor, HandlerDescriptor, HandlerKey, MemoryOp, MemoryOutcome, RetrieveQuery,
+        RetrievedDocuments, family,
     },
-    embeddings::{Embedding, EmbeddingResponse, ImageEmbeddingResponse},
+    embeddings::{Embedding, EmbeddingResponse},
     error::{ErrorKind, ErrorReport},
     id::ConversationId,
     message::Message,
-    streaming::StreamingCompletionResponse,
+    operation::RerankRequest,
+    streaming::CompletionStream,
     tool::ToolContext,
-    vector_store::request::{Filter, VectorSearchRequest},
+    vector_store::{
+        VectorSearchIdResult, VectorSearchResult,
+        request::{Filter, VectorSearchRequest},
+    },
 };
 
 use super::{DispatchOptions, Dispatcher, EffectStream, Pending};
@@ -49,7 +53,9 @@ pub struct Handle<F: Family> {
     _family: PhantomData<fn() -> F>,
 }
 
-/// A completion model: `complete`, `stream`, `capabilities`.
+/// A completion model the bus serves: `call`, `stream`, `capabilities`,
+/// `label`. Every call is dispatched, recorded and observed by the bus; a
+/// model held directly is a [`DynModel`](rig_core::DynModel) instead.
 pub type ModelHandle = Handle<family::Completion>;
 /// A tool: `call`.
 pub type ToolHandle = Handle<family::Tool>;
@@ -292,7 +298,7 @@ impl Future for ToolCall {
     }
 }
 /// A retrieval in flight, deserialized on this side of the bus.
-pub type Retrieval<T> = Typed<family::Retrieve, Vec<(f64, String, T)>>;
+pub type Retrieval<T> = Typed<family::Retrieve, Vec<VectorSearchResult<T>>>;
 
 impl<F: Family> Handle<F> {
     /// Dispatch a typed request of this family: one implementation for
@@ -324,7 +330,7 @@ impl ModelHandle {
     }
 
     /// The model's label as the handler advertises it now.
-    pub fn model_ref(&self) -> rig_core::completion::ModelRef {
+    pub fn label(&self) -> rig_core::completion::ModelRef {
         match self.descriptor().family {
             FamilyDescriptor::Completion { model, .. } => model,
             FamilyDescriptor::Tool { .. }
@@ -338,22 +344,25 @@ impl ModelHandle {
         }
     }
 
-    /// A unary completion.
-    pub fn complete(&self, request: CompletionRequest) -> Completion {
-        self.complete_with_context(request, None)
+    /// A unary completion under the recorder's observation context.
+    pub fn call(&self, request: CompletionRequest) -> Completion {
+        self.call_with(request, DispatchOptions::default())
     }
 
-    /// A unary completion with explicit per-invocation observation state.
-    /// The context overrides recorder context for this call only.
-    pub fn complete_with_context(
+    /// [`Self::call`] observed under `context`, which overrides the
+    /// recorder's context for this call only.
+    pub fn call_observed(
         &self,
         request: CompletionRequest,
-        context: Option<rig_core::observe::AdapterContext>,
+        context: rig_core::observe::AdapterContext,
     ) -> Completion {
-        let options = DispatchOptions {
-            adapter_context: context,
-            ..DispatchOptions::default()
-        };
+        self.call_with(
+            request,
+            DispatchOptions::default().with_adapter_context(context),
+        )
+    }
+
+    fn call_with(&self, request: CompletionRequest, options: DispatchOptions) -> Completion {
         Typed::narrow(
             self.dispatcher.dispatch_with(
                 &self.descriptor.key,
@@ -367,25 +376,32 @@ impl ModelHandle {
         )
     }
 
-    /// Stream a completion through the canonical accumulator, surfacing bus errors
-    /// as stream errors. Uses the model label initially and the terminal record's
+    /// Stream a completion relayed from the bus, surfacing bus errors as
+    /// stream errors. Uses the model label initially and the terminal record's
     /// provider name when available.
-    pub fn stream(&self, request: CompletionRequest) -> StreamingCompletionResponse {
-        self.stream_with_context(request, None)
+    pub fn stream(&self, request: CompletionRequest) -> CompletionStream {
+        self.stream_with(request, DispatchOptions::default())
     }
 
-    /// A streaming completion with explicit observation state retained by the
-    /// invocation, including lazy startup and partial consumption.
-    pub fn stream_with_context(
+    /// [`Self::stream`] observed under `context`: observation state the
+    /// invocation retains, including lazy startup and partial consumption.
+    pub fn stream_observed(
         &self,
         request: CompletionRequest,
-        context: Option<rig_core::observe::AdapterContext>,
-    ) -> StreamingCompletionResponse {
-        let provider = self.model_ref().to_string();
-        let options = DispatchOptions {
-            adapter_context: context,
-            ..DispatchOptions::default()
-        };
+        context: rig_core::observe::AdapterContext,
+    ) -> CompletionStream {
+        self.stream_with(
+            request,
+            DispatchOptions::default().with_adapter_context(context),
+        )
+    }
+
+    fn stream_with(
+        &self,
+        request: CompletionRequest,
+        options: DispatchOptions,
+    ) -> CompletionStream {
+        let provider = self.label().to_string();
         let stream: EffectStream = self.dispatcher.dispatch_stream_with(
             &self.descriptor.key,
             EffectKind::Completion {
@@ -496,13 +512,17 @@ impl MemoryHandle {
 /// JSON, the type parameter never crosses it.
 fn deserialize_scored<T: DeserializeOwned>(
     documents: RetrievedDocuments,
-) -> Result<Vec<(f64, String, T)>, ErrorReport> {
+) -> Result<Vec<VectorSearchResult<T>>, ErrorReport> {
     match documents {
         RetrievedDocuments::Scored(results) => results
             .into_iter()
             .map(
                 |(score, id, document)| match serde_json::from_value::<T>(document) {
-                    Ok(document) => Ok((score, id, document)),
+                    Ok(document) => Ok(VectorSearchResult {
+                        score,
+                        id,
+                        document,
+                    }),
                     Err(error) => Err(ErrorReport::new(
                         ErrorKind::Json,
                         format!("retrieved document `{id}` did not deserialize: {error}"),
@@ -532,11 +552,14 @@ impl IndexHandle {
     pub fn top_n_ids(
         &self,
         req: VectorSearchRequest<Filter<serde_json::Value>>,
-    ) -> Typed<family::Retrieve, Vec<(f64, String)>> {
+    ) -> Typed<family::Retrieve, Vec<VectorSearchIdResult>> {
         Typed::narrow(
             self.dispatch_wrapped(family::Retrieve::wrap(RetrieveQuery::TopNIds { req })),
             |documents| match documents {
-                RetrievedDocuments::Ids(results) => Ok(results),
+                RetrievedDocuments::Ids(results) => Ok(results
+                    .into_iter()
+                    .map(|(score, id)| VectorSearchIdResult { score, id })
+                    .collect()),
                 RetrievedDocuments::Scored(_) => {
                     Err(wrong_shape("scored ids", family::Retrieve::FAMILY))
                 }
@@ -622,10 +645,7 @@ impl EmbedHandle {
     }
 
     /// Embed image bytes.
-    pub fn embed_images(
-        &self,
-        images: Vec<Vec<u8>>,
-    ) -> Typed<family::Embed, ImageEmbeddingResponse> {
+    pub fn embed_images(&self, images: Vec<Vec<u8>>) -> Typed<family::Embed, EmbeddingResponse> {
         Typed::narrow(
             self.dispatch_wrapped(family::Embed::wrap(EmbedInputs::Images(images))),
             |outputs| match outputs {
@@ -640,7 +660,7 @@ impl EmbedHandle {
 
 impl RerankHandle {
     /// The model's label as the handler advertises it now.
-    pub fn model_label(&self) -> String {
+    pub fn label(&self) -> String {
         match self.descriptor().family {
             FamilyDescriptor::Rerank { model, .. } => model,
             FamilyDescriptor::Completion { .. }
@@ -678,12 +698,10 @@ impl RerankHandle {
     }
 }
 
-/// Wrap bus events in a canonical completion accumulator, preserving stream errors.
-pub(crate) fn wrap_stream(
-    provider: impl Into<String>,
-    stream: EffectStream,
-) -> StreamingCompletionResponse {
-    StreamingCompletionResponse::from_events(provider, Box::pin(stream))
+/// Relay bus events as a completion stream whose fold collects them,
+/// preserving stream errors.
+pub(crate) fn wrap_stream(provider: impl Into<String>, stream: EffectStream) -> CompletionStream {
+    CompletionStream::relay(provider, Box::pin(stream))
 }
 
 // Bus views must stay thread-safe even where handlers permit local WASM state.

@@ -7,13 +7,11 @@ HTTP cassette engine, the committed fixture corpora, and their verification suit
 |---|---|---|
 | effect logs and checkpoints | `src/effect_log/` | yes, always |
 | classic-agent replay adapter | `src/agent/` | yes, `agent` feature |
-| ECS replay adapter | `src/ecs/` | yes, `ecs` feature |
 | native HTTP engine | `src/http/` | yes, `http` feature |
 | provider cassettes | `fixtures/cassettes/<provider>/...yaml` | no (`exclude`) |
 | agent effect-log goldens | `fixtures/effects/<name>.effects.json` | no (`exclude`) |
-| world effect-log goldens and configuration scenes | `fixtures/effects/world/<name>.{effects,programs}.json` | no (`exclude`) |
 | cassette provider suites | `tests/<provider>.rs`, `tests/providers/`, `tests/common/` | no (`exclude`) |
-| effect-bus verification | `tests/verify/`, `tests/world_replay.rs`, `tests/world_replay_world.rs` | no (`exclude`) |
+| effect-bus verification | `tests/verify/` | no (`exclude`) |
 | minimal verification runner | `tests/minimal/Cargo.toml` (shared test sources) | no (`publish = false`, `exclude`) |
 
 ## Features and dependency direction
@@ -28,22 +26,21 @@ rig-cassette = { version = "0.42.0", default-features = false }
 |---|---|---|
 | none | `effect_log` | core contracts, futures and serialization only |
 | `agent` | `effect_log`, `agent` | `rig-agent`, without its default features |
-| `ecs` | `effect_log`, `ecs` | `rig-ecs` and Bevy |
 | `http` | `effect_log`, `http` | the native HTTP server/client engine, Tokio, ordered/round-trip JSON |
 | `bedrock` | `effect_log`, `http` | `http` plus Smithy event-stream decoding |
 
-Effect logs alone acquire neither runtime, Bevy, HTTP clients/servers, Tokio
-nor AWS dependencies. Agent and ECS integration are independently selectable:
-neither enables HTTP or `serde_json/preserve_order` / `float_roundtrip`, and
-neither acquires the other runtime. These guarantees concern the selected
-normal dependency graph; Cargo can still unify features requested by other
-dependencies in the same build.
+Effect logs alone acquire neither the agent runtime, HTTP clients/servers,
+Tokio nor AWS dependencies. The agent integration is selectable on its own and
+does not enable HTTP. These guarantees concern the selected normal dependency
+graph; Cargo can still unify features requested by other dependencies in the
+same build.
 
-The dependency direction is cassette → runtime → core. Neither runtime depends
-on cassette, including through optional features. The `rig` facade re-exports
-this crate as `rig::cassette`; its `agent` feature enables the cassette agent
-adapter. Direct minimal consumers should depend on `rig-cassette`, rather than
-the facade's default transport configuration.
+The dependency direction is cassette → runtime → core. The runtime does not
+depend on cassette, including through optional features. The `rig` facade re-exports
+this crate as `rig::cassette` behind its opt-in `cassette` feature; with the
+facade's `agent` feature it also enables the cassette agent adapter. Direct
+minimal consumers should depend on `rig-cassette`, rather than the facade's
+default transport configuration.
 
 The facade and provider helpers needed by this package's tests remain
 version-less path dev-dependencies, omitted from its published manifest.
@@ -51,7 +48,7 @@ The facade dev-dependency explicitly enables its capability features so provider
 targets retain the same test inventory without relying on workspace defaults.
 Independent downstream graph guards live in `src/http/paths.rs` and
 `tests/core/dependency_graph.rs`; they distinguish native-engine isolation from
-the minimal and independently enabled runtime adapters.
+the minimal library and the agent adapter.
 
 ## Effect logs and runtime integration
 
@@ -77,11 +74,11 @@ Required keys include all scoped program rows; conflicting declarations are
 rejected. Callers reapply executable middleware. Inferred descriptors for logs
 without declarations cannot establish verified program compatibility.
 
-Consumer-visible delivery batches allow ECS to enforce recorded schedule
-boundaries. The shared replayer supplies exchanges and event sequences, while
-the classic bus does not record ECS scheduling. Without delivery metadata and
-retained stream items, replay cannot prove exact partial state or first-visible
-answer policies. Batches are not clocks, world snapshots, or external-side-effect
+Delivery batches are optional metadata a runtime may record about its
+consumer-visible schedule. The shared replayer supplies exchanges and event
+sequences; the classic bus records no delivery batches. Without delivery
+metadata and retained stream items, replay cannot prove exact partial state or
+first-visible answer policies. Batches are not clocks or external-side-effect
 guarantees. Stream error positions preserve ordering even around a final event;
 a folded outcome cannot reconstruct that order. Empty metadata is omitted, and
 logs without error positions cannot prove the original error-item sequence.
@@ -96,17 +93,6 @@ For a host-owned bus, attach the recorder with `BusDriver::record_to`; an agent
 over that bus cannot install its own recorder. Replay registration is
 `rig_cassette::agent::replay::register_all` (or `register_all_checking`).
 
-For ECS, enable `ecs`. Install any recorder through
-`rig_ecs::bus::Recording::install`, or use
-`rig_cassette::ecs::EffectLogResource::install` to retain the concrete handle as
-a resource too. Add `rig_cassette::ecs::ReplayPlugin` after `RigPlugin` or
-`BusPlugin`, then call `Replay::register(&mut World, &EffectLog)` before issuing
-replayed effects. `Replay::load` restores recorded effect ids;
-`Replay::policy_visible()` additionally requires the recorded delivery contract.
-`ReplayDelivery`, `ReplayFailure` and program identity helpers live in
-`rig_cassette::ecs` / `rig_cassette::ecs::identity`. World checkpoint state and
-generic execution/observation mechanisms remain in `rig-ecs`.
-
 Migration: replace the removed `rig-effect-log` dependency with `rig-cassette`
 and its `effect_log` module. Replace implicit agent recording/log getters with
 an explicit recorder and the agent extension trait. Move runtime replay imports
@@ -120,7 +106,7 @@ native-only and intentionally opts into both JSON features listed above.
 
 
 Pass a fixture root containing provider directories to `ProviderCassette::start`,
-`start_via(Transport::Direct, ..)`, `cassette_path` and every `recorded_*` reader:
+`start_via(RecordVia::Direct, ..)`, `cassette_path` and every `recorded_*` reader:
 
 ```text
 <fixture-root>/anthropic/completion.yaml
@@ -135,18 +121,44 @@ returns early cannot pass on a recording it never played to the end. The guard
 stays silent while the thread is already panicking, for a fully played session,
 and after `finish_after_test_result` returns a test's own error. Invalid
 fixtures and failed assertions panic, preserving the original test-support
-behavior.
+behavior. Applications that record or replay outside a test use
+`ProviderCassette::try_start_at` and `try_finish`, which return a
+`CassetteError` for each of those failures instead. `try_finish` shuts the
+session down whatever its outcome, so dropping it afterwards never panics.
 
 `RIG_PROVIDER_TEST_MODE` defaults to `replay`. `record` contacts the configured
 upstream and overwrites the selected fixture after scrubbing; `start` and
 `start_via` read the mode from the environment, and a recording reaches the
-provider through the proxy (`start`) or directly (`start_via(Transport::Direct, ..)`).
+provider through the proxy (`start`) or directly (`start_via(RecordVia::Direct, ..)`).
 Consumers that stage candidates use `ProviderCassette::start_at` with an explicit
 mode and exact path: a live capture records into a candidate path, and a
 verification pass replays with `CassetteMode::Replay` even when the environment
 asks for recording, so a candidate is never implicitly promoted to a fixture.
 While a live run is in progress, `checkpoint_recording` writes the completed,
 scrubbed exchanges to a partial path without finalizing the recording.
+
+`RIG_CASSETTE_SNAPSHOTS` is off unless set. With `check`, a replay session
+also compares each request body with the fixture's request snapshot,
+`<fixture>.requests.json` (`request_snapshot`), and `finish` returns
+`CassetteError::SnapshotMismatch` naming each difference by JSON pointer.
+With `write`, the session rewrites the snapshot from the requests it received.
+A snapshot holds only how a sent body differs from its recording, compared
+after scrubbing as canonical JSON or as multipart parts, so a fixture whose
+requests equal their recordings has none. This repository sets `check` for
+its own cassette tests.
+
+Replay compares request bodies exactly unless `RIG_CASSETTE_MATCHING=shape`
+is set or the spec says `.shape_matched()`; `.exact_matched()` keeps exact
+matching whatever the variable says. Shape matching still compares the
+method, path, query and recorded headers exactly, but compares bodies by a
+coarse key: the field structure, the order of arrays of objects, and the
+values of `model`, `role`, `name` and `stream`, with every other value, the
+types of content, tool schemas and tool arguments erased. A change to how a
+request is written then replays without a new recording, and with snapshots
+on in `check` mode the session fails until the snapshot holds the change.
+Unordered shape matching serves, among the interactions with the request's
+key, the one whose body is closest to the request's. This
+repository sets `shape` for its own cassette tests.
 
 A recording only becomes the fixture when the test passed and the recording is
 clean. A failed test's exchanges, and a recording `finish` refuses, go under
@@ -195,26 +207,11 @@ the path to avoid leaking account names.
 
 `fixtures/cassettes/<provider>/` holds the recorded HTTP interactions the
 provider suites in this package replay. `fixtures/effects/*.effects.json` holds
-agent-produced effect logs. `fixtures/effects/world/*.effects.json` holds
-world-produced logs. Each runtime pins its own corpus; neither corpus is
-compared to the other. Native comparisons exclude only `header.deliveries`,
-whose batches and stream groupings depend on asynchronous readiness. Raw
-boundaries remain in the world fixtures and are validated during replay.
-Each world log has a `.programs.json` sidecar with pre-dispatch configuration
-scenes for its scopes. These declare configuration, not executable systems.
-All fixtures are data: they are
+agent-produced effect logs. All fixtures are data: they are
 regenerated by their producer, never edited by hand, and never regenerated to
 make a check pass. `.gitattributes` exempts the cassettes from the
 blank-at-eof whitespace check because SSE bodies legitimately end in a blank
 line.
-
-The native long-task matrix covers investigation/repair, reconciliation and
-continued inventory work. Its shared assertions check final state, delivered
-history, cache request configuration and missing-aware usage totals. HTTP
-cassette replay executes local tools; world effect replay replaces their
-handlers with recorded outcomes. New long-task logs also check a live-tool
-tripwire. Unrecorded
-cells remain explicitly ignored and provide no cache-hit evidence.
 
 No corpus is embedded with `include_*!`; the binaries read them at runtime
 from `CARGO_MANIFEST_DIR`, which is why `exclude` can keep them out of the
@@ -226,8 +223,7 @@ and never surfaces in `cargo publish --dry-run`).
 Background, not an instruction to record: recording contacts a real provider
 and is a deliberate, separately authorized act.
 
-For cells with both runtime columns, produce the two golden corpora from the
-same recorded HTTP. Native-only long-task cells use only the native producer:
+A golden is produced from the recorded HTTP in three steps:
 
 1. **Record the HTTP.** The producer test runs against the real provider under
    `RIG_PROVIDER_TEST_MODE=record`, on its own exact test filter, and writes a
@@ -236,46 +232,37 @@ same recorded HTTP. Native-only long-task cells use only the native producer:
 2. **Produce the agent golden.** The same producer runs again in replay mode under
    `RIG_REGENERATE_GOLDEN=1`, so the golden is generated from the *replayed*
    cassette and holds exactly the bytes replay serves.
-3. **Produce the world golden.** Run the corresponding native cell with
-   `RIG_PROVIDER_TEST_MODE=replay RIG_REGENERATE_GOLDEN=1`. It writes only its
-   world fixture under `fixtures/effects/world/`. Names come from the native
-   test, including resume cuts and scripted cells. Ignored cells have no fixture.
-4. **Replay the goldens.** The suite here replays them with no provider behind any
+3. **Replay the goldens.** The suite here replays them with no provider behind any
    key. A change in what the program asks (a kind), what it was answered (an
    outcome) or how a stream was delivered (its events) fails the replay naming
    the record and the JSON pointer of the difference. Fix forward, and
-   re-record live when the change is intended — never by hand-editing a golden.
+   re-record live when the change is intended, never by hand-editing a golden.
 
 Hooks are program (the header names them; a different stack is refused before
 the first dispatch); tools are record (a replayer answers them); nothing the
 engine mints is random, so the same program produces the same log twice.
 
 Agent producers live in this package (`tests/providers/*/cassette/corpus_*.rs`)
-and the root package (`tests/core/golden_*.rs`). Native producers live in
-`tests/providers/*/cassette/ecs_*.rs`. `tests/core/golden_pairing.rs` enforces
-one producer per fixture in each corpus and rejects cross-runtime helpers.
+and the root package (`tests/core/golden_*.rs`); the shared matrix driver is
+`tests/common/corpus_matrix.rs` with its `corpus_matrix/` modules.
+`tests/core/golden_pairing.rs` enforces one producer per golden.
 
 ## The verification suite
 
 `tests/verify/main.rs` is the single entrypoint: every matrix below is a module
 of that target, not a target of its own, so the shared corpus implementation
 (`tests/corpus/mod.rs`, which holds the program table and the dimension table of
-an effect trace as a whole) is compiled once. `tests/world_replay.rs` replays
-the agent corpus through the world. `tests/world_replay_world.rs` separately
-replays the world corpus. It first restores each configuration scene and calls
-`check_replayable` against the log's own scoped identity. A separate bus-only
-world then answers every effect by id. Each target pins its own corpus count.
+an effect trace as a whole) is compiled once.
 
 The unpublished `rig-cassette-minimal` package in `tests/minimal/Cargo.toml`
-points at these same three entrypoints and reuses the effect-log and classic
+points at the same `verify` entrypoint and reuses the effect-log and classic
 replay unit-test sources through its `effect_log` target. It depends on
-`rig-cassette` with only `agent,ecs`, without the native HTTP engine, facade or
-provider helpers. Its standalone graph lacks `serde_json/preserve_order` and
-`serde_json/float_roundtrip`. Testing the main cassette package does not prove
-this isolation: its dev-dependencies enable the native engine.
+`rig-cassette` with only `agent`, without the native HTTP engine, facade or
+provider helpers. Testing the main cassette package does not prove this
+isolation: its dev-dependencies enable the native engine.
 
 CI runs the minimal targets separately with zero retries, and the shared
-verification targets through the default-member graph with two. The all-features
+verification target through the default-member graph with two. The all-features
 workspace run excludes the nested package to avoid repeating the same sources
 with unified features. `core-all` separately retains the migrated classic replay
 unit tests; the default/all-features cassette library executes all migrated
@@ -313,20 +300,20 @@ proves a stale golden refuses rather than passing on a different trace,
 runs, `interpreters_agree.rs` states interpreter agreement as a proptest
 property, and `log_header.rs` pins the header.
 
-Every golden is replayed by the ECS world interpreter in `world_replay.rs`, one
-row per golden, counted against the corpus; the two agent interpreters (the
-classic runner and the direct `AgentRun` driver, both in `tests/corpus/mod.rs`)
-replay the goldens their matrices enumerate, including cancelled streams — the
-replayer answers the record as the cancel it was, after the events it kept.
+The two agent interpreters (the classic runner and the direct `AgentRun`
+driver, both in `tests/corpus/mod.rs`) replay the goldens their matrices
+enumerate, including cancelled streams: the replayer answers the record as the
+cancel it was, after the events it kept. A producer whose golden the cassette
+prune replaced (`coverage/pruned.tsv`) replays its log record by record through
+its own replayers by effect id instead of comparing it with a committed file.
 
 ## What lives where
 
 - here: effect logs, concrete replay adapters, the cassette engine,
-  `fixtures/cassettes/`, agent goldens in `fixtures/effects/`, world goldens in
-  `fixtures/effects/world/`, and every cassette-backed provider suite with its producers,
-  and the behaviour of the bus and the agent
-  over it (record and replay, durable execution, the three interpreters
-  agreeing);
+  `fixtures/cassettes/`, agent goldens in `fixtures/effects/`, every
+  cassette-backed provider suite with its producers, and the behaviour of the
+  bus and the agent over it (record and replay, durable execution, the two
+  interpreters agreeing);
 - the root package's `tests/core`: guards that scan the source tree and the
   fixture runners (they need the repository root), plus the one-producer-per-
   golden pairing guard;
@@ -341,12 +328,11 @@ replayer answers the record as the cancel it was, after the events it kept.
 RIG_PROVIDER_TEST_MODE=replay cargo nextest run --locked -p rig-cassette-minimal --test effect_log --retries 0
 RIG_PROVIDER_TEST_MODE=replay cargo test --locked -p rig-cassette --lib --all-features
 RIG_PROVIDER_TEST_MODE=replay cargo nextest run --locked -p rig-cassette --all-features -E 'binary(verify)'
-RIG_PROVIDER_TEST_MODE=replay cargo nextest run --locked -p rig-cassette --all-features -E 'binary(world_replay)'
 RIG_PROVIDER_TEST_MODE=replay cargo nextest run --locked -p rig-cassette-minimal --all-features --retries 0
 RIG_PROVIDER_TEST_MODE=replay cargo nextest run --locked -p rig-cassette --all-features --test <provider>
 ```
 
 `RIG_REGENERATE_GOLDEN` must be unset for all of them. The lane owners of these
 executions, including their retry policies and the default-member graph twins,
-are in `xtask/src/verify/checks.rs` (`default-tests`, `ecs-parity`,
+are in `xtask/src/verify/checks.rs` (`default-tests`, `effect-corpus`,
 `bus-verification`).

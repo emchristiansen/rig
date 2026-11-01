@@ -16,15 +16,20 @@
 //! model.
 //!
 //! ```no_run
-//! use rig_bedrock::client::Client;
+//! use rig_bedrock::{client::BedrockRuntime, completion::{AMAZON_NOVA_LITE, Converse}};
+//! use rig_core::Model;
 //!
-//! let client = Client::from_env()?;
-//! # Ok::<(), rig_core::client::ProviderClientError>(())
+//! let model = BedrockRuntime::from_env().completion(AMAZON_NOVA_LITE);
+//! # let _ = model;
 //! ```
 
+mod capture;
 pub mod client;
 pub mod completion;
 pub mod embedding;
+pub mod extension;
 pub mod image;
+mod options;
+mod request;
 pub mod streaming;
 pub mod types;

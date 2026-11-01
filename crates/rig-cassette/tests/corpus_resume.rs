@@ -52,7 +52,7 @@
 //! | `anthropic_hooks_replace_tool_result` | the head replaced the result the tail reads |
 //! | `anthropic_hooks_two_hooks` | both |
 //! | `anthropic_hooks_lookup_before_run` | the head's run-start dispatch; the resumed run fires no run start |
-//! | `anthropic_endings_answer_turn_stop` | the stop fires in the tail: `PromptCancelled` from the resumed engine |
+//! | `anthropic_endings_answer_turn_stop` | the stop fires in the tail: `Cancelled` from the resumed engine |
 //! | `anthropic_host_custom_at_outcome` | the head's per-call note; the tail dispatches none |
 //! | `anthropic_host_custom_at_outcome_streamed` | the same, streamed head |
 //! | `anthropic_serving_serial_memory_tools` | memory under serial serving |
@@ -65,18 +65,11 @@
 //! | `mock_delta_repair` | a name-delta call repaired by the head |
 //! | `gemini_retrieval_context_and_tools` | the head's retrievals; the tail retrieves again for its turn |
 //!
-//! Every row is also a world cell (`world_resumed`): the world interpreter
-//! saves the world as a `WorldScene` at the same cut and a fresh world
-//! over the log's tail loads it (`corpus::world_resume`). A resumed world
-//! keeps its state, so the append is the resumed run's — the same tail.
-//!
 //! # What the matrix found
 //!
-//! - A resumed run never appends to memory: `resume` skips the history
-//!   and memory resolution, so the runner holds no memory handle and the
-//!   `Done` append is not dispatched. The driver that suspended the run
-//!   appends what the run produced; pinned, not changed (a driver that
-//!   persists a run between steps owns its memory).
+//! - A resumed run uses its persisted history without loading memory. With
+//!   memory and a conversation configured, the resumed engine appends its
+//!   newly produced messages once; the hand driver does not append them again.
 //! - A resumed run forgot the model the head asked: routing state lived
 //!   in the driver only ("live routing state stays in the driver, not the
 //!   serde `AgentRun`"), so a resumed engine's model-selection hook saw
@@ -251,22 +244,6 @@ macro_rules! resumed {
                 #[tokio::test]
                 async fn $name() {
                     crate::corpus::resume_reproduces(&super::$program).await;
-                }
-            )*
-        }
-        /// The same rows through the world interpreter: the world saved
-        /// after the first tool turn's results as a scene, loaded in a
-        /// fresh world over the log's tail (`corpus::world_resume`).
-        mod world_resumed {
-            $(
-                #[test]
-                fn $name() {
-                    crate::corpus::world_resume::world_resume_reproduces(
-                        &super::$program,
-                        1,
-                        rig_cassette::effect_log::RequestCheck::Payload,
-                        crate::corpus::Against::Tail,
-                    );
                 }
             )*
         }

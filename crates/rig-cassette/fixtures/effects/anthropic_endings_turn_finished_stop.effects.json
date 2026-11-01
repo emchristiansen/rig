@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 9072754608376111302,
+    "run_spec": 3116083730441856965,
     "handlers": [
       {
         "key": "golden/model:default",
@@ -118,11 +118,7 @@
             {
               "type": "toolcall",
               "id": {
-                "origin": "explicit",
-                "id": "toolu_017bUskDRxk7xe48cih6VyJ2"
-              },
-              "provider": {
-                "call_id": "toolu_017bUskDRxk7xe48cih6VyJ2"
+                "provider": "toolu_01K3rvqfCFsxLLkZPHyGnfcK"
               },
               "function": {
                 "name": "add",
@@ -131,8 +127,21 @@
                   "y": 25
                 }
               },
-              "signature": null,
-              "additional_params": null
+              "native": {
+                "item": {
+                  "caller": {
+                    "type": "direct"
+                  },
+                  "id": "toolu_01K3rvqfCFsxLLkZPHyGnfcK",
+                  "input": {
+                    "x": 17,
+                    "y": 25
+                  },
+                  "name": "add",
+                  "type": "tool_use"
+                },
+                "fingerprint": "3e9a49d8e41d6783"
+              }
             }
           ],
           "usage": {
@@ -140,14 +149,25 @@
             "output_tokens": 69,
             "total_tokens": 702,
             "cached_input_tokens": 0,
-            "cache_creation_input_tokens": 0
+            "cache_creation_input_tokens": 0,
+            "cost": {
+              "input": 0.001899,
+              "output": 0.001035,
+              "cache_read": 0.0,
+              "cache_write": 0.0,
+              "total": 0.002934
+            }
           },
-          "message_id": "msg_011CfLcX7mf24drvqe8KZ8zK",
-          "response_id": null,
-          "provider_request_id": "req_011CfLcX7JsPWbjD8beg7nAu",
+          "message_id": "msg_011CfinpNp13vGVhrRUHUASg",
+          "origin": {
+            "api": "anthropic.messages",
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-6",
+            "response_model": "claude-sonnet-4-6",
+            "response_id": "msg_011CfinpNp13vGVhrRUHUASg"
+          },
+          "provider_request_id": "req_011CfinpNSRmn1qY8B6uqUAH",
           "finish_reason": "tool_calls",
-          "provider": "anthropic",
-          "model": "claude-sonnet-4-6",
           "raw": {
             "container": null,
             "content": [
@@ -155,7 +175,7 @@
                 "caller": {
                   "type": "direct"
                 },
-                "id": "toolu_017bUskDRxk7xe48cih6VyJ2",
+                "id": "toolu_01K3rvqfCFsxLLkZPHyGnfcK",
                 "input": {
                   "x": 17,
                   "y": 25
@@ -164,7 +184,8 @@
                 "type": "tool_use"
               }
             ],
-            "id": "msg_011CfLcX7mf24drvqe8KZ8zK",
+            "diagnostics": null,
+            "id": "msg_011CfinpNp13vGVhrRUHUASg",
             "model": "claude-sonnet-4-6",
             "role": "assistant",
             "stop_details": null,

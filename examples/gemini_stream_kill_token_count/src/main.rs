@@ -10,15 +10,14 @@
 //! `streamGenerateContent` response. Any mid-stream disruption skips that chunk,
 //! so the exact server-side token count is unrecoverable. There is also no
 //! "cancel" flag to send Gemini — killing a stream is purely a client-side
-//! connection close (here, `StreamingCompletionResponse::cancel()` /
-//! `AbortHandle::abort()`).
+//! connection close: dropping the stream.
 //!
 //! ## The approach — one accounting path for every disruption
 //!
 //! Disruptions reach a consumer in four different shapes:
-//!   1. Manual kill / drop          -> stream ends with `None`, no `Final`
+//!   1. Manual kill / drop          -> stream ends with `None`, no `Done`
 //!   2. Transport/server error      -> stream yields `Some(Err(..))`
-//!   3. Premature clean close       -> stream ends with no `Final`
+//!   3. Premature clean close       -> stream ends with no `Done`
 //!      (absence of a terminal record = truncation)
 //!   4. Stall / half-open socket    -> `next()` never returns
 //!
@@ -50,16 +49,14 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures::{Stream, StreamExt};
-use rig::completion::{CompletionModel, Usage};
+use rig::completion::Usage;
+use rig::completion::{CompletionRequest, Reasoning};
 use rig::error::ErrorReport;
 use rig::error::ProviderError;
 use rig::message::AssistantContent;
-use rig::prelude::*;
 use rig::providers::gemini::Gemini;
-use rig::providers::gemini::completion::gemini_api_types::{
-    AdditionalParameters, GenerationConfig, ThinkingConfig,
-};
-use rig::streaming::{BlockClose, Delta, StreamEvent, StreamingCompletionResponse};
+use rig::providers::gemini::extension::GeminiOptions;
+use rig::streaming::{Item, Relayed, StreamEvent, StreamEvents};
 
 const MODEL: &str = "gemini-2.5-flash";
 /// Inject the disruption once this many output chars have streamed, so there is
@@ -82,11 +79,12 @@ enum Disruption {
     Stall,
 }
 
-/// Wraps a live `StreamingCompletionResponse` and injects a disruption after
+/// Wraps a live relayed completion stream and injects a disruption after
 /// `after_chars` of output has been forwarded. This lets us exercise every
 /// disruption shape against a genuine Gemini stream's partial output.
 struct Disrupt {
-    inner: StreamingCompletionResponse,
+    /// The live stream, until a manual kill drops it.
+    inner: Option<StreamEvents>,
     mode: Disruption,
     after_chars: usize,
     seen_chars: usize,
@@ -94,14 +92,14 @@ struct Disrupt {
 }
 
 impl Disrupt {
-    fn new(inner: StreamingCompletionResponse, mode: Disruption, after_chars: usize) -> Self {
+    fn new(inner: StreamEvents, mode: Disruption, after_chars: usize) -> Self {
         // For `None`, make the trigger unreachable so it never fires.
         let after_chars = match mode {
             Disruption::None => usize::MAX,
             _ => after_chars,
         };
         Self {
-            inner,
+            inner: Some(inner),
             mode,
             after_chars,
             seen_chars: 0,
@@ -111,7 +109,7 @@ impl Disrupt {
 }
 
 impl Stream for Disrupt {
-    type Item = Result<StreamEvent, ErrorReport>;
+    type Item = Result<Relayed, ErrorReport>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -128,9 +126,9 @@ impl Stream for Disrupt {
             this.fired = true;
             match this.mode {
                 Disruption::ManualKill => {
-                    // Real cancellation of the underlying stream (drops the HTTP
-                    // body / generator); surfaces to the consumer as `None`.
-                    this.inner.cancel();
+                    // Real cancellation: dropping the stream drops the HTTP
+                    // body; surfaces to the consumer as `None`.
+                    this.inner = None;
                     return Poll::Ready(None);
                 }
                 Disruption::TransportError => {
@@ -149,7 +147,10 @@ impl Stream for Disrupt {
             }
         }
 
-        match Pin::new(&mut this.inner).poll_next(cx) {
+        let Some(inner) = this.inner.as_mut() else {
+            return Poll::Ready(None);
+        };
+        match Pin::new(inner).poll_next(cx) {
             Poll::Ready(Some(Ok(item))) => {
                 this.seen_chars += visible_len(&item);
                 Poll::Ready(Some(Ok(item)))
@@ -160,21 +161,17 @@ impl Stream for Disrupt {
 }
 
 /// Length of human-visible text in a stream item (text + reasoning deltas).
-fn visible_len(item: &StreamEvent) -> usize {
+fn visible_len(item: &Relayed) -> usize {
+    let Relayed::Item(Item::Event(item)) = item else {
+        return 0;
+    };
     match item {
-        StreamEvent::BlockDelta {
-            delta: Delta::Text { text },
+        StreamEvent::Text { text, .. } => text.chars().count(),
+        StreamEvent::Reasoning { text, .. } => text.chars().count(),
+        StreamEvent::End {
+            content: AssistantContent::Reasoning(r),
             ..
-        } => text.chars().count(),
-        StreamEvent::BlockDelta {
-            delta: Delta::Reasoning { text },
-            ..
-        } => text.chars().count(),
-        StreamEvent::BlockEnd {
-            end: BlockClose::Reasoning { .. },
-            block: Some(AssistantContent::Reasoning(r)),
-            ..
-        } => r.display_text().chars().count(),
+        } => r.text.chars().count(),
         _ => 0,
     }
 }
@@ -197,7 +194,7 @@ struct Report {
 ///
 /// Accumulates output incrementally, watches for authoritative usage, and bounds
 /// each read with a timeout. If the stream ends — by `None`, `Err`, a zeroed
-/// `Final`, or a stall — without authoritative usage, it estimates tokens from
+/// `Done`, or a stall — without authoritative usage, it estimates tokens from
 /// the partial output via `countTokens`.
 async fn drain_with_accounting<S>(
     label: &'static str,
@@ -207,7 +204,7 @@ async fn drain_with_accounting<S>(
     prompt_text: &str,
 ) -> anyhow::Result<Report>
 where
-    S: Stream<Item = Result<StreamEvent, ErrorReport>> + Unpin,
+    S: Stream<Item = Result<Relayed, ErrorReport>> + Unpin,
 {
     let mut output = String::new();
     let mut authoritative: Option<Usage> = None;
@@ -234,37 +231,33 @@ where
                 reason = Some(format!("stream error: {err}"));
                 break;
             }
-            Ok(Some(Ok(item))) => match item {
-                StreamEvent::BlockDelta {
-                    delta: Delta::Text { text },
-                    ..
-                } => output.push_str(&text),
-                StreamEvent::BlockDelta {
-                    delta: Delta::Reasoning { text },
-                    ..
-                } => {
+            Ok(Some(Ok(Relayed::Origin(_)))) => {}
+            Ok(Some(Ok(Relayed::Item(Item::Event(item))))) => match item {
+                StreamEvent::Text { text, .. } => output.push_str(&text),
+                StreamEvent::Reasoning { text, .. } => {
                     output.push_str(&text);
                 }
-                StreamEvent::BlockEnd {
-                    end: BlockClose::Reasoning { .. },
-                    block: Some(AssistantContent::Reasoning(r)),
+                StreamEvent::End {
+                    content: AssistantContent::Reasoning(r),
                     ..
                 } => {
-                    output.push_str(&r.display_text());
-                }
-                StreamEvent::Final(resp) => {
-                    // Authoritative usage. A premature clean close (shape #3)
-                    // never emits a Final at all — the absence of a terminal
-                    // record is itself the truncation signal — so reaching this
-                    // arm means the stream completed. Still guard on reported
-                    // usage in case the provider sent none.
-                    let usage = resp.usage;
-                    if usage.is_reported() {
-                        authoritative = Some(usage);
-                    }
+                    output.push_str(&r.text.clone());
                 }
                 _ => {}
             },
+            Ok(Some(Ok(Relayed::Done(resp)))) => {
+                // Authoritative usage. A premature clean close (shape #3)
+                // never emits a Done at all — the absence of a terminal
+                // record is itself the truncation signal — so reaching this
+                // arm means the stream completed. Still guard on reported
+                // usage in case the provider sent none.
+                let usage = resp.usage;
+                if usage.is_reported() {
+                    authoritative = Some(usage);
+                }
+            }
+            // An unmodeled provider event carries no visible text.
+            Ok(Some(Ok(Relayed::Item(Item::Unknown(_))))) => {}
         }
     }
 
@@ -276,12 +269,10 @@ where
             let input_tokens = count_tokens(http, api_key, prompt_text).await?;
             let output_tokens = count_tokens(http, api_key, &output).await?;
 
-            let usage = Usage {
-                input_tokens: Some(input_tokens),
-                output_tokens: Some(output_tokens),
-                total_tokens: Some(input_tokens + output_tokens),
-                ..Default::default()
-            };
+            let usage = Usage::new()
+                .input_tokens(input_tokens)
+                .output_tokens(output_tokens)
+                .total_tokens(input_tokens + output_tokens);
 
             Outcome::Estimated {
                 usage,
@@ -327,19 +318,10 @@ async fn count_tokens(http: &reqwest::Client, api_key: &str, text: &str) -> anyh
 /// 2.5-flash spends seconds generating hidden thoughts (no chunks sent), which
 /// is indistinguishable from a stall and would trip the read timeout before any
 /// real partial output — masking the injected disruptions.
-fn no_thinking_params() -> anyhow::Result<serde_json::Value> {
-    let params = AdditionalParameters {
-        generation_config: Some(GenerationConfig {
-            thinking_config: Some(ThinkingConfig {
-                include_thoughts: Some(false),
-                thinking_budget: Some(0),
-                thinking_level: None,
-            }),
-            ..Default::default()
-        }),
-        additional_params: None,
-    };
-    Ok(serde_json::to_value(&params)?)
+fn no_thinking(request: CompletionRequest) -> CompletionRequest {
+    request
+        .reasoning(Reasoning::Off)
+        .provider_option(GeminiOptions::new().include_thoughts(false))
 }
 
 async fn run_scenario(
@@ -349,18 +331,15 @@ async fn run_scenario(
     http: &reqwest::Client,
     api_key: &str,
 ) -> anyhow::Result<Report> {
-    let client = Gemini::from_env()?.bound()?;
-    let model = client.completion(MODEL);
+    let model = Gemini::from_env()?.completion(MODEL);
 
-    let stream = model
-        .completion_request(prompt)
-        .temperature(0.7)
-        .max_tokens(2000)
-        .additional_params(no_thinking_params()?)
-        .stream()
-        .await?;
+    let stream = model.stream(no_thinking(
+        CompletionRequest::new(prompt)
+            .temperature(0.7)
+            .max_tokens(2000),
+    ))?;
 
-    let disrupted = Disrupt::new(stream, mode, DISRUPT_AFTER_CHARS);
+    let disrupted = Disrupt::new(stream.into_relay(), mode, DISRUPT_AFTER_CHARS);
     drain_with_accounting(label, disrupted, http, api_key, prompt).await
 }
 
