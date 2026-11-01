@@ -815,6 +815,60 @@ fn unnamed_custom_input_fragments_preserve_the_complete_canonical_call() {
     }
 }
 
+/// An unnamed held custom call cannot acquire a name from input fragments.
+#[test]
+fn unnamed_held_custom_input_keeps_the_existing_boundary() {
+    let decoded = chat_call_fragments(&[
+        json!({"index": 0, "id": "call_a", "type": "custom",
+            "custom": {"input": "first"}}),
+        json!({"index": 0, "id": "call_b", "custom": {"input": "second"}}),
+    ]);
+    assert!(call_boundaries(&decoded).is_empty());
+    let response = decoded.outcome.expect("unnamed calls are omitted");
+    assert_eq!(response.tool_calls().count(), 0);
+    assert_eq!(
+        response.raw.pointer("/choices/0/message/tool_calls"),
+        Some(&json!([{"id": "call_b", "type": "custom",
+            "custom": {"input": "firstsecond"}}]))
+    );
+}
+
+/// A later canonical name does not repair a malformed held native name.
+#[test]
+fn malformed_held_custom_names_keep_the_existing_boundary() {
+    for malformed in [json!(7), json!({"wrong": "name"})] {
+        let decoded = chat_call_fragments(&[
+            json!({"index": 0, "id": "call_a", "type": "custom",
+                "custom": {"name": malformed, "input": "first"}}),
+            json!({"index": 0, "id": "call_a", "type": "custom",
+                "custom": {"name": "get_weather", "input": "middle"}}),
+            json!({"index": 0, "id": "call_b", "custom": {"input": "second"}}),
+        ]);
+        assert_eq!(
+            call_boundaries(&decoded),
+            [(0, "get_weather".to_owned(), "{}".to_owned())]
+        );
+        let response = decoded.outcome.expect("the existing boundary closes");
+        let calls: Vec<_> = response.tool_calls().collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, CallId::from_wire("call_a"));
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[0].function.arguments_value(), json!({}));
+        assert!(calls[0].function.invalid_arguments.is_none());
+        assert_eq!(
+            response.choice[0]
+                .native_item()
+                .and_then(|item| item.pointer("/custom/name")),
+            Some(&malformed)
+        );
+        assert_eq!(
+            response.raw.pointer("/choices/0/message/tool_calls"),
+            Some(&json!([{"id": "call_b", "type": "custom",
+                "custom": {"name": "get_weather", "input": "firstmiddlesecond"}}]))
+        );
+    }
+}
+
 /// Custom extras do not replace an ordinary function's boundary policy.
 #[test]
 fn custom_input_extras_do_not_select_custom_continuation_for_functions() {
