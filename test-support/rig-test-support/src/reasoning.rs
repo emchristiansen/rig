@@ -206,7 +206,7 @@ pub async fn run_reasoning_delta_hook_streaming<M>(
 
     let mut aggregates = HashMap::<String, String>::new();
     let mut provider_ids = HashMap::<String, String>::new();
-    for pair in timeline.chunks_exact(2) {
+    for pair in timeline.as_chunks::<2>().0 {
         let (ReasoningDeltaTimelineItem::Hook(hooked), ReasoningDeltaTimelineItem::Stream(emitted)) =
             (&pair[0], &pair[1])
         else {
