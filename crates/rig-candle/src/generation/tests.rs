@@ -4,6 +4,16 @@ use rig_core::{
     streaming::{BlockAccumulator, BlockClose, BlockKind, StreamEvent},
 };
 
+#[test]
+fn duration_millis_floors_and_saturates() {
+    assert_eq!(duration_millis(Duration::ZERO), 0);
+    assert_eq!(duration_millis(Duration::from_nanos(999_999)), 0);
+    assert_eq!(duration_millis(Duration::from_nanos(1_999_999)), 1);
+    assert_eq!(duration_millis(Duration::from_millis(42)), 42);
+    assert_eq!(duration_millis(Duration::from_millis(u64::MAX)), u64::MAX);
+    assert_eq!(duration_millis(Duration::from_secs(u64::MAX)), u64::MAX);
+}
+
 /// Pure parse/emission regression: no model artifact or provider call is needed.
 #[test]
 fn parsed_missing_ids_keep_their_identity_and_provenance_through_stream_emission() {
