@@ -525,7 +525,7 @@ impl<'a> GenerationSession<'a> {
 }
 
 fn duration_millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).map_or(u64::MAX, |value| value)
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 pub(crate) fn generate(

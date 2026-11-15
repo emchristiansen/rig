@@ -1358,12 +1358,15 @@ macro_rules! patch_hook {
 patch_hook!(
     /// `tool_choice: Required` on the first turn only.
     PatchToolChoiceRequiredFirst,
-    |turn| (turn == 1).then(|| rig_agent::agent::RequestPatch::new().tool_choice(rig_core::message::ToolChoice::Required))
+    |turn| (turn == 1).then(|| rig_agent::agent::RequestPatch::new()
+        .tool_choice(rig_core::message::ToolChoice::Required))
 );
 patch_hook!(
     /// `tool_choice: None` on the second turn only.
     PatchToolChoiceNoneSecond,
-    |turn| (turn == 2).then(|| rig_agent::agent::RequestPatch::new().tool_choice(rig_core::message::ToolChoice::None))
+    |turn| (turn == 2)
+        .then(|| rig_agent::agent::RequestPatch::new()
+            .tool_choice(rig_core::message::ToolChoice::None))
 );
 patch_hook!(
     /// A context document on every turn.
@@ -1381,7 +1384,9 @@ patch_hook!(
     |turn| (turn == 2).then(|| {
         rig_agent::agent::RequestPatch::new()
             .temperature(1.0)
-            .additional_params(serde_json::json!({ "thinking": { "type": "enabled", "budget_tokens": 1024 } }))
+            .additional_params(
+                serde_json::json!({ "thinking": { "type": "enabled", "budget_tokens": 1024 } }),
+            )
     })
 );
 patch_hook!(
@@ -1392,7 +1397,8 @@ patch_hook!(
 patch_hook!(
     /// No tools advertised on the second turn.
     PatchActiveToolsNoneSecond,
-    |turn| (turn == 2).then(|| rig_agent::agent::RequestPatch::new().active_tools(Vec::<String>::new()))
+    |turn| (turn == 2)
+        .then(|| rig_agent::agent::RequestPatch::new().active_tools(Vec::<String>::new()))
 );
 patch_hook!(
     /// A prior exchange as the first turn's history.

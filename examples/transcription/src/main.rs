@@ -18,7 +18,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .get(1)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("No file was specified"))?;
-    println!("Transcribing {}", &file_path);
+    println!("Transcribing {}", file_path);
     whisper(&file_path).await?;
     gemini(&file_path).await?;
     azure(&file_path).await?;

@@ -11,5 +11,7 @@ error[E0277]: `std::string::String` declares no `ToolContext` key
 note: required by a bound in `ToolContext::insert`
  --> $WORKSPACE/crates/rig-core/src/tool/context.rs
   |
+  | impl ToolContext {
+...
   |     pub fn insert<T: ContextValue>(&mut self, value: T) -> Result<Option<T>, ToolContextError> {
   |                      ^^^^^^^^^^^^ required by this bound in `ToolContext::insert`
