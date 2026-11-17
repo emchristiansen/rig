@@ -645,15 +645,19 @@ struct ObservingHttpClient<H> {
     observation: ObservationHandle,
 }
 
-/// Whether Rig's driver reads this reply as server-sent events: a success
-/// whose content type is `text/event-stream`.
+/// Whether Rig's driver reads this reply as server-sent events on the
+/// Codex contract: a success whose content type is `text/event-stream`, or
+/// a success that names no content type, which the Codex gateway sends and
+/// Rig's Codex wire accepts (`Encoded::with_relaxed_content_type`).
 fn accepted_sse(status: http::StatusCode, headers: &http::HeaderMap) -> bool {
     status.is_success()
-        && headers
-            .get(http::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(';').next())
-            .is_some_and(|essence| essence.trim().eq_ignore_ascii_case("text/event-stream"))
+        && headers.get(http::header::CONTENT_TYPE).is_none_or(|value| {
+            value
+                .to_str()
+                .ok()
+                .and_then(|value| value.split(';').next())
+                .is_some_and(|essence| essence.trim().eq_ignore_ascii_case("text/event-stream"))
+        })
 }
 
 impl<H: HttpClientExt> HttpClientExt for ObservingHttpClient<H> {

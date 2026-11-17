@@ -51,8 +51,10 @@ pub enum FrameEvidence {
     /// there is no exact text.
     Bytes(Vec<u8>),
     /// Text decoded from bytes that were not all valid UTF-8, each invalid
-    /// sequence replaced with U+FFFD. Not the frame as received; the original
-    /// bytes were not kept.
+    /// sequence replaced with U+FFFD: the frame's own bytes, or, for a frame
+    /// an HTTP tee kept, the reply's bytes up to the chunk that completed
+    /// it. Not vouched for as the frame as received; the original bytes
+    /// were not kept.
     Decoded(String),
     /// No frame: the transport delivered an already-decoded event.
     Absent,

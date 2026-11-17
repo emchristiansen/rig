@@ -66,6 +66,20 @@ impl<F> RetainedFrames<F> {
         self.lock().drain(..).collect()
     }
 
+    /// Keep `batch`, the frames one chunk of a reply completed, as the most
+    /// recent. Older frames are dropped down to capacity; no frame of
+    /// `batch` is, so every frame handed on with a chunk is kept while that
+    /// chunk is being read.
+    pub(crate) fn keep_batch(&self, batch: impl IntoIterator<Item = F>) {
+        let batch: Vec<F> = batch.into_iter().collect();
+        let mut frames = self.lock();
+        let older = self.capacity.get().saturating_sub(batch.len());
+        while frames.len() > older {
+            frames.pop_front();
+        }
+        frames.extend(batch);
+    }
+
     /// Keep `frame` as the most recent, dropping the oldest at capacity.
     pub(crate) fn keep(&self, frame: F) {
         let mut frames = self.lock();
@@ -113,13 +127,17 @@ impl FrameEvidence {
     }
 }
 
-/// The evidence an HTTP reply's frame is of itself: its text or its bytes,
-/// exactly as Rig's framer cut it.
-impl From<&WireFrame> for FrameEvidence {
-    fn from(frame: &WireFrame) -> Self {
+impl FrameEvidence {
+    /// The evidence an HTTP reply's frame is of itself, as Rig's framer cut
+    /// it. `exact` says whether every byte of the reply up to and including
+    /// the chunk that completed the frame was valid UTF-8: Rig's framer
+    /// reads text with each invalid sequence replaced, so text cut from a
+    /// reply that was not is [`Self::Decoded`], never [`Self::Text`].
+    pub(crate) fn of_wire_frame(frame: WireFrame, exact: bool) -> Self {
         match frame {
-            WireFrame::Text(text) => Self::Text(text.clone()),
-            WireFrame::Bytes(bytes) => Self::Bytes(bytes.clone()),
+            WireFrame::Text(text) if exact => Self::Text(text),
+            WireFrame::Text(text) => Self::Decoded(text),
+            WireFrame::Bytes(bytes) => Self::Bytes(bytes),
         }
     }
 }
