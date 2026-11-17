@@ -116,6 +116,8 @@ doc = false
 resolver = "3"
 members = [
     "crates/*",
+    # The fork's add-on crates. They build on the public API of the crates above and change none of them, so an upstream release merges without conflicts in fork code.
+    "addons/*",
     # The rig agent's plugin crates, built on rig-harness's public API.
     "plugins/*",
     # The plugin corpus: plugins written to shape and prove the kernel.

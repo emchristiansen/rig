@@ -1,0 +1,50 @@
+[package]
+name = "rig-codex"
+version.workspace = true
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = "MIT"
+description = "Codex subscription sessions, identity and typed Responses data for Rig, built on Rig's public API."
+repository = "https://github.com/0xPlaygrounds/rig"
+publish = false
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints]
+workspace = true
+
+[dependencies]
+rig-core = { path = "../../crates/rig-core", version = "0.46.0", default-features = false, features = ["websocket"] }
+rig-http = { path = "../../crates/rig-http", version = "0.46.0", features = ["websocket"] }
+bytes = { workspace = true }
+futures = { workspace = true }
+http = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# The bundled backend and request compression are native-only: tungstenite
+# needs a tokio reactor and zstd links a C library.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+tokio = { workspace = true, features = ["net"], optional = true }
+tokio-tungstenite = { workspace = true, features = ["connect", "handshake"], optional = true }
+zstd = { version = "0.13", optional = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+rig-http = { path = "../../crates/rig-http", version = "0.46.0", features = ["test-utils", "websocket"] }
+tokio = { workspace = true, features = ["full"] }
+tokio-tungstenite = { workspace = true, features = ["handshake"] }
+
+[features]
+default = []
+# `tungstenite::TungsteniteClient`: a websocket backend whose connections
+# support ready reads and flushes, which an idle keepalive needs.
+tungstenite = ["dep:tokio", "dep:tokio-tungstenite", "rig-http/tokio"]
+rustls = ["tokio-tungstenite?/rustls-tls-webpki-roots"]
+native-tls = ["tokio-tungstenite?/native-tls"]
+# `RequestCompression::Zstd`: zstd-compressed HTTP request bodies.
+request-compression = ["dep:zstd"]
