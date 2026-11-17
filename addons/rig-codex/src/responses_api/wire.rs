@@ -631,7 +631,8 @@ fn declared_tool(
 /// ([`CodexRequestError::CustomOutput`]). Rig's driver replaces an image
 /// the provider or model cannot receive with its own words before the wire
 /// sees the request, so such an image is sent as those words rather than
-/// refused. The conversation identity is stamped in, and a
+/// refused. The rule holds for an answer the request wrote itself as an
+/// item (`additional_params["input"]`) as for one in its history. The conversation identity is stamped in, and a
 /// caller-set control the contract does not take is refused
 /// ([`UnsupportedCodexControl`]). A wire with no caller identity refuses to
 /// encode. Headers and compression are applied by

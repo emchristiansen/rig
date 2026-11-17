@@ -574,3 +574,50 @@ async fn a_function_calls_answer_is_sent_as_rig_wrote_it() {
         assert!(answer.get("name").is_none(), "{answer}");
     }
 }
+
+/// The rule for a custom call's answer holds for an item the caller wrote
+/// itself in `additional_params["input"]`, which Rig v0.46.0 sends in place
+/// of the history's items: its texts are joined and its tool named from the
+/// call beside it, and an image in it is refused. No other item the caller
+/// wrote changes.
+#[tokio::test]
+async fn a_custom_calls_answer_the_caller_wrote_as_an_item_follows_the_same_rule() {
+    let call = serde_json::json!({
+        "type": "custom_tool_call", "call_id": "call_own",
+        "name": "apply_patch", "input": "*** Begin Patch"
+    });
+    let answer = |output: serde_json::Value| {
+        serde_json::json!({
+            "type": "custom_tool_call_output", "call_id": "call_own", "output": output
+        })
+    };
+    let request_writing = |output: serde_json::Value| {
+        let mut request = turn_declaring(serde_json::json!([declared_custom()]));
+        let params = request.additional_params.as_mut().expect("declares tools");
+        params["input"] = serde_json::json!([call, answer(output)]);
+        request
+    };
+    let wire = chatgpt();
+
+    let texts = serde_json::json!([
+        {"type": "input_text", "text": "a"},
+        {"type": "input_text", "text": "b"},
+    ]);
+    let input = raw_input(&sent(&wire, request_writing(texts)).await);
+    assert_eq!(input.len(), 2, "the caller's items replace the history's");
+    assert_eq!(input[0], written(&call));
+    assert_eq!(
+        value(&input[1]),
+        serde_json::json!({
+            "type": "custom_tool_call_output", "call_id": "call_own",
+            "name": "apply_patch", "output": "ab"
+        })
+    );
+
+    let image = serde_json::json!([
+        {"type": "input_text", "text": "see "},
+        {"type": "input_image", "image_url": "https://example.test/diff.png"},
+    ]);
+    let refusal = refused(&wire, request_writing(image)).await;
+    assert!(refusal.contains(CUSTOM_IMAGE_REFUSAL), "{refusal}");
+}

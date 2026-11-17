@@ -10,6 +10,11 @@
 //! request's call was made with; an answer neither names goes without one,
 //! as Rig wrote it.
 //!
+//! The rule holds for every `custom_tool_call_output` in the `input` Rig
+//! encoded, whichever way the request states it: an answer in its history,
+//! or an item it wrote itself in its options or `additional_params`. An
+//! image has one way into a custom call's answer or none.
+//!
 //! The official Codex client's type lets a custom call's answer carry the
 //! same payload as a function's, parts included, and makes `name` optional,
 //! so the refusal and the name are this crate's contract rather than the
