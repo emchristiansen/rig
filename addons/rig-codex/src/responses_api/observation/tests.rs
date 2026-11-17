@@ -705,3 +705,121 @@ async fn the_reply_head_is_kept_whole() {
         assert_eq!(head.headers, headers);
     });
 }
+
+/// A success that names no content type, as the Codex gateway replies.
+fn replying_without_a_content_type(body: Bytes) -> SequencedHttpClient {
+    SequencedHttpClient::new([MockHttpResponse::SuccessWithHeaders(
+        body,
+        http::HeaderMap::new(),
+    )])
+}
+
+/// One observed call of `transport`: the strings it committed and what it
+/// finished with.
+async fn observed_call(
+    transport: &SequencedHttpClient,
+) -> (
+    Vec<String>,
+    Result<ObservedResponsesResult, ObservedFailure>,
+    bool,
+) {
+    let (observation, writer) = Observation::prepare();
+    let mut stream = wire()
+        .raw_stream_observed(transport, CompletionRequest::new("say hi"), writer)
+        .expect("the request encodes");
+    drain(&mut stream).await;
+    let result = stream.finish().await;
+    let (prefix, accepted) = observation.inspect(|view| {
+        (
+            view.committed_prefix.to_vec(),
+            view.reply_head.is_some_and(|head| head.accepted_sse),
+        )
+    });
+    (prefix, result, accepted)
+}
+
+/// A reply that names no content type is the Codex gateway's ordinary reply
+/// and Rig's Codex wire reads it. It is captured exactly as a reply that
+/// names `text/event-stream` is: the same strings, the same response.
+#[tokio::test]
+async fn a_reply_that_names_no_content_type_is_captured_as_a_typed_one_is() {
+    let data = turn_data();
+    let (typed_prefix, typed, typed_accepted) = observed_call(&replying(sse(&data))).await;
+    let (bare_prefix, bare, bare_accepted) =
+        observed_call(&replying_without_a_content_type(sse(&data))).await;
+
+    assert!(typed_accepted && bare_accepted);
+    assert_eq!(typed_prefix, data);
+    assert_eq!(bare_prefix, data, "a headerless reply commits every event");
+    let (typed, bare) = (typed.expect("finishes"), bare.expect("finishes"));
+    assert_eq!(bare.body.response.text(), "hello");
+    assert_eq!(bare.body.response.raw, typed.body.response.raw);
+    assert_eq!(bare.body.native.id, typed.body.native.id);
+}
+
+/// The safeguards hold for a reply that names no content type: bytes that
+/// are not UTF-8 fail it uncaptured, and reading ends at the first terminal.
+#[tokio::test]
+async fn a_headerless_reply_keeps_the_utf8_and_terminal_rules() {
+    let data = turn_data();
+    let mut invalid = sse(&data[..1]).to_vec();
+    invalid.extend_from_slice(
+        b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"\xff\xfe\"}\n\n",
+    );
+    let (prefix, result, _) =
+        observed_call(&replying_without_a_content_type(Bytes::from(invalid))).await;
+    assert_eq!(prefix, data[..1]);
+    result.expect_err("a reply that is not UTF-8 fails");
+
+    let mut reply = data.clone();
+    reply.push(json!({"type": "response.created", "sequence_number": 6, "response": response("in_progress", json!([]))}).to_string());
+    let (prefix, result, _) = observed_call(&replying_without_a_content_type(sse(&reply))).await;
+    assert_eq!(prefix, data, "nothing after the terminal is committed");
+    result.expect("the turn finishes");
+}
+
+/// The strings an observed call committed are the frames Rig's decoder
+/// consumed: folded by Rig's public reply decoder they give the response
+/// the call returned. The reply carries what a transport adds and the
+/// decoder never sees: comment lines, heartbeat events, `event:` and `id:`
+/// fields, data split over lines, and an event after the terminal.
+#[tokio::test]
+async fn the_committed_strings_fold_to_the_response_the_call_returned() {
+    use rig_core::wire::{Mode, WireFrame, decode_reply};
+    let data = turn_data();
+    let mut body = String::from(": connected\n\n");
+    let mut expected = Vec::new();
+    for (index, event) in data.iter().enumerate() {
+        let (head, tail) = event.split_once(',').expect("an object with two members");
+        body.push_str(&format!(
+            "event: message\nid: {index}\ndata: {head},\ndata: {tail}\n\n"
+        ));
+        body.push_str("data:  \n\n: ping\n\n");
+        expected.push(format!("{head},\n{tail}"));
+    }
+    body.push_str("data: {\"type\":\"response.created\",\"sequence_number\":9}\n\n");
+
+    let (prefix, result, _) =
+        observed_call(&replying_without_a_content_type(Bytes::from(body))).await;
+    assert_eq!(
+        prefix, expected,
+        "the joined data of each event, and nothing else"
+    );
+
+    let live = result.expect("the turn finishes").body.response;
+    let folded = decode_reply(
+        &wire(),
+        &CompletionRequest::new("say hi"),
+        Mode::Streaming,
+        prefix.into_iter().map(WireFrame::Text),
+    )
+    .expect("the committed strings fold");
+    assert_eq!(folded.choice, live.choice);
+    assert_eq!(folded.raw, live.raw);
+    assert_eq!(folded.usage, live.usage);
+    assert_eq!(folded.finish_reason(), live.finish_reason());
+    assert_eq!(
+        serde_json::to_value(folded.message().expect("a message")).expect("serializes"),
+        serde_json::to_value(live.message().expect("a message")).expect("serializes"),
+    );
+}

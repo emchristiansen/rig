@@ -48,11 +48,16 @@ fn a_frames_evidence_is_its_text_or_its_bytes() {
     }
 
     assert_eq!(
-        FrameEvidence::from(&WireFrame::Text("{ }".to_owned())),
+        FrameEvidence::of_wire_frame(WireFrame::Text("{ }".to_owned()), true),
         FrameEvidence::Text("{ }".to_owned())
     );
     assert_eq!(
-        FrameEvidence::from(&WireFrame::Bytes(vec![0xff, 0x7b])),
+        FrameEvidence::of_wire_frame(WireFrame::Text("{ \u{fffd} }".to_owned()), false),
+        FrameEvidence::Decoded("{ \u{fffd} }".to_owned()),
+        "text cut from a reply that was not all UTF-8 is not exact"
+    );
+    assert_eq!(
+        FrameEvidence::of_wire_frame(WireFrame::Bytes(vec![0xff, 0x7b]), false),
         FrameEvidence::Bytes(vec![0xff, 0x7b])
     );
 }

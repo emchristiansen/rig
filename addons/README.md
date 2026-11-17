@@ -39,7 +39,7 @@ places where the fork's side must be re-applied.
 | `.gitignore` | First line `target/` becomes `target`; the `.envrc` line is removed. | The development shell makes `target` a symlink, which `target/` does not match; `.envrc` is tracked. |
 | `.cargo/config.toml` | Appended `[registry] global-min-publish-age = "14 days"` and `[resolver] incompatible-publish-age = "deny"`. | The workstation's fourteen-day rule for registry crates. |
 
-Files the fork adds outside this directory: `.envrc` (`use flake`).
+Files the fork adds outside this directory: `.envrc` (`use flake`), and `.github/workflows/addons.yaml`, which runs the add-on crates' format check, lints and tests on pull requests. Upstream's own workflows compile the add-ons as workspace members but do not run their tests: its test jobs name `crates/` packages, and its all-features lane is skipped outside upstream's repository.
 
 Upstream's `rust-toolchain.toml` is deliberately unchanged. Upstream's CI
 reads it, so upstream's own format and lint checks run on the toolchain

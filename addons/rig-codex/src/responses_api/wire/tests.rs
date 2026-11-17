@@ -304,9 +304,13 @@ fn debug_shows_the_credential_in_the_secrets_own_form() {
 #[test]
 fn an_unsupported_control_is_named_in_a_fixed_order() {
     let request = || CompletionRequest::new("hello");
-    assert_eq!(UnsupportedCodexControl::in_request(&request()), None);
+    assert_eq!(
+        UnsupportedCodexControl::in_request(&chatgpt_wire(), &request()),
+        None
+    );
     assert_eq!(
         UnsupportedCodexControl::in_request(
+            &chatgpt_wire(),
             &request().additional_params(json!({"store": false, "top_p": null}))
         ),
         None,
@@ -317,21 +321,24 @@ fn an_unsupported_control_is_named_in_a_fixed_order() {
     all.max_tokens = Some(64);
     all.temperature = Some(0.25);
     assert_eq!(
-        UnsupportedCodexControl::in_request(&all),
+        UnsupportedCodexControl::in_request(&chatgpt_wire(), &all),
         Some(UnsupportedCodexControl::MaxOutputTokens)
     );
     all.max_tokens = None;
     assert_eq!(
-        UnsupportedCodexControl::in_request(&all),
+        UnsupportedCodexControl::in_request(&chatgpt_wire(), &all),
         Some(UnsupportedCodexControl::Temperature)
     );
     all.temperature = None;
     assert_eq!(
-        UnsupportedCodexControl::in_request(&all),
+        UnsupportedCodexControl::in_request(&chatgpt_wire(), &all),
         Some(UnsupportedCodexControl::TopP)
     );
     assert_eq!(
-        UnsupportedCodexControl::in_request(&request().additional_params(json!({"store": true}))),
+        UnsupportedCodexControl::in_request(
+            &chatgpt_wire(),
+            &request().additional_params(json!({"store": true}))
+        ),
         Some(UnsupportedCodexControl::Store)
     );
 

@@ -7,6 +7,18 @@
 //! [`RetainedFrames`] store: the data of each server-sent event of a streamed
 //! reply, or a whole unary body.
 //!
+//! A kept frame says how faithful it is ([`FrameEvidence`]). Rig's framer
+//! reads text with each invalid UTF-8 sequence replaced, so a text frame is
+//! [`FrameEvidence::Text`], the event's data as the provider sent it, only
+//! while every byte of the reply so far was valid UTF-8. A text frame cut
+//! from the chunk holding the reply's first invalid byte, or from any chunk
+//! after it, is [`FrameEvidence::Decoded`]. Name a failure with
+//! [`decode_frame`](crate::responses_api::streaming::decode_frame) on a
+//! `Text` frame only.
+//!
+//! The store holds its capacity of the most recent frames, and never fewer
+//! than every frame of the chunk being handed on.
+//!
 //! ```
 //! use rig_codex::http_client::HttpFrameTee;
 //! use rig_http::http_client::framing::Framing;
@@ -18,6 +30,7 @@
 //! # let _ = tee::<()>;
 //! ```
 
+use crate::error::FrameEvidence;
 use crate::frame_tee::RetainedFrames;
 use bytes::Bytes;
 use futures::Stream;
@@ -41,7 +54,7 @@ use std::task::{Context, Poll};
 pub struct HttpFrameTee<H> {
     inner: H,
     framing: Framing,
-    frames: RetainedFrames<WireFrame>,
+    frames: RetainedFrames<FrameEvidence>,
 }
 
 impl<H> HttpFrameTee<H> {
@@ -59,7 +72,7 @@ impl<H> HttpFrameTee<H> {
     /// The kept frames. The handle stays valid after the client is moved
     /// into a model.
     #[must_use]
-    pub fn frames(&self) -> RetainedFrames<WireFrame> {
+    pub fn frames(&self) -> RetainedFrames<FrameEvidence> {
         self.frames.clone()
     }
 
@@ -87,9 +100,13 @@ impl<H: HttpClientExt> HttpClientExt for HttpFrameTee<H> {
             let (parts, body) = sending.await?.into_parts();
             let body: LazyBody<U> = Box::pin(async move {
                 let bytes = body.await?;
-                for frame in framing.split(&bytes) {
-                    frames.keep(frame);
-                }
+                let exact = std::str::from_utf8(&bytes).is_ok();
+                frames.keep_batch(
+                    framing
+                        .split(&bytes)
+                        .into_iter()
+                        .map(|frame| FrameEvidence::of_wire_frame(frame, exact)),
+                );
                 Ok(U::from(bytes))
             });
             Ok(Response::from_parts(parts, body))
@@ -122,6 +139,7 @@ impl<H: HttpClientExt> HttpClientExt for HttpFrameTee<H> {
             let body: BoxedStream = Box::pin(TeedBody {
                 body,
                 cut: Cut::of(framing),
+                utf8: Utf8Watch::default(),
                 frames,
             });
             Ok(Response::from_parts(parts, body))
@@ -148,11 +166,55 @@ impl Cut {
     }
 }
 
+/// Whether every byte of a body so far is valid UTF-8, across its chunks.
+#[derive(Default)]
+struct Utf8Watch {
+    /// The bytes of a character the last chunk left unfinished.
+    partial: Vec<u8>,
+    /// An invalid sequence was seen. It stays seen: Rig's framer has read
+    /// replacement text from there on, and nothing after is vouched for.
+    invalid: bool,
+}
+
+impl Utf8Watch {
+    fn feed(&mut self, chunk: &[u8]) {
+        if self.invalid {
+            return;
+        }
+        let mut bytes = std::mem::take(&mut self.partial);
+        bytes.extend_from_slice(chunk);
+        match std::str::from_utf8(&bytes) {
+            Ok(_) => {}
+            Err(error) if error.error_len().is_some() => self.invalid = true,
+            Err(error) => bytes.drain(..error.valid_up_to()).for_each(drop),
+        }
+        if !self.invalid && std::str::from_utf8(&bytes).is_err() {
+            self.partial = bytes;
+        }
+    }
+
+    /// Whether the text cut so far is the body's own text.
+    fn exact(&self) -> bool {
+        !self.invalid
+    }
+
+    /// Whether the body, now ended, was valid UTF-8 to its last byte.
+    fn exact_at_end(&self) -> bool {
+        !self.invalid && self.partial.is_empty()
+    }
+}
+
 /// A streamed body that keeps each frame its chunks complete.
+///
+/// Every frame a chunk completes is kept before the chunk is handed on, and
+/// none of them is dropped for capacity until a later chunk arrives: a frame
+/// Rig's decoder refuses is among the kept frames when the failure
+/// surfaces, however many frames followed it in its chunk.
 struct TeedBody {
     body: BoxedStream,
     cut: Cut,
-    frames: RetainedFrames<WireFrame>,
+    utf8: Utf8Watch,
+    frames: RetainedFrames<FrameEvidence>,
 }
 
 impl Stream for TeedBody {
@@ -164,9 +226,13 @@ impl Stream for TeedBody {
         match &next {
             Poll::Ready(Some(Ok(chunk))) => match &mut this.cut {
                 Cut::Framed(framer) => {
-                    for frame in framer.push(chunk) {
-                        this.frames.keep(frame);
-                    }
+                    this.utf8.feed(chunk);
+                    let exact = this.utf8.exact();
+                    this.frames.keep_batch(
+                        framer
+                            .push(chunk)
+                            .map(|frame| FrameEvidence::of_wire_frame(frame, exact)),
+                    );
                 }
                 Cut::Whole(body) => body.extend_from_slice(chunk),
                 Cut::Ended => {}
@@ -174,11 +240,16 @@ impl Stream for TeedBody {
             Poll::Ready(None) => match std::mem::replace(&mut this.cut, Cut::Ended) {
                 Cut::Framed(mut framer) => {
                     if let Some(frame) = framer.finish() {
-                        this.frames.keep(frame);
+                        let exact = this.utf8.exact_at_end();
+                        this.frames.keep(FrameEvidence::of_wire_frame(frame, exact));
                     }
                 }
                 Cut::Whole(body) if !body.is_empty() => {
-                    this.frames.keep(WireFrame::from_bytes(body));
+                    // A whole body is text only when all of it is UTF-8.
+                    this.frames.keep(FrameEvidence::of_wire_frame(
+                        WireFrame::from_bytes(body),
+                        true,
+                    ));
                 }
                 Cut::Whole(_) | Cut::Ended => {}
             },

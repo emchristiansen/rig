@@ -29,8 +29,8 @@ fn get() -> Request<Bytes> {
         .expect("builds")
 }
 
-fn text(frame: &str) -> WireFrame {
-    WireFrame::Text(frame.to_owned())
+fn text(frame: &str) -> FrameEvidence {
+    FrameEvidence::Text(frame.to_owned())
 }
 
 /// Read a streamed reply to its end, returning its chunks as handed on.
@@ -78,16 +78,39 @@ async fn a_streamed_reply_keeps_each_events_data_as_sent() {
     assert_eq!(kept.last(), Some(text("[DONE]")));
 }
 
-/// The tee holds its capacity of most recent frames.
+/// The tee holds its capacity of most recent frames, and every frame of the
+/// chunk it last handed on even when that is more.
 #[tokio::test]
 async fn a_streamed_reply_keeps_only_its_most_recent_frames() {
-    let transport =
-        SequencedStreamingHttpClient::new(vec![chunk(b"data: 1\n\ndata: 2\n\ndata: 3\n\n")]);
+    let transport = SequencedStreamingHttpClient::new(vec![
+        chunk(b"data: 1\n\n"),
+        chunk(b"data: 2\n\n"),
+        chunk(b"data: 3\n\n"),
+    ]);
     let tee = HttpFrameTee::new(transport, Framing::Sse, capacity(2));
     let kept = tee.frames();
     drained(tee.send_streaming(get()).await.expect("the reply opens")).await;
     assert_eq!(kept.take(), [text("2"), text("3")]);
     assert_eq!(kept.capacity(), capacity(2));
+
+    // One chunk that completes three frames: all three are kept while it
+    // is the chunk in hand, and the next chunk brings the store back to
+    // capacity.
+    let transport = SequencedStreamingHttpClient::new(vec![
+        chunk(b"data: 1\n\ndata: 2\n\ndata: 3\n\n"),
+        chunk(b"data: 4\n\n"),
+    ]);
+    let tee = HttpFrameTee::new(transport, Framing::Sse, capacity(2));
+    let kept = tee.frames();
+    let mut body = tee
+        .send_streaming(get())
+        .await
+        .expect("the reply opens")
+        .into_body();
+    body.next().await.expect("a chunk").expect("reads");
+    assert_eq!(kept.snapshot(), [text("1"), text("2"), text("3")]);
+    body.next().await.expect("a chunk").expect("reads");
+    assert_eq!(kept.snapshot(), [text("3"), text("4")]);
 }
 
 /// A transport failure mid-reply is handed on as it is, and the frames cut
@@ -175,7 +198,7 @@ async fn a_unary_reply_is_kept_once_its_body_is_read() {
         .into_body()
         .await
         .expect("the body reads");
-    assert_eq!(kept.last(), Some(WireFrame::Bytes(vec![0xff, 0x7b])));
+    assert_eq!(kept.last(), Some(FrameEvidence::Bytes(vec![0xff, 0x7b])));
 }
 
 fn codex_wire() -> CodexResponses {
@@ -203,22 +226,22 @@ fn malformed_reply() -> Bytes {
 
 /// The kept frames hold the malformed one exactly as the provider sent it,
 /// and this crate's decoder names it with the frame as received.
-fn assert_the_malformed_frame_was_kept(frames: &[WireFrame]) {
+fn assert_the_malformed_frame_was_kept(frames: &[FrameEvidence]) {
     let malformed = &MALFORMED_KNOWN_FRAMES[0];
     assert_eq!(frames, [text(CREATED), text(malformed.frame)]);
     let refused: Vec<_> = frames
         .iter()
-        .filter_map(|frame| decode_frame(&frame.as_str()).err())
+        .filter_map(|frame| match frame {
+            FrameEvidence::Text(frame) => decode_frame(frame).err(),
+            other => panic!("every kept frame is exact text, got {other:?}"),
+        })
         .collect();
     let [corrupt] = refused.as_slice() else {
         panic!("exactly one kept frame fails to decode, got {refused:?}");
     };
     assert_eq!(corrupt.event_type(), Some(malformed.event_type));
     assert_eq!(corrupt.frame(), Some(malformed.frame));
-    assert_eq!(
-        FrameEvidence::from(&frames[1]),
-        FrameEvidence::Text(malformed.frame.to_owned())
-    );
+    assert_eq!(frames[1], FrameEvidence::Text(malformed.frame.to_owned()));
 }
 
 /// The use the tee exists for, through Rig's own driver: a streamed reply
@@ -264,4 +287,123 @@ async fn a_frame_rigs_decoder_refuses_in_a_unary_call_is_kept_too() {
         .await
         .expect_err("a malformed frame of a modelled type fails the call");
     assert_the_malformed_frame_was_kept(&kept.snapshot());
+}
+
+/// A reply Rig's decoder refuses, drained through Rig's own driver over a
+/// tee of `capacity` frames. Returns what the tee holds when the failure
+/// has surfaced.
+async fn kept_after_a_failed_stream(reply: Vec<u8>, frames: usize) -> Vec<FrameEvidence> {
+    let wire = codex_wire();
+    let tee = HttpFrameTee::new(
+        SequencedStreamingHttpClient::new(vec![Ok(Bytes::from(reply))]),
+        Framing::Sse,
+        capacity(frames),
+    );
+    let kept = tee.frames();
+    let model = Model::new(wire.clone(), CodexHttpClient::new(tee, wire));
+    let mut stream = model
+        .stream(CompletionRequest::new("say hi"))
+        .expect("the request encodes");
+    let mut failed = false;
+    while let Some(event) = stream.next().await {
+        failed |= event.is_err();
+    }
+    assert!(failed || stream.finish().await.is_err(), "the stream fails");
+    kept.snapshot()
+}
+
+/// Text Rig's framer read from bytes that were not UTF-8 is kept as
+/// replacement-decoded, never as the frame as received; a frame that holds
+/// a genuine U+FFFD the provider sent is exact text.
+#[tokio::test]
+async fn replacement_decoded_text_is_not_kept_as_exact() {
+    let malformed = MALFORMED_KNOWN_FRAMES[0].frame;
+    let broken = malformed.replacen('{', "{\"x\":\"\u{1}\",", 1);
+    assert!(
+        broken.contains('\u{1}'),
+        "a marker byte to corrupt: {broken}"
+    );
+
+    // The provider's own U+FFFD, valid UTF-8.
+    let genuine = broken.replace('\u{1}', "\u{fffd}");
+    let kept = kept_after_a_failed_stream(
+        format!("data: {CREATED}\n\ndata: {genuine}\n\n").into_bytes(),
+        8,
+    )
+    .await;
+    assert_eq!(kept, [text(CREATED), text(&genuine)]);
+
+    // The same event with the byte 0xff where the character was.
+    let mut invalid = format!("data: {CREATED}\n\ndata: {broken}\n\n").into_bytes();
+    let at = invalid
+        .iter()
+        .position(|byte| *byte == 1)
+        .expect("the marker");
+    invalid[at] = 0xff;
+    let kept = kept_after_a_failed_stream(invalid, 8).await;
+    assert_eq!(
+        kept,
+        [
+            FrameEvidence::Decoded(CREATED.to_owned()),
+            FrameEvidence::Decoded(genuine.clone()),
+        ],
+        "one chunk held the invalid byte, so nothing cut from it is exact; the text is \
+         what Rig read, a replacement character where the byte was"
+    );
+
+    // A frame whose chunk arrived before the invalid byte stays exact.
+    let wire = codex_wire();
+    let mut second = format!("data: {broken}\n\n").into_bytes();
+    let at = second
+        .iter()
+        .position(|byte| *byte == 1)
+        .expect("the marker");
+    second[at] = 0xff;
+    let tee = HttpFrameTee::new(
+        SequencedStreamingHttpClient::new(vec![
+            Ok(Bytes::from(format!("data: {CREATED}\n\n"))),
+            Ok(Bytes::from(second)),
+        ]),
+        Framing::Sse,
+        capacity(8),
+    );
+    let kept = tee.frames();
+    let model = Model::new(wire.clone(), CodexHttpClient::new(tee, wire));
+    let mut stream = model
+        .stream(CompletionRequest::new("say hi"))
+        .expect("the request encodes");
+    while stream.next().await.is_some() {}
+    assert_eq!(
+        kept.snapshot(),
+        [text(CREATED), FrameEvidence::Decoded(genuine)]
+    );
+}
+
+/// A frame Rig's decoder refuses is still kept when the failure surfaces,
+/// however many frames followed it in the chunk that carried it and
+/// whatever the capacity: the frames of the chunk being handed on are never
+/// dropped for capacity.
+#[tokio::test]
+async fn the_refused_frame_is_kept_when_frames_follow_it_in_its_chunk() {
+    let malformed = MALFORMED_KNOWN_FRAMES[0].frame;
+    let trailing = r#"{"type":"future.event"}"#;
+    for frames in [1, 8] {
+        let mut reply = format!("data: {CREATED}\n\ndata: {malformed}\n\n");
+        for _ in 0..9 {
+            reply.push_str(&format!("data: {trailing}\n\n"));
+        }
+        let kept = kept_after_a_failed_stream(reply.into_bytes(), frames).await;
+        assert_eq!(kept.len(), 11, "capacity {frames}: the whole chunk is kept");
+        let refused: Vec<_> = kept
+            .iter()
+            .filter_map(|frame| match frame {
+                FrameEvidence::Text(frame) => decode_frame(frame).err(),
+                other => panic!("every kept frame is exact text, got {other:?}"),
+            })
+            .collect();
+        let [corrupt] = refused.as_slice() else {
+            panic!("capacity {frames}: one kept frame fails to decode, got {refused:?}");
+        };
+        assert_eq!(corrupt.frame(), Some(malformed));
+    }
 }

@@ -65,7 +65,7 @@ use super::{
 pub use super::{
     EmptyInputDeltaError, IncrementalSendRefused, InputDelta, KeepaliveDrain,
     ResponsesWebSocketCreateOptions, ResponsesWebSocketEvent, UncollectedRecoveredFrames,
-    UnrecognizedEvent,
+    UnconfirmedSend, UnrecognizedEvent,
 };
 use crate::error::CodexSessionError;
 use crate::responses_api::ResponseStatus;
@@ -385,6 +385,9 @@ pub struct CodexWebSocketSession {
     /// of an in-flight turn handed the session, until the caller takes it.
     turn_state: Option<String>,
     in_flight: bool,
+    /// Whether the frame of the turn in flight was handed to the connection
+    /// and the connection has not yet said it was written.
+    unconfirmed_send: bool,
     event_timeout: Option<Duration>,
     closed: bool,
     failed: bool,
@@ -408,6 +411,7 @@ impl CodexWebSocketSession {
             socket: connection,
             turn_state: None,
             in_flight: false,
+            unconfirmed_send: false,
             event_timeout,
             closed: false,
             failed: false,
@@ -640,6 +644,10 @@ impl CodexWebSocketSession {
     fn ensure_can_send(&self) -> Result<(), ProviderError> {
         self.ensure_open()?;
 
+        if self.unconfirmed_send {
+            return Err(ProviderError::request(UnconfirmedSend));
+        }
+
         if self.in_flight {
             return Err(ProviderError::Provider(
                 "An OpenAI websocket response is already in flight on this session".to_string(),
@@ -669,7 +677,9 @@ impl CodexWebSocketSession {
     ) -> Result<RequestBody, ProviderError> {
         // Direct session requests bypass builder validation.
         completion_request.validate_message_content()?;
-        if let Some(control) = UnsupportedCodexControl::in_request(&completion_request) {
+        if let Some(control) =
+            UnsupportedCodexControl::in_request(&self.wire.wire, &completion_request)
+        {
             return Err(control.into());
         }
 
@@ -729,13 +739,33 @@ impl CodexWebSocketSession {
         // again here, before any frame is written.
         self.wire.sendable_identity()?;
 
+        // Custody is taken before the frame is handed over. A caller that
+        // drops this future while the connection is still writing leaves a
+        // frame the backend may have received: the session then holds a
+        // turn in flight whose send is unconfirmed, not an idle socket.
+        self.continuation = Continuation::InFlight(Box::new(envelope));
+        self.in_flight = true;
+        self.unconfirmed_send = true;
         if let Err(error) = self.socket.send(Frame::Text(frame)).await {
             return Err(self.fail_session(websocket_provider_error(error)));
         }
-        self.continuation = Continuation::InFlight(Box::new(envelope));
-        self.in_flight = true;
+        self.unconfirmed_send = false;
 
         Ok(())
+    }
+
+    /// Whether the turn in flight was sent by a call that did not finish: its
+    /// future was dropped while the connection was still writing the frame.
+    /// The session does not know whether the backend received that frame.
+    ///
+    /// While this holds, [`next_event`](Self::next_event) reads the turn if
+    /// the backend answers it, and every send is refused
+    /// ([`UnconfirmedSend`]). To send again, read the turn to its end or
+    /// [`close`](Self::close) this session and resend on a new one; the
+    /// request may then reach the backend twice.
+    #[must_use]
+    pub fn send_unconfirmed(&self) -> bool {
+        self.unconfirmed_send
     }
 
     /// Reads the next server event for the current in-flight turn.
@@ -1060,6 +1090,7 @@ impl CodexWebSocketSession {
             ResponsesWebSocketEvent::Item(_) | ResponsesWebSocketEvent::Unknown(_) => return,
         };
         self.in_flight = false;
+        self.unconfirmed_send = false;
         let current = std::mem::replace(
             &mut self.continuation,
             Continuation::Blocked(IncrementalSendRefused::LastTurnNotCompleted),
@@ -1072,6 +1103,7 @@ impl CodexWebSocketSession {
         self.pending_done_response_id = None;
         self.continuation = Continuation::Blocked(IncrementalSendRefused::LastTurnNotCompleted);
         self.in_flight = false;
+        self.unconfirmed_send = false;
     }
 
     fn mark_closed(&mut self) {

@@ -258,28 +258,60 @@ pub enum UnsupportedCodexControl {
 }
 
 impl UnsupportedCodexControl {
-    /// The first control `request` sets that the Codex contract does not
-    /// take, in the order output-token cap, temperature, `top_p`, `store`.
+    /// The first control `request` sets on `wire` that the Codex contract
+    /// does not take, in the order output-token cap, temperature, `top_p`,
+    /// `store`.
+    ///
+    /// A control is set when the request's typed field states it, or when
+    /// the value Rig's own merge gives its body field is not `null`: the
+    /// request's generation options, then its provider options for the
+    /// wire, then its `additional_params`, the later over the earlier
+    /// ([`rig_core::completion::options::param`]). So a control is refused
+    /// whichever of those states it, and a later `null` or `store: false`
+    /// that overrides an earlier value is honoured.
     #[must_use]
-    pub fn in_request(request: &CompletionRequest) -> Option<Self> {
-        let param = |name: &str| {
-            request
-                .additional_params
-                .as_ref()
-                .and_then(|params| params.get(name))
+    pub fn in_request(wire: &Responses, request: &CompletionRequest) -> Option<Self> {
+        let set = |key: &str| {
+            rig_core::completion::options::param(wire, request, key)
                 .filter(|value| !value.is_null())
         };
-        if request.max_tokens.is_some() {
+        if request.max_tokens.is_some() || set("max_output_tokens").is_some() {
             Some(Self::MaxOutputTokens)
-        } else if request.temperature.is_some() {
+        } else if request.temperature.is_some() || set("temperature").is_some() {
             Some(Self::Temperature)
-        } else if param("top_p").is_some() {
+        } else if set("top_p").is_some() {
             Some(Self::TopP)
-        } else if param("store") == Some(&serde_json::Value::Bool(true)) {
+        } else if set("store").is_some_and(|store| store != Value::Bool(false)) {
             Some(Self::Store)
         } else {
             None
         }
+    }
+
+    /// The first control `body`, Rig's encoding of a request, states that
+    /// the Codex contract does not take. The body is what is sent, so this
+    /// holds whichever way a request came to state the control.
+    fn in_body(body: &RequestBody) -> Result<Option<Self>, CodexRequestError> {
+        let stated = |key: &str| -> Result<Option<Value>, CodexRequestError> {
+            match body.get::<Value>(key) {
+                None => Ok(None),
+                Some(value) => {
+                    let value = value.map_err(CodexRequestError::Body)?;
+                    Ok((!value.is_null()).then_some(value))
+                }
+            }
+        };
+        Ok(if stated("max_output_tokens")?.is_some() {
+            Some(Self::MaxOutputTokens)
+        } else if stated("temperature")?.is_some() {
+            Some(Self::Temperature)
+        } else if stated("top_p")?.is_some() {
+            Some(Self::TopP)
+        } else if stated("store")?.is_some_and(|store| store != Value::Bool(false)) {
+            Some(Self::Store)
+        } else {
+            None
+        })
     }
 }
 
@@ -405,16 +437,16 @@ impl CodexResponses {
     /// caller wrote them ([`CallerFields::restore`]). `request` must already
     /// be prepared for the wire, as Rig's driver prepares it. Refuses a
     /// control the Codex contract does not take ([`UnsupportedCodexControl`])
-    /// before encoding.
+    /// before encoding, and again in the encoded body.
     pub(crate) fn encode_body(
         &self,
         request: CompletionRequest,
         mode: Mode,
     ) -> Result<(Encoded, RequestBody), EncodeError> {
-        if let Some(control) = UnsupportedCodexControl::in_request(&request) {
+        if let Some(control) = UnsupportedCodexControl::in_request(&self.wire, &request) {
             return Err(EncodeError::request(control));
         }
-        let asked = CallerFields::of(&request);
+        let asked = CallerFields::of(&self.wire, &request);
         let custom_outputs = CustomOutputs::of(&request);
         let encoded = self.wire.encode(request, mode)?;
         let Body::Bytes(bytes) = encoded.request.body() else {
@@ -423,6 +455,9 @@ impl CodexResponses {
             ));
         };
         let mut body = RequestBody::parse(bytes).map_err(CodexRequestError::Body)?;
+        if let Some(control) = UnsupportedCodexControl::in_body(&body)? {
+            return Err(EncodeError::request(control));
+        }
         asked.restore(&self.wire, &mut body)?;
         if let Some(items) = body.get::<Vec<Box<RawValue>>>("input") {
             let mut items = items.map_err(CodexRequestError::Body)?;
@@ -452,12 +487,14 @@ struct CallerFields {
     typed_tools: usize,
     /// The tools in `additional_params["tools"]`.
     declared_tools: Vec<Value>,
-    /// `additional_params["include"]`, when the request sets one.
+    /// The `include` the request asks for, when it asks for one: the value
+    /// Rig's own merge of the request's generation options, provider
+    /// options and `additional_params` gives the field.
     include: Option<Value>,
 }
 
 impl CallerFields {
-    fn of(request: &CompletionRequest) -> Self {
+    fn of(wire: &Responses, request: &CompletionRequest) -> Self {
         let param = |name: &str| {
             request
                 .additional_params
@@ -471,7 +508,8 @@ impl CallerFields {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default(),
-            include: param("include").cloned(),
+            include: rig_core::completion::options::param(wire, request, "include")
+                .filter(|value| !value.is_null()),
         }
     }
 
@@ -631,7 +669,8 @@ fn declared_tool(
 /// ([`CodexRequestError::CustomOutput`]). Rig's driver replaces an image
 /// the provider or model cannot receive with its own words before the wire
 /// sees the request, so such an image is sent as those words rather than
-/// refused. The conversation identity is stamped in, and a
+/// refused. The rule holds for an answer the request wrote itself as an
+/// item (`additional_params["input"]`) as for one in its history. The conversation identity is stamped in, and a
 /// caller-set control the contract does not take is refused
 /// ([`UnsupportedCodexControl`]). A wire with no caller identity refuses to
 /// encode. Headers and compression are applied by

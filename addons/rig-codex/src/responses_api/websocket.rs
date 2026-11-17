@@ -417,6 +417,23 @@ pub struct UncollectedRecoveredFrames {
     pub count: usize,
 }
 
+/// A send was refused because an earlier send on the session did not finish.
+///
+/// The earlier call's future was dropped while the connection was still
+/// writing its frame, so the backend may have received the frame and may
+/// answer it. The session keeps that turn in flight rather than present an
+/// idle socket: a second request written behind it would have its events
+/// read as the first's. Read the turn with
+/// [`next_event`](codex::CodexWebSocketSession::next_event), or close the
+/// session and resend on a new one, which may deliver the request twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "an earlier send on this session was dropped before the connection confirmed it; the \
+     backend may have received it. Read the turn with next_event(), or close this session \
+     and resend on a new one"
+)]
+pub struct UnconfirmedSend;
+
 /// What the next incremental continuation may chain onto.
 #[derive(Debug, Clone)]
 pub(crate) enum Continuation {

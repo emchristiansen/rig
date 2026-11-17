@@ -574,3 +574,97 @@ async fn a_function_calls_answer_is_sent_as_rig_wrote_it() {
         assert!(answer.get("name").is_none(), "{answer}");
     }
 }
+
+/// The rule for a custom call's answer holds for an item the caller wrote
+/// itself in `additional_params["input"]`, which Rig v0.46.0 sends in place
+/// of the history's items: its texts are joined and its tool named from the
+/// call beside it, and an image in it is refused. No other item the caller
+/// wrote changes.
+#[tokio::test]
+async fn a_custom_calls_answer_the_caller_wrote_as_an_item_follows_the_same_rule() {
+    let call = serde_json::json!({
+        "type": "custom_tool_call", "call_id": "call_own",
+        "name": "apply_patch", "input": "*** Begin Patch"
+    });
+    let answer = |output: serde_json::Value| {
+        serde_json::json!({
+            "type": "custom_tool_call_output", "call_id": "call_own", "output": output
+        })
+    };
+    let request_writing = |output: serde_json::Value| {
+        let mut request = turn_declaring(serde_json::json!([declared_custom()]));
+        let params = request.additional_params.as_mut().expect("declares tools");
+        params["input"] = serde_json::json!([call, answer(output)]);
+        request
+    };
+    let wire = chatgpt();
+
+    let texts = serde_json::json!([
+        {"type": "input_text", "text": "a"},
+        {"type": "input_text", "text": "b"},
+    ]);
+    let input = raw_input(&sent(&wire, request_writing(texts)).await);
+    assert_eq!(input.len(), 2, "the caller's items replace the history's");
+    assert_eq!(input[0], written(&call));
+    assert_eq!(
+        value(&input[1]),
+        serde_json::json!({
+            "type": "custom_tool_call_output", "call_id": "call_own",
+            "name": "apply_patch", "output": "ab"
+        })
+    );
+
+    let image = serde_json::json!([
+        {"type": "input_text", "text": "see "},
+        {"type": "input_image", "image_url": "https://example.test/diff.png"},
+    ]);
+    let refusal = refused(&wire, request_writing(image)).await;
+    assert!(refusal.contains(CUSTOM_IMAGE_REFUSAL), "{refusal}");
+}
+
+/// A control the Codex contract does not take is refused by name, and
+/// nothing is sent, whichever way the request states it: its typed field,
+/// its generation options, its provider options or its `additional_params`.
+#[tokio::test]
+async fn every_way_of_stating_a_refused_control_is_refused_and_nothing_is_sent() {
+    let wire = chatgpt();
+    for (name, request) in requests_stating_a_refused_control() {
+        let refusal = refused(&wire, request.clone()).await;
+        assert!(
+            refusal.contains(&format!("`{name}")),
+            "{name} is refused by name: {refusal} for {request:?}"
+        );
+        // The wire refuses it too, with no driver in front of it.
+        wire.encode(request, Mode::Streaming)
+            .expect_err("the wire refuses the control");
+    }
+}
+
+/// A later layer that takes a refused control back out is honoured: the
+/// request is sent, and its body states no such control.
+#[tokio::test]
+async fn a_refused_control_a_later_layer_takes_out_is_not_refused() {
+    let wire = chatgpt();
+    for request in requests_overriding_a_refused_control() {
+        let body = value(&sent(&wire, request.clone()).await);
+        assert_eq!(body["store"], false, "{body}");
+        for control in ["temperature", "top_p", "max_output_tokens"] {
+            assert!(
+                body.get(control).is_none_or(serde_json::Value::is_null),
+                "{control} is not stated: {body}"
+            );
+        }
+    }
+}
+
+/// The request's own `include` is sent from whichever layer states it, in
+/// its own order, with the reasoning ciphertext added only when the request
+/// reasons or asked for it.
+#[tokio::test]
+async fn the_requests_include_is_kept_from_every_layer() {
+    let wire = chatgpt();
+    for (request, include) in requests_and_their_include() {
+        let body = value(&sent(&wire, request.clone()).await);
+        assert_eq!(body.get("include"), include.as_ref(), "{request:?}");
+    }
+}
