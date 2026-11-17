@@ -344,3 +344,17 @@ fn an_unsupported_control_is_named_in_a_fixed_order() {
         Some(&UnsupportedCodexControl::TopP)
     );
 }
+
+/// A serialized wire whose caller identity no request could carry does not
+/// decode.
+#[test]
+fn a_serialized_wire_with_an_invalid_caller_identity_does_not_decode() {
+    let mut json =
+        serde_json::to_value(anonymous().with_caller_identity(caller(None))).expect("serializes");
+    assert!(
+        serde_json::from_value::<CodexResponses>(json.clone()).is_ok(),
+        "the wire as serialized decodes, so the refusal below is the identity's"
+    );
+    json["caller_identity"]["originator"] = json!("");
+    assert!(serde_json::from_value::<CodexResponses>(json).is_err());
+}

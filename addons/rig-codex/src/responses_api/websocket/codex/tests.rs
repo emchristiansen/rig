@@ -447,6 +447,11 @@ async fn the_response_create_frame_carries_the_codex_shaping() {
             })
         );
     }
+    assert!(
+        frames[0].get("include").is_none(),
+        "no include is forced onto a turn without reasoning: {}",
+        frames[0]
+    );
     assert_eq!(
         frames[1]["include"],
         json!(["reasoning.encrypted_content"]),
