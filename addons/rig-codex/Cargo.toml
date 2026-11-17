@@ -48,3 +48,6 @@ rustls = ["tokio-tungstenite?/rustls-tls-webpki-roots"]
 native-tls = ["tokio-tungstenite?/native-tls"]
 # `RequestCompression::Zstd`: zstd-compressed HTTP request bodies.
 request-compression = ["dep:zstd"]
+# `responses_api::observation`: a caller-owned ledger of the original
+# server-sent events of one streamed Codex call.
+completion-observations = []

@@ -15,7 +15,7 @@ Current upstream base: `v0.46.0`.
 |---|---|
 | `rig-live` | The typed adapter for the public Live API (`rig_live::openai`), GPT-Live realtime calls for the ChatGPT subscription (`rig_live::chatgpt`), and their shared support code (`rig_live::support`). |
 | `rig-webrtc` | The WebRTC transport those realtime calls use. |
-| `rig-codex` | The ChatGPT subscription's Codex contract over Rig's Responses wire: `CodexResponses`, the wire a Codex model encodes with (declared tools and `include` as the caller wrote them, the conversation identity, refused controls), `CodexHttpClient` (exact headers, zstd request compression), the Codex Responses WebSocket session, the typed Responses data, and the evidence kept of a frame that failed to decode. |
+| `rig-codex` | The ChatGPT subscription's Codex contract over Rig's Responses wire: `CodexResponses`, the wire a Codex model encodes with (declared tools and `include` as the caller wrote them, the conversation identity, refused controls), `CodexHttpClient` (exact headers, zstd request compression), the Codex Responses WebSocket session, the typed Responses data, the evidence kept of a frame that failed to decode, and, behind the `completion-observations` feature, a caller-owned ledger of the original server-sent events of one streamed call (`rig_codex::responses_api::observation`). |
 
 The crates are not published; consumers depend on them by Git revision.
 
