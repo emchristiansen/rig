@@ -20,7 +20,9 @@
 //! [`ws_client`] names the websocket connection an idle session services,
 //! [`error`] the evidence kept of a frame that failed to decode, and
 //! [`frame_tee`] the frames a transport wrapper kept while handing them to
-//! Rig.
+//! Rig. With the `completion-observations` feature,
+//! `responses_api::observation` keeps a caller-owned ledger of the original
+//! server-sent events of one streamed call.
 //!
 //! ```
 //! use rig_codex::responses_api::wire::CodexResponses;

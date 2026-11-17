@@ -32,6 +32,9 @@ use std::ops::Add;
 
 pub(crate) mod body;
 pub mod codex_identity;
+#[cfg(feature = "completion-observations")]
+#[cfg_attr(docsrs, doc(cfg(feature = "completion-observations")))]
+pub mod observation;
 pub mod request_compression;
 pub mod request_headers;
 pub mod streaming;
