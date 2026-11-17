@@ -7,11 +7,11 @@ use crate::responses_api::{
     ResponsesUsage, SystemInstructionsPlacement, input_items,
 };
 use crate::wire::{CallerIdentity, MissingCallerIdentity};
+use rig_core::json_utils::remove_preserving_order;
 use rig_core::message::{CallId, ProviderCallId, ToolName};
 use rig_core::providers::chatgpt;
 use rig_core::providers::openai::OpenAIConfig;
 use rig_core::providers::openai::responses_api::wire::Responses;
-use rig_core::json_utils::remove_preserving_order;
 use serde_json::json;
 use std::sync::Mutex;
 

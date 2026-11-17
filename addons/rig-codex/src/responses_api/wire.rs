@@ -23,11 +23,11 @@
 //! # Ok::<(), rig_codex::responses_api::codex_identity::NotACodexWire>(())
 //! ```
 
+use super::ResponsesToolDefinition;
 use super::body::RequestBody;
 use super::codex_identity::{CodexIdentity, NotACodexWire, require_codex};
 use super::request_compression::{RequestCompression, RequestCompressionError};
 use super::request_headers::RequestHeaders;
-use super::ResponsesToolDefinition;
 use crate::wire::{CallerIdentity, MissingCallerIdentity, ORIGINATOR_HEADER, VERSION_HEADER};
 use http::{HeaderMap, HeaderName, HeaderValue};
 use rig_core::completion::CompletionRequest;
@@ -37,8 +37,8 @@ use rig_core::providers::openai::responses_api::wire::Responses;
 use rig_core::providers::openai::wire::Auth;
 use rig_core::wire::{Body, Descriptor, Encoded, Mode, Wire, WireFrame};
 use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
 use serde_json::Value;
+use serde_json::value::RawValue;
 
 /// The `include` entry asking for reasoning ciphertext.
 const REASONING_CIPHERTEXT: &str = "reasoning.encrypted_content";
@@ -465,7 +465,11 @@ impl CallerFields {
     }
 
     /// Replace Rig's writing of each declared tool with the declaration.
-    fn restore_tools(&self, wire: &Responses, body: &mut RequestBody) -> Result<(), CodexRequestError> {
+    fn restore_tools(
+        &self,
+        wire: &Responses,
+        body: &mut RequestBody,
+    ) -> Result<(), CodexRequestError> {
         if self.declared_tools.is_empty() {
             return Ok(());
         }
@@ -485,13 +489,18 @@ impl CallerFields {
         let encoded = tools
             .get_mut(self.typed_tools..self.typed_tools + self.declared_tools.len())
             .ok_or(count)?;
-        for (index, (declared, encoded)) in
-            self.declared_tools.iter().zip(encoded.iter_mut()).enumerate()
+        for (index, (declared, encoded)) in self
+            .declared_tools
+            .iter()
+            .zip(encoded.iter_mut())
+            .enumerate()
         {
             let restored = declared_tool(wire, index, declared, encoded)?;
-            *encoded = serde_json::value::to_raw_value(&restored).map_err(CodexRequestError::Body)?;
+            *encoded =
+                serde_json::value::to_raw_value(&restored).map_err(CodexRequestError::Body)?;
         }
-        body.insert("tools", &tools).map_err(CodexRequestError::Body)
+        body.insert("tools", &tools)
+            .map_err(CodexRequestError::Body)
     }
 
     /// Take the ciphertext `include` Rig adds back out, unless the request
@@ -586,9 +595,18 @@ fn declared_tool(
 /// Rig's Responses wire with the request fidelity and conversation identity
 /// of the Codex contract.
 ///
-/// The body is Rig's, with the request's declared tools and `include` as
-/// the caller wrote them ([`CallerFields`]) and the conversation identity
-/// stamped in, and a caller-set control the contract does not take refused
+/// The body is Rig's, with two of the request's fields as the caller wrote
+/// them. Rig reads each tool declared in `additional_params["tools"]` into
+/// its own tool type and writes it back, which drops an empty `description`
+/// or `name`, adds `strict` to a function and reorders keys; this wire sends
+/// a declared tool as the JSON value the caller wrote, changed only by
+/// strict mode's own transformation of a function (its `strict` and
+/// sanitized `parameters`). Rig asks every Codex request for the reasoning
+/// ciphertext; this wire states that `include` only when the request reasons
+/// or asked for it. Each edit first checks that the body holds what Rig
+/// writes for the request, and refuses otherwise
+/// ([`CodexRequestError`]). The conversation identity is stamped in, and a
+/// caller-set control the contract does not take is refused
 /// ([`UnsupportedCodexControl`]). A wire with no caller identity refuses to
 /// encode. Headers and compression are applied by
 /// [`CodexHttpClient`](crate::http_client::CodexHttpClient), which sends only

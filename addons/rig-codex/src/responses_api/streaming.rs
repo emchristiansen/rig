@@ -5,7 +5,7 @@
 //! ([`ResponseChunk`]), an output-item event ([`ItemChunk`]), or, for an event
 //! type this crate does not model, the whole payload with its tag. A frame of
 //! a modelled type that fails its typed decoding is a
-//! [`CorruptFrame`](crate::error::CorruptFrame) carrying the frame as
+//! [`CorruptFrame`] carrying the frame as
 //! received, never an unknown event.
 //!
 //! ```

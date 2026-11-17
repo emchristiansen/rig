@@ -31,10 +31,9 @@ fn an_untouched_field_keeps_the_bytes_it_was_read_with() {
 
 #[test]
 fn the_conversation_and_the_output_cap_are_written_last() {
-    let body = RequestBody::parse(
-        br#"{"input":[],"max_output_tokens":5,"model":"m","stream":true}"#,
-    )
-    .expect("parses");
+    let body =
+        RequestBody::parse(br#"{"input":[],"max_output_tokens":5,"model":"m","stream":true}"#)
+            .expect("parses");
     let order = written_order(&body);
     assert_eq!(
         order.get(order.len() - 2..).expect("has two fields"),
@@ -44,14 +43,20 @@ fn the_conversation_and_the_output_cap_are_written_last() {
 
 #[test]
 fn a_replaced_field_keeps_its_place_and_a_removed_one_leaves_the_rest_in_order() {
-    let mut body =
-        RequestBody::parse(br#"{"a":1,"b":2,"c":3,"input":[]}"#).expect("parses");
+    let mut body = RequestBody::parse(br#"{"a":1,"b":2,"c":3,"input":[]}"#).expect("parses");
     let before = written_order(&body);
-    body.insert("b", &json!({"replaced": true})).expect("inserts");
+    body.insert("b", &json!({"replaced": true}))
+        .expect("inserts");
     assert_eq!(written_order(&body), before);
-    assert_eq!(body.get::<Value>("b").expect("has b").expect("is JSON"), json!({"replaced": true}));
+    assert_eq!(
+        body.get::<Value>("b").expect("has b").expect("is JSON"),
+        json!({"replaced": true})
+    );
 
-    assert_eq!(body.remove("b").expect("had b").get(), r#"{"replaced":true}"#);
+    assert_eq!(
+        body.remove("b").expect("had b").get(),
+        r#"{"replaced":true}"#
+    );
     assert!(!body.contains("b"));
     assert_eq!(written_order(&body), ["a", "c", "input"]);
     assert_eq!(body.len(), 3);

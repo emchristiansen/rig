@@ -114,7 +114,10 @@ fn a_custom_tool_call_folds_with_its_input_and_its_item() {
     let response = folded(reply(json!({}), json!([item])));
     let call = only_call(&response);
     assert_eq!(call.function.name.as_str(), "grammar_tool");
-    assert_eq!(call.function.arguments.get("input"), Some(&json!("SELECT 1")));
+    assert_eq!(
+        call.function.arguments.get("input"),
+        Some(&json!("SELECT 1"))
+    );
     assert_eq!(call.function.invalid_arguments, None);
     let native = call.native.as_ref().expect("the provider's item is kept");
     assert_eq!(native.item, item);
@@ -125,7 +128,10 @@ fn a_custom_tool_call_folds_with_its_input_and_its_item() {
 /// and an unqualified one gains none.
 #[test]
 fn a_function_calls_namespace_is_kept_in_its_item() {
-    let namespaced = call("search", json!({"namespace": "web", "arguments": "{\"q\":\"rig\"}"}));
+    let namespaced = call(
+        "search",
+        json!({"namespace": "web", "arguments": "{\"q\":\"rig\"}"}),
+    );
     let response = folded(reply(json!({}), json!([namespaced])));
     let folded_call = only_call(&response);
     assert_eq!(folded_call.function.name.as_str(), "search");
@@ -200,7 +206,9 @@ fn streamed_frames(items: &[Value], terminal: &str, extra: Value) -> Vec<WireFra
             json!({"type": "response.output_item.done", "output_index": index, "item": item}),
         ));
     }
-    let status = terminal.strip_prefix("response.").expect("a response event");
+    let status = terminal
+        .strip_prefix("response.")
+        .expect("a response event");
     frames.push(frame(
         json!({"type": terminal, "response": response(status, json!(items))}),
     ));
@@ -353,7 +361,10 @@ fn a_request_that_declares_no_tools_replays_calls_as_text() {
         input[4]["content"][0]["text"],
         "[called tool apply_patch with {\"input\":\"{\\\"looks\\\":\\\"like json\\\"}\"}]"
     );
-    assert_eq!(input[7]["content"][0]["text"], "[tool apply_patch result] ok");
+    assert_eq!(
+        input[7]["content"][0]["text"],
+        "[tool apply_patch result] ok"
+    );
 }
 
 /// A turn the provider ends `incomplete` is a reply, not an error: its

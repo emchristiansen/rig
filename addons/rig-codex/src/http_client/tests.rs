@@ -1,7 +1,7 @@
 use super::*;
-use crate::responses_api::wire::CodexEncoded;
 use crate::responses_api::codex_identity::CodexIdentity;
 use crate::responses_api::request_headers::RequestHeaders;
+use crate::responses_api::wire::CodexEncoded;
 use crate::wire::{CallerIdentity, MissingCallerIdentity};
 use http::StatusCode;
 use rig_core::Model;
@@ -276,10 +276,7 @@ async fn a_wire_without_a_caller_identity_sends_nothing() {
     assert!(client.inner().requests().is_empty());
 
     // The driver reports the same refusal as a failed call.
-    let model = Model::new(
-        wire.clone(),
-        CodexHttpClient::new(transport.clone(), wire),
-    );
+    let model = Model::new(wire.clone(), CodexHttpClient::new(transport.clone(), wire));
     model
         .call(prompt())
         .await
@@ -442,10 +439,7 @@ async fn a_body_the_identity_cannot_be_stamped_into_is_refused() {
     let wire = chatgpt()
         .with_codex_identity(derived_identity())
         .expect("a Codex wire");
-    let model = Model::new(
-        wire.clone(),
-        CodexHttpClient::new(transport.clone(), wire),
-    );
+    let model = Model::new(wire.clone(), CodexHttpClient::new(transport.clone(), wire));
     let mut request = prompt();
     request.additional_params = Some(json!({"client_metadata": "text"}));
     let error = model
@@ -454,7 +448,9 @@ async fn a_body_the_identity_cannot_be_stamped_into_is_refused() {
         .expect_err("the identity has no object to go in");
     assert!(
         format!("{error:?}").contains("ClientMetadataNotAnObject")
-            || error.to_string().contains("`client_metadata` must be a JSON object"),
+            || error
+                .to_string()
+                .contains("`client_metadata` must be a JSON object"),
         "{error:?}"
     );
     assert!(transport.requests().is_empty());

@@ -116,7 +116,8 @@ fn stamping_refuses_metadata_that_is_not_an_object() {
     };
     assert_eq!(found, json!("not a map"));
     assert_eq!(
-        written(&body)["client_metadata"], "not a map",
+        written(&body)["client_metadata"],
+        "not a map",
         "the body is untouched"
     );
 }

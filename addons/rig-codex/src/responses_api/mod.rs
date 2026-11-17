@@ -970,7 +970,7 @@ pub enum Output {
     /// An opaque compaction item (`"type": "compaction"`), preserved verbatim
     /// so it can be sent back as an input item on the next request. Kept
     /// distinct from [`Output::Unknown`] because OpenAI documents it as a
-    /// must-replay item, and [`InputContent::Compaction`] is its input twin.
+    /// must-replay item.
     Compaction(Map<String, Value>),
     /// Catch-all for output item types this version does not model. Holds the
     /// raw item object exactly as it appeared in the provider's `output[]`
@@ -1132,7 +1132,7 @@ pub struct OutputFunctionCall {
     /// default one.
     ///
     /// Present in both directions because this struct is shared by
-    /// [`Output::FunctionCall`] and [`InputContent::FunctionCall`]; dropping
+    /// [`Output::FunctionCall`] and the function-call input item; dropping
     /// it on either side would strip the qualifier before any consumer saw it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
@@ -1166,7 +1166,7 @@ pub struct OutputCustomToolCall {
 
 /// The output of a custom (grammar) tool call, sent back as input.
 ///
-/// Separate from [`ToolResult`] because the custom output item carries a plain
+/// Separate from a function call's result because the custom output item carries a plain
 /// string, where a function output carries text or rich blocks.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct CustomToolResult {

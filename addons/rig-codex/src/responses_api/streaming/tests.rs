@@ -410,3 +410,88 @@ fn the_terminal_record_is_the_terminal_responses_own() {
     assert!(record.incomplete_details.is_none());
     assert!(record.provider_request_id.is_none());
 }
+
+/// A summary delta carries `delta` and a summary done carries `text`: each
+/// event refuses the other's member.
+#[test]
+fn summary_delta_and_done_keep_their_own_members() {
+    let delta_with_text = json!({
+        "type": "response.reasoning_summary_text.delta",
+        "item_id": "rs_1",
+        "output_index": 0,
+        "summary_index": 0,
+        "sequence_number": 1,
+        "text": "wrong member",
+    });
+    assert!(
+        decode_frame(&delta_with_text.to_string()).is_err(),
+        "a delta without `delta` must not decode"
+    );
+
+    let done_with_delta = json!({
+        "type": "response.reasoning_summary_text.done",
+        "item_id": "rs_1",
+        "output_index": 0,
+        "summary_index": 0,
+        "sequence_number": 2,
+        "delta": "wrong member",
+    });
+    assert!(
+        decode_frame(&done_with_delta.to_string()).is_err(),
+        "a done without `text` must not decode"
+    );
+
+    let done = json!({
+        "type": "response.reasoning_summary_text.done",
+        "item_id": "rs_1",
+        "output_index": 0,
+        "summary_index": 0,
+        "sequence_number": 3,
+        "text": "the whole summary",
+    });
+    let Ok(DecodedFrame::Chunk(StreamingCompletionChunk::Delta(ItemChunk {
+        data: ItemChunkKind::ReasoningSummaryTextDone(chunk),
+        ..
+    }))) = decode_frame(&done.to_string())
+    else {
+        panic!("a well-formed done event decodes");
+    };
+    assert_eq!(chunk.text, "the whole summary");
+}
+
+/// The arguments an args-done event states and the arguments its done item
+/// states are one type, and reconcile to one value however each was spaced.
+#[test]
+fn arguments_done_and_the_done_item_reconcile_through_one_type() {
+    let args_done = json!({
+        "type": "response.function_call_arguments.done",
+        "item_id": "fc_1",
+        "output_index": 0,
+        "sequence_number": 1,
+        "arguments": "{\"a\": 1}",
+    });
+    let Ok(DecodedFrame::Chunk(StreamingCompletionChunk::Delta(ItemChunk {
+        data: ItemChunkKind::FunctionCallArgsDone(chunk),
+        ..
+    }))) = decode_frame(&args_done.to_string())
+    else {
+        panic!("the args-done event decodes");
+    };
+    let item: crate::responses_api::OutputFunctionCall = serde_json::from_value(json!({
+        "id": "fc_1",
+        "call_id": "call_1",
+        "name": "f",
+        "arguments": "{\"a\":1}",
+        "status": "completed",
+    }))
+    .expect("the done item decodes");
+    assert_eq!(
+        chunk.arguments.reconcile(&item.arguments),
+        Ok(json!({"a": 1}))
+    );
+    // Serialization keeps the stringified spelling the provider sent.
+    assert_eq!(
+        serde_json::to_value(&chunk).expect("serializes")["arguments"],
+        json!("{\"a\": 1}")
+    );
+}

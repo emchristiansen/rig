@@ -68,11 +68,11 @@ pub use super::{
     UnrecognizedEvent,
 };
 use crate::error::CodexSessionError;
+use crate::responses_api::ResponseStatus;
+use crate::responses_api::body::RequestBody;
 use crate::responses_api::codex_identity::{CLIENT_METADATA_FIELD, require_codex};
 use crate::responses_api::streaming::ResponseChunkKind;
 use crate::responses_api::wire::{CodexResponses, UnsupportedCodexControl, set};
-use crate::responses_api::ResponseStatus;
-use crate::responses_api::body::RequestBody;
 use crate::ws_client::{
     BoxedWebSocketConnection, ConnectOptions, Frame, ReadyFrame, UnsupportedCapability,
     WebSocketClientExt,
@@ -82,10 +82,10 @@ use rig_core::error::{EncodeError, ProviderError};
 use rig_core::http_client::{self, NoBody};
 use rig_core::operation::Completion;
 use rig_core::wasm_compat::{WasmCompatSend, WasmCompatSync};
+use rig_core::wire::{Mode, Operation, Wire};
 use rig_http::ws_client::WebSocketConnection as _;
 use serde::Serialize;
 use serde::ser::SerializeMap;
-use rig_core::wire::{Mode, Operation, Wire};
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;

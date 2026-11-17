@@ -117,7 +117,10 @@ async fn the_codex_lane_sends_the_pinned_body() {
         }
     }
     assert_eq!(bodies[0], bodies[1], "one body in either mode");
-    assert_eq!(bodies[0], bodies[2], "the HTTP client sends the wire's body");
+    assert_eq!(
+        bodies[0], bodies[2],
+        "the HTTP client sends the wire's body"
+    );
 }
 
 /// The conversation identity on the wire states the same cache key and
@@ -149,10 +152,9 @@ async fn an_identity_on_the_wire_writes_the_bytes_the_caller_would() {
 /// Rig's tool type does not model all survive.
 #[tokio::test]
 async fn declared_tools_reach_the_http_body_as_the_caller_wrote_them() {
-    let wire = codex(
-        Responses::new(provider(), "gpt-5.4")
-            .with_tool(rig_core::providers::openai::responses_api::ResponsesToolDefinition::hosted("web_search")),
-    );
+    let wire = codex(Responses::new(provider(), "gpt-5.4").with_tool(
+        rig_core::providers::openai::responses_api::ResponsesToolDefinition::hosted("web_search"),
+    ));
     let declared = [namespace(), declared_function(), declared_hosted()];
     let body = sent(
         &wire,
@@ -161,7 +163,11 @@ async fn declared_tools_reach_the_http_body_as_the_caller_wrote_them() {
     .await;
 
     let tools = raw_tools(&body);
-    assert_eq!(tools.len(), 5, "typed, three declared, one default: {tools:?}");
+    assert_eq!(
+        tools.len(),
+        5,
+        "typed, three declared, one default: {tools:?}"
+    );
     assert_eq!(value(&tools[0])["name"], "lookup");
     assert_eq!(
         value(&tools[0])["strict"],
@@ -214,13 +220,10 @@ async fn strict_tools_apply_only_their_own_transformation_to_declared_tools() {
         })
     );
     let mut untouched = rewritten.as_object().expect("an object").clone();
-    let mut expected = declared_function()
-        .as_object()
-        .expect("an object")
-        .clone();
+    let mut expected = declared_function().as_object().expect("an object").clone();
     for changed in ["strict", "parameters"] {
-        untouched.remove(changed);
-        expected.remove(changed);
+        rig_core::json_utils::remove_preserving_order(&mut untouched, changed);
+        rig_core::json_utils::remove_preserving_order(&mut expected, changed);
     }
     assert_eq!(
         untouched, expected,
@@ -282,7 +285,11 @@ async fn the_reasoning_include_is_stated_only_alongside_reasoning() {
         "no include is forced onto a turn without reasoning: {plain}"
     );
 
-    let reasoning = sent(&wire, with(serde_json::json!({"reasoning": {"effort": "low"}}))).await;
+    let reasoning = sent(
+        &wire,
+        with(serde_json::json!({"reasoning": {"effort": "low"}})),
+    )
+    .await;
     assert_eq!(
         raw_fields(&reasoning)["include"].get(),
         r#"["reasoning.encrypted_content"]"#

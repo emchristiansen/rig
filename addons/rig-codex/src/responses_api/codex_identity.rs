@@ -168,7 +168,9 @@ impl CodexIdentity {
             Some(Ok(found)) => return Err(CodexRequestError::ClientMetadata { found }),
             Some(Err(error)) => return Err(CodexRequestError::Body(error)),
         };
-        let stated = body.contains(CLIENT_METADATA_FIELD).then_some(metadata.len());
+        let stated = body
+            .contains(CLIENT_METADATA_FIELD)
+            .then_some(metadata.len());
         metadata
             .entry(SESSION_ID_METADATA_KEY)
             .or_insert_with(|| Value::String(self.session_id.clone()));
