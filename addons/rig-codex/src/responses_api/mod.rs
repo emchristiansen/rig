@@ -1443,9 +1443,15 @@ impl OutputText {
 #[cfg(test)]
 pub(crate) mod corrupt_frame_fixtures;
 #[cfg(test)]
+mod echoed_turn_tests;
+#[cfg(test)]
 pub(crate) mod fidelity_fixtures;
 #[cfg(test)]
 mod fold_contract_tests;
+#[cfg(test)]
+mod fold_edge_tests;
+#[cfg(test)]
+mod serde_fixed_point_tests;
 
 #[cfg(test)]
 mod tests;

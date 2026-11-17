@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// `body`, a whole Responses reply, folded by Rig as a unary call's reply.
-fn folded(body: Value) -> rig_core::completion::CompletionResponse {
+pub(super) fn folded(body: Value) -> rig_core::completion::CompletionResponse {
     let wire = Responses::new(OpenAIConfig::new("sk-test"), "gpt-5.4");
     decode_reply(
         &wire,
@@ -21,7 +21,7 @@ fn folded(body: Value) -> rig_core::completion::CompletionResponse {
     .expect("the reply folds")
 }
 
-fn reply(extra: Value, output: Value) -> Value {
+pub(super) fn reply(extra: Value, output: Value) -> Value {
     let mut body = json!({
         "id": "resp_123",
         "object": "response",
@@ -195,7 +195,7 @@ fn a_cut_off_call_carries_arguments_that_read_as_complete() {
 
 // ── a streamed turn ─────────────────────────────────────────────────────
 
-fn chatgpt_wire() -> Responses {
+pub(super) fn chatgpt_wire() -> Responses {
     Responses::new(
         OpenAIConfig::with_key(&rig_core::providers::chatgpt::DIALECT, "test-token"),
         "gpt-5.4",
@@ -204,7 +204,7 @@ fn chatgpt_wire() -> Responses {
 
 /// A streamed turn's frames: `response.created`, then each of `items` added
 /// and done, then `terminal` restating them all.
-fn streamed_frames(items: &[Value], terminal: &str, extra: Value) -> Vec<WireFrame> {
+pub(super) fn streamed_frames(items: &[Value], terminal: &str, extra: Value) -> Vec<WireFrame> {
     let response = |status: &str, output: Value| {
         let mut body = json!({
             "id": "resp_1", "object": "response", "created_at": 0, "status": status,
@@ -244,7 +244,7 @@ fn streamed_frames(items: &[Value], terminal: &str, extra: Value) -> Vec<WireFra
 /// The provider items of a turn that reasons, searches, answers with a
 /// refusal beside its text, and makes a custom call, a namespaced call and
 /// a call with malformed arguments.
-fn turn_items() -> [Value; 6] {
+pub(super) fn turn_items() -> [Value; 6] {
     [
         json!({"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "step 1"}], "encrypted_content": "enc_blob"}),
         json!({"type": "web_search_call", "id": "ws_1", "status": "completed", "action": {"type": "search", "query": "rig"}}),
@@ -255,7 +255,7 @@ fn turn_items() -> [Value; 6] {
     ]
 }
 
-fn streamed_turn() -> rig_core::completion::CompletionResponse {
+pub(super) fn streamed_turn() -> rig_core::completion::CompletionResponse {
     decode_reply(
         &chatgpt_wire(),
         &CompletionRequest::new("say hi"),
@@ -267,7 +267,7 @@ fn streamed_turn() -> rig_core::completion::CompletionResponse {
 
 /// The request that follows `turn`: its history, an answer to each call,
 /// and the next user message.
-fn following(turn: &rig_core::completion::CompletionResponse) -> CompletionRequest {
+pub(super) fn following(turn: &rig_core::completion::CompletionResponse) -> CompletionRequest {
     let mut next = CompletionRequest::new("say hi");
     let mut history = next.chat_history.clone();
     history.push(Arc::new(turn.message().expect("the turn's message")));
