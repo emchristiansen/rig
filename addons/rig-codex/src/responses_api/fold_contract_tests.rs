@@ -167,6 +167,32 @@ fn a_call_with_malformed_arguments_is_delivered_marked_with_the_raw_text() {
     }
 }
 
+/// The hazard in that delivery. Rig v0.46.0 fills `arguments` with what a
+/// cut-off object still states, closing a string left open, so a call cut
+/// off in the middle of a program carries arguments that read as a
+/// complete, shorter program. Only the mark says they are not what the
+/// model wrote: a caller that reads `arguments` without reading
+/// `invalid_arguments` would run the shorter program.
+#[test]
+fn a_cut_off_call_carries_arguments_that_read_as_complete() {
+    let sent = "{\"source\":\"rm -rf /tmp/build";
+    for status in ["completed", "incomplete"] {
+        let cut = call("nu_program", json!({"arguments": sent, "status": status}));
+        let response = folded(reply(json!({}), json!([cut])));
+        let function = &only_call(&response).function;
+        assert_eq!(
+            function.arguments_value(),
+            json!({"source": "rm -rf /tmp/build"}),
+            "{status}: the recovered arguments are a well-formed object"
+        );
+        assert_eq!(
+            function.invalid_arguments.as_deref(),
+            Some(sent),
+            "{status}: the mark is the only sign"
+        );
+    }
+}
+
 // ── a streamed turn ─────────────────────────────────────────────────────
 
 fn chatgpt_wire() -> Responses {
