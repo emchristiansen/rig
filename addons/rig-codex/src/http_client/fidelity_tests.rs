@@ -395,3 +395,182 @@ async fn the_chatgpt_dialect_refuses_caller_set_controls_by_name() {
         );
     }
 }
+
+/// The body Rig's own Responses wire encodes `request` to.
+fn rig_encoded(wire: &CodexResponses, request: CompletionRequest) -> String {
+    let encoded = wire
+        .wire
+        .encode(request, Mode::Streaming)
+        .expect("Rig encodes the request");
+    let Body::Bytes(body) = encoded.request.body() else {
+        panic!("a Responses body is bytes");
+    };
+    String::from_utf8(body.to_vec()).expect("the body is UTF-8")
+}
+
+/// A custom call's answer is sent as the 0.42-era fork sent it: its texts
+/// and JSON joined into one string, with the name of the tool that ran.
+/// Rig v0.46.0 writes the same result as an array of parts with no name.
+/// Every other item of the request keeps the bytes Rig wrote.
+#[tokio::test]
+async fn a_custom_calls_answer_is_one_string_naming_the_tool_that_ran() {
+    use rig_core::message::ToolResultContent;
+    let request = answering(
+        custom_call_item(),
+        vec![
+            ToolResultContent::text("Done: "),
+            ToolResultContent::Json {
+                value: serde_json::json!({"files": 1}),
+            },
+            ToolResultContent::text("."),
+        ],
+    );
+    let wire = chatgpt();
+    let rig = raw_input(&rig_encoded(&wire, request.clone()));
+    assert_eq!(
+        value(&rig[2]),
+        serde_json::json!({
+            "type": "custom_tool_call_output", "call_id": "call_c",
+            "output": [
+                {"type": "input_text", "text": "Done: "},
+                {"type": "input_text", "text": "{\"files\":1}"},
+                {"type": "input_text", "text": "."},
+            ]
+        }),
+        "what Rig v0.46.0 writes"
+    );
+
+    for body in [
+        encoded(&wire, request.clone(), Mode::Streaming),
+        sent(&wire, request.clone()).await,
+    ] {
+        let input = raw_input(&body);
+        assert_eq!(input.len(), 3, "{body}");
+        assert_eq!(
+            input[..2],
+            rig[..2],
+            "the other items are as Rig wrote them"
+        );
+        assert_eq!(value(&input[1]), custom_call_item());
+        assert_eq!(
+            value(&input[2]),
+            serde_json::json!({
+                "type": "custom_tool_call_output", "call_id": "call_c",
+                "name": "apply_patch", "output": "Done: {\"files\":1}."
+            })
+        );
+        if !preserves_order() {
+            assert_eq!(
+                input[2],
+                r#"{"call_id":"call_c","name":"apply_patch","output":"Done: {\"files\":1}.","type":"custom_tool_call_output"}"#
+            );
+        }
+    }
+
+    // One text is already one string; the answer gains only its name.
+    let single = answering(custom_call_item(), vec![ToolResultContent::text("ok")]);
+    assert_eq!(
+        value(&raw_input(&sent(&wire, single).await)[2]),
+        serde_json::json!({
+            "type": "custom_tool_call_output", "call_id": "call_c",
+            "name": "apply_patch", "output": "ok"
+        })
+    );
+}
+
+/// The body Rig's own Responses wire encodes `request` to once the request
+/// is prepared for it, as Rig's driver prepares it.
+fn rig_prepared(wire: &CodexResponses, request: CompletionRequest) -> String {
+    use rig_core::wire::Operation as _;
+    let request = rig_core::operation::Completion::prepare(request, &wire.wire.describe())
+        .expect("Rig prepares the request");
+    rig_encoded(wire, request)
+}
+
+/// An image Rig v0.46.0 would send as a part of a custom call's answer is
+/// refused before anything is sent, as the 0.42-era fork refused it.
+#[tokio::test]
+async fn an_image_in_a_custom_calls_answer_is_refused_and_nothing_is_sent() {
+    use rig_core::message::ToolResultContent;
+    let wire = chatgpt();
+    for image in images_rig_sends_in_a_result() {
+        let request = answering(
+            custom_call_item(),
+            vec![
+                ToolResultContent::text("see "),
+                ToolResultContent::Image(image),
+            ],
+        );
+        let rig = raw_input(&rig_prepared(&wire, request.clone()));
+        assert_eq!(
+            value(&rig[2])["output"][1]["type"],
+            "input_image",
+            "Rig v0.46.0 sends the image: {rig:?}"
+        );
+
+        let refusal = refused(&wire, request).await;
+        assert!(refusal.contains(CUSTOM_IMAGE_REFUSAL), "{refusal}");
+        assert!(refusal.contains("call_c"), "{refusal}");
+    }
+}
+
+/// An image Rig v0.46.0 does not send on this contract never reaches the
+/// wire: Rig's preparation of the request puts its own words in the image's
+/// place, and the answer is sent saying so. The 0.42-era fork refused the
+/// request. A caller that must refuse every image in a custom call's answer
+/// refuses it before it calls the model.
+#[tokio::test]
+async fn an_image_rig_omits_from_a_custom_calls_answer_is_sent_as_rigs_words() {
+    use rig_core::message::ToolResultContent;
+    let wire = chatgpt();
+    let request = answering(
+        custom_call_item(),
+        vec![
+            ToolResultContent::text("see "),
+            ToolResultContent::Image(image_rig_omits()),
+        ],
+    );
+    assert_eq!(
+        value(&raw_input(&sent(&wire, request.clone()).await)[2]),
+        serde_json::json!({
+            "type": "custom_tool_call_output", "call_id": "call_c", "name": "apply_patch",
+            "output": format!("see {TOOL_IMAGE_OMITTED}"),
+        })
+    );
+
+    // The wire refuses the image when it is given the request unprepared.
+    let refusal = wire
+        .encode(request, Mode::Streaming)
+        .expect_err("the wire sees the image");
+    assert!(
+        format!("{refusal}").contains(CUSTOM_IMAGE_REFUSAL),
+        "{refusal}"
+    );
+}
+
+/// A function call's answer is not a custom call's: it is sent as Rig wrote
+/// it, an image among its parts and no name.
+#[tokio::test]
+async fn a_function_calls_answer_is_sent_as_rig_wrote_it() {
+    use rig_core::message::ToolResultContent;
+    let wire = chatgpt();
+    for image in images_rig_sends_in_a_result()
+        .into_iter()
+        .chain([image_rig_omits()])
+    {
+        let request = answering(
+            function_call_item(),
+            vec![
+                ToolResultContent::text("see "),
+                ToolResultContent::Image(image),
+            ],
+        );
+        let rig = raw_input(&rig_prepared(&wire, request.clone()));
+        let input = raw_input(&sent(&wire, request).await);
+        assert_eq!(input, rig);
+        let answer = value(&input[2]);
+        assert_eq!(answer["type"], "function_call_output");
+        assert!(answer["output"].is_array(), "{answer}");
+        assert!(answer.get("name").is_none(), "{answer}");
+    }
+}

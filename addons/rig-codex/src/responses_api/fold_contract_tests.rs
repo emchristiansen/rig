@@ -319,14 +319,51 @@ fn a_turn_replays_as_the_providers_own_items_on_a_request_that_declares_tools() 
     })];
     expected.extend(turn_items());
     expected.extend([
-        // Rig v0.46.0 states no `name` on a custom call's output; the fork
-        // stated the tool's name there.
-        json!({"type": "custom_tool_call_output", "call_id": "call_c", "output": "ok"}),
+        // Rig v0.46.0 states no `name` on a custom call's output; this
+        // crate's projection states the tool's name there, as the fork did.
+        json!({"type": "custom_tool_call_output", "call_id": "call_c", "name": "apply_patch", "output": "ok"}),
         json!({"type": "function_call_output", "call_id": "call_f", "output": "ok", "status": "completed"}),
         json!({"type": "function_call_output", "call_id": "call_m", "output": "ok", "status": "completed"}),
         json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "next"}]}),
     ]);
     assert_eq!(input, expected);
+}
+
+/// An answer to a call the request does not carry (an incremental turn on
+/// stored state) has no call to take its kind from. Rig v0.46.0 writes it
+/// as a custom call's answer only when the request declares a custom tool
+/// of the answer's name, and as a function's otherwise; the fork took the
+/// kind from the result. A caller that answers a stored custom call
+/// declares the custom tool.
+#[test]
+fn an_answer_to_a_stored_call_is_a_custom_calls_when_its_tool_is_declared_custom() {
+    use crate::responses_api::fidelity_fixtures::{answering_stored_custom_call, namespace};
+    use rig_core::message::ToolResultContent;
+    let answer = || answering_stored_custom_call(vec![ToolResultContent::text("ok")]);
+
+    let declared = crate::responses_api::input_items(&chatgpt_wire(), answer()).expect("encodes");
+    assert_eq!(
+        declared,
+        [json!({
+            "type": "custom_tool_call_output", "call_id": "call_c",
+            "name": "apply_patch", "output": "ok"
+        })]
+    );
+
+    let mut undeclared = answer();
+    undeclared.additional_params = Some(json!({
+        "previous_response_id": "resp_1",
+        "tools": [namespace()],
+    }));
+    let undeclared =
+        crate::responses_api::input_items(&chatgpt_wire(), undeclared).expect("encodes");
+    assert_eq!(
+        undeclared,
+        [json!({
+            "type": "function_call_output", "call_id": "call_c",
+            "output": "ok", "status": "completed"
+        })]
+    );
 }
 
 /// On a request that declares no tools, Rig v0.46.0 replays the turn's

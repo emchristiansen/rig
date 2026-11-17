@@ -32,6 +32,7 @@ use std::ops::Add;
 
 pub(crate) mod body;
 pub mod codex_identity;
+pub(crate) mod custom_output;
 #[cfg(feature = "completion-observations")]
 #[cfg_attr(docsrs, doc(cfg(feature = "completion-observations")))]
 pub mod observation;
@@ -56,19 +57,28 @@ pub type InputItem = Value;
 /// incremental websocket turn
 /// ([`InputDelta`](websocket::InputDelta)). A request that continues stored
 /// state names it (`previous_response_id` in its `additional_params`), so the
-/// encoder accepts results whose calls the request does not carry.
+/// encoder accepts results whose calls the request does not carry. A custom
+/// call's answer is written as [`CodexResponses`](wire::CodexResponses)
+/// writes it: one string, the tool's name stated, an image refused.
 pub fn input_items(
     wire: &Responses,
     request: CompletionRequest,
 ) -> Result<Vec<InputItem>, ProviderError> {
     let request = Completion::prepare(request, &wire.describe())?;
+    let custom_outputs = custom_output::CustomOutputs::of(&request);
     let encoded = wire.encode(request, Mode::Streaming)?;
     let Body::Bytes(bytes) = encoded.request.body() else {
         return Err(EncodeError::request("a Responses request body must be JSON bytes").into());
     };
     let body = body::RequestBody::parse(bytes)?;
     match body.get::<Vec<InputItem>>("input") {
-        Some(items) => Ok(items?),
+        Some(items) => {
+            let mut items = items?;
+            custom_outputs
+                .restore(&mut items)
+                .map_err(EncodeError::request)?;
+            Ok(items)
+        }
         None => {
             Err(EncodeError::request("the encoded Responses request has no `input` array").into())
         }

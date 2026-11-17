@@ -26,6 +26,7 @@
 use super::ResponsesToolDefinition;
 use super::body::RequestBody;
 use super::codex_identity::{CodexIdentity, NotACodexWire, require_codex};
+use super::custom_output::CustomOutputs;
 use super::request_compression::{RequestCompression, RequestCompressionError};
 use super::request_headers::RequestHeaders;
 use crate::wire::{CallerIdentity, MissingCallerIdentity, ORIGINATOR_HEADER, VERSION_HEADER};
@@ -122,6 +123,16 @@ pub enum CodexRequestError {
     /// The body could not be compressed.
     #[error(transparent)]
     Compression(#[from] RequestCompressionError),
+    /// A custom tool call's answer carries something other than text. This
+    /// crate sends such an answer as one string and refuses an image in it.
+    #[error(
+        "a custom tool result carries text, not an image or any other part: the \
+         `custom_tool_call_output` answering `{call_id}` is sent as one string"
+    )]
+    CustomOutput {
+        /// The answered call.
+        call_id: String,
+    },
     /// Rig's encoding does not hold the request's declared tools where the
     /// request puts them, so they cannot be sent as the caller wrote them.
     #[error(
@@ -404,6 +415,7 @@ impl CodexResponses {
             return Err(EncodeError::request(control));
         }
         let asked = CallerFields::of(&request);
+        let custom_outputs = CustomOutputs::of(&request);
         let encoded = self.wire.encode(request, mode)?;
         let Body::Bytes(bytes) = encoded.request.body() else {
             return Err(EncodeError::request(
@@ -412,6 +424,13 @@ impl CodexResponses {
         };
         let mut body = RequestBody::parse(bytes).map_err(CodexRequestError::Body)?;
         asked.restore(&self.wire, &mut body)?;
+        if let Some(items) = body.get::<Vec<Box<RawValue>>>("input") {
+            let mut items = items.map_err(CodexRequestError::Body)?;
+            if custom_outputs.restore_raw(&mut items)? {
+                body.insert("input", &items)
+                    .map_err(CodexRequestError::Body)?;
+            }
+        }
         Ok((encoded, body))
     }
 }
@@ -596,7 +615,7 @@ fn declared_tool(
 /// of the Codex contract.
 ///
 /// The body is Rig's, with two of the request's fields as the caller wrote
-/// them. Rig reads each tool declared in `additional_params["tools"]` into
+/// them and a custom call's answer as the fork has always sent it. Rig reads each tool declared in `additional_params["tools"]` into
 /// its own tool type and writes it back, which drops an empty `description`
 /// or `name`, adds `strict` to a function and reorders keys; this wire sends
 /// a declared tool as the JSON value the caller wrote, changed only by
@@ -605,7 +624,14 @@ fn declared_tool(
 /// ciphertext; this wire states that `include` only when the request reasons
 /// or asked for it. Each edit first checks that the body holds what Rig
 /// writes for the request, and refuses otherwise
-/// ([`CodexRequestError`]). The conversation identity is stamped in, and a
+/// ([`CodexRequestError`]). Rig writes a `custom_tool_call_output` with no
+/// `name`, and with its `output` as an array of parts when the result is
+/// more than one text; this wire states the name of the tool that ran,
+/// joins the result's texts into one string, and refuses an image
+/// ([`CodexRequestError::CustomOutput`]). Rig's driver replaces an image
+/// the provider or model cannot receive with its own words before the wire
+/// sees the request, so such an image is sent as those words rather than
+/// refused. The conversation identity is stamped in, and a
 /// caller-set control the contract does not take is refused
 /// ([`UnsupportedCodexControl`]). A wire with no caller identity refuses to
 /// encode. Headers and compression are applied by
