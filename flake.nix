@@ -23,7 +23,7 @@
         pkgs = import nixpkgs {
           inherit system overlays;
         };
-        rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./addons/rust-toolchain.toml;
       in
       { 
         devShells.default = with pkgs; mkShell {
