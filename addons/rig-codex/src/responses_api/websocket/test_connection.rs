@@ -30,6 +30,7 @@ struct ScriptState {
     without_flush: bool,
     flush_stalls: bool,
     flush_fails: bool,
+    send_stalls: bool,
 }
 
 /// A scripted connection, cloneable so a test can inspect what the session
@@ -90,6 +91,12 @@ impl Script {
     }
 
     /// Make every flush fail.
+    /// Make a send accept its frame and then never complete, as a
+    /// connection does while a write is still flushing.
+    pub(crate) fn set_send_stalls(&self, stalls: bool) {
+        self.state().send_stalls = stalls;
+    }
+
     pub(crate) fn set_flush_fails(&self, fails: bool) {
         self.state().flush_fails = fails;
     }
@@ -156,6 +163,9 @@ impl rig_http::ws_client::WebSocketConnection for ScriptedConnection {
         }
         if let Some(turn) = state.turns.pop_front() {
             state.inbound.extend(turn);
+        }
+        if state.send_stalls {
+            return Box::pin(std::future::pending());
         }
         Box::pin(std::future::ready(Ok(())))
     }

@@ -252,3 +252,134 @@ pub(crate) fn raw_input(body: &str) -> Vec<String> {
 
 /// The refusal of an image in a custom call's answer.
 pub(crate) const CUSTOM_IMAGE_REFUSAL: &str = "a custom tool result carries text, not an image";
+
+/// `request` with `section` as its provider options for the ChatGPT
+/// Responses wire, read as a caller's serialized options are.
+pub(crate) fn with_provider_options(
+    mut request: CompletionRequest,
+    section: Value,
+) -> CompletionRequest {
+    request.provider_options =
+        serde_json::from_value(json!({ "chatgpt": { "openai.responses": section } }))
+            .expect("provider options deserialize");
+    request
+}
+
+/// `request` with `params` as its `additional_params`.
+pub(crate) fn with_raw(mut request: CompletionRequest, params: Value) -> CompletionRequest {
+    request.additional_params = Some(params);
+    request
+}
+
+/// Every way a request can state a control the Codex contract does not
+/// take, each with the name the refusal must carry: the typed field, the
+/// generation options, the provider options and `additional_params`.
+pub(crate) fn requests_stating_a_refused_control() -> Vec<(&'static str, CompletionRequest)> {
+    let mut typed_temperature = prompt();
+    typed_temperature.temperature = Some(0.4);
+    let mut typed_cap = prompt();
+    typed_cap.max_tokens = Some(17);
+    let mut option_top_p = prompt();
+    option_top_p.options.top_p = Some(0.5);
+    vec![
+        ("temperature", typed_temperature),
+        (
+            "temperature",
+            with_raw(prompt(), json!({"temperature": 0.4})),
+        ),
+        (
+            "temperature",
+            with_provider_options(prompt(), json!({"temperature": 0.4})),
+        ),
+        ("max_output_tokens", typed_cap),
+        (
+            "max_output_tokens",
+            with_raw(prompt(), json!({"max_output_tokens": 17})),
+        ),
+        (
+            "max_output_tokens",
+            with_provider_options(prompt(), json!({"max_output_tokens": 17})),
+        ),
+        ("top_p", option_top_p),
+        ("top_p", with_raw(prompt(), json!({"top_p": 0.5}))),
+        (
+            "top_p",
+            with_provider_options(prompt(), json!({"top_p": 0.5})),
+        ),
+        ("store", with_raw(prompt(), json!({"store": true}))),
+        (
+            "store",
+            with_provider_options(prompt(), json!({"store": true})),
+        ),
+        // The later layer wins: a raw `true` over the provider options'
+        // `false` is a caller-set `store: true`.
+        (
+            "store",
+            with_raw(
+                with_provider_options(prompt(), json!({"store": false})),
+                json!({"store": true}),
+            ),
+        ),
+    ]
+}
+
+/// Requests whose later layer takes a refused control back out, which are
+/// sent: `additional_params` over the provider options.
+pub(crate) fn requests_overriding_a_refused_control() -> Vec<CompletionRequest> {
+    vec![
+        with_raw(
+            with_provider_options(prompt(), json!({"store": true})),
+            json!({"store": false}),
+        ),
+        with_raw(
+            with_provider_options(prompt(), json!({"temperature": 0.4})),
+            json!({"temperature": null}),
+        ),
+        with_raw(prompt(), json!({"store": false, "top_p": null})),
+    ]
+}
+
+/// Requests and the `include` each must be sent with: the request's own
+/// entries from whichever layer states them, the reasoning ciphertext added
+/// only when the request reasons or asked for it.
+pub(crate) fn requests_and_their_include() -> Vec<(CompletionRequest, Option<Value>)> {
+    let own = json!(["file_search_call.results"]);
+    let ciphertext = "reasoning.encrypted_content";
+    vec![
+        (prompt(), None),
+        (
+            with_provider_options(prompt(), json!({ "include": own })),
+            Some(own.clone()),
+        ),
+        (
+            with_raw(prompt(), json!({ "include": own })),
+            Some(own.clone()),
+        ),
+        // `additional_params` over the provider options.
+        (
+            with_raw(
+                with_provider_options(prompt(), json!({"include": ["web_search_call.results"]})),
+                json!({ "include": own }),
+            ),
+            Some(own.clone()),
+        ),
+        (
+            with_provider_options(prompt(), json!({"include": [ciphertext]})),
+            Some(json!([ciphertext])),
+        ),
+        (
+            with_provider_options(
+                prompt(),
+                json!({"include": own, "reasoning": {"effort": "low"}}),
+            ),
+            Some(json!(["file_search_call.results", ciphertext])),
+        ),
+        (
+            with_raw(
+                with_provider_options(prompt(), json!({ "include": own })),
+                json!({"reasoning": {"effort": "low"}}),
+            ),
+            Some(json!(["file_search_call.results", ciphertext])),
+        ),
+    ]
+}
