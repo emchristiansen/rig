@@ -13,3 +13,9 @@ RIG_CASSETTE_SNAPSHOTS = "check"
 # writes a request replays without a re-record; the snapshot still pins its
 # bytes. The engine matches exactly unless this is set.
 RIG_CASSETTE_MATCHING = "shape"
+
+[registry]
+global-min-publish-age = "14 days"
+
+[resolver]
+incompatible-publish-age = "deny"
