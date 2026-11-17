@@ -4,7 +4,6 @@
 //! under `crates/rig-cassette/fixtures/cassettes/openai/corpus_output/`.
 
 use rig::effect::{EffectFamily, EffectKind};
-use rig::prelude::*;
 use rig::providers::openai;
 use rig::run::OutputMode;
 use rig_cassette::agent::AgentReplayExt;
@@ -24,9 +23,11 @@ fn assert_event(output: &str) {
 
 fn tool_names(log: &rig::cassette::effect_log::EffectLog) -> Vec<String> {
     match &log.records[0].kind {
-        EffectKind::Completion { request, .. } => {
-            request.tools.iter().map(|tool| tool.name.clone()).collect()
-        }
+        EffectKind::Completion { request, .. } => request
+            .tools
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect(),
         other => panic!("a completion, not {other:?}"),
     }
 }
@@ -35,9 +36,7 @@ fn tool_names(log: &rig::cassette::effect_log::EffectLog) -> Vec<String> {
 async fn tool_unary_effect_log_is_the_golden_fixture() {
     with_openai_corpus_output_cassette("corpus_output/tool_unary", |client| async move {
         let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
-        let agent = client
-            .openai
-            .agent(openai::GPT_4O)
+        let agent = rig::AgentBuilder::new(client.openai.completion(openai::GPT_4O))
             .name("golden")
             .preamble(BASIC_PREAMBLE)
             .temperature(0.0)
@@ -49,7 +48,7 @@ async fn tool_unary_effect_log_is_the_golden_fixture() {
             .prompt(STRUCTURED_OUTPUT_PROMPT)
             .await
             .expect("the agent answers");
-        assert_event(&response.output);
+        assert_event(&response.output());
         let log = agent.stamp(recorder.take());
         assert_eq!(families(&log), [EffectFamily::Completion]);
         assert_eq!(tool_names(&log), ["final_result"]);
@@ -62,9 +61,7 @@ async fn tool_unary_effect_log_is_the_golden_fixture() {
 async fn prompted_unary_effect_log_is_the_golden_fixture() {
     with_openai_corpus_output_cassette("corpus_output/prompted_unary", |client| async move {
         let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
-        let agent = client
-            .openai
-            .agent(openai::GPT_4O)
+        let agent = rig::AgentBuilder::new(client.openai.completion(openai::GPT_4O))
             .name("golden")
             .preamble(BASIC_PREAMBLE)
             .temperature(0.0)
@@ -76,7 +73,7 @@ async fn prompted_unary_effect_log_is_the_golden_fixture() {
             .prompt(STRUCTURED_OUTPUT_PROMPT)
             .await
             .expect("the agent answers");
-        assert_event(&response.output);
+        assert_event(&response.output());
         let log = agent.stamp(recorder.take());
         assert_eq!(families(&log), [EffectFamily::Completion]);
         assert!(tool_names(&log).is_empty());

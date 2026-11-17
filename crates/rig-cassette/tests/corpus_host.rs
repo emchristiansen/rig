@@ -5,7 +5,7 @@
 //! to them: a `Custom<E>` effect the host defined, the host's embedding
 //! model. Those dispatches are the run's — the recorder taps the host's
 //! bus — but they are not the agent's row: the required row is what the
-//! agent's builder needs (its model, routes, memory, tools, indexes), the
+//! agent's builder needs (its model, routes, tools, indexes), the
 //! signature is what the trace touched. The replay registers the host's
 //! handlers from the signature, under the host's keys, before the agent
 //! is built; the handler table (the header's first source since #2450)
@@ -203,8 +203,6 @@ fn custom_key_is_in_the_handler_table_not_the_row() {
 fn host_policy_is_invisible_in_the_log() {
     let serial = corpus::golden(CUSTOM_TWICE_SERIAL.fixture);
     let concurrent = corpus::golden(CUSTOM_TWICE_CONCURRENT.fixture);
-    assert_eq!(serial.header.bus, None);
-    assert_eq!(concurrent.header.bus, None);
     let kinds = |log: &rig_cassette::effect_log::EffectLog| {
         log.iter()
             .map(|record| serde_json::to_value(&record.kind).expect("a kind serializes"))

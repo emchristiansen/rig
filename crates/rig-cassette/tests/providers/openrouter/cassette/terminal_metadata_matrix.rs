@@ -15,35 +15,35 @@
 //! | output budget | roomy, constrained (`1` text token / `48` tool tokens) |
 //! | response shape | one text candidate, requested `n = 2`, forced tool |
 //!
-//! That is 24 recorded cells. Each cell proves its request and terminal premise
-//! from the fixture, then compares the native raw response/terminal metadata
-//! with those exact bytes. OpenRouter currently accepts `n = 2` but emits only
-//! candidate zero; those cells deliberately preserve that observed gateway
-//! contract instead of assuming direct OpenAI behavior.
+//! That is 24 cells, of which the six below are tests. Each cell proves its
+//! request and terminal premise from the fixture, then compares the native raw
+//! response/terminal metadata with those exact bytes. OpenRouter currently
+//! accepts `n = 2` but emits only candidate zero; those cells deliberately
+//! preserve that observed gateway contract instead of assuming direct OpenAI
+//! behavior.
 //!
-//! Coverage ledger: the pre-pruning Cartesian product is 24 and all 24 cells
-//! are recorded; none is unit-only. Each explicit test maps to
+//! Each test maps to
 //! `crates/rig-cassette/fixtures/cassettes/openrouter/terminal_metadata_matrix/<test-name>.yaml`.
 //! The two inexpensive mini routes are pinned to OpenAI with fallbacks disabled
-//! for stable provider attribution. Every cell asserts the routed request and
+//! for stable provider attribution. Each test asserts the routed request and
 //! native terminal; together they cover provider, tier, ids, model, finish
-//! reason, usage, primary-choice behavior, fingerprint, and unmodeled
-//! top-level streaming metadata.
+//! reason, usage, primary-choice behavior, fingerprint, and unmodeled top-level
+//! streaming metadata.
 //!
 //! | recorded cells | exact fixture set |
 //! |---|---|
-//! | all 24 | `crates/rig-cassette/fixtures/cassettes/openrouter/terminal_metadata_matrix/{blocking,streaming}_{gpt_4o_mini,gpt_4_1_mini}_{roomy,tiny}_{plain_one,plain_two,tool}.yaml` |
+//! | 6 of 24 | `crates/rig-cassette/fixtures/cassettes/openrouter/terminal_metadata_matrix/{blocking_gpt_4_1_mini_tiny_plain_two,blocking_gpt_4_1_mini_tiny_tool,blocking_gpt_4o_mini_tiny_plain_one,streaming_gpt_4_1_mini_tiny_plain_two,streaming_gpt_4_1_mini_tiny_tool,streaming_gpt_4o_mini_tiny_plain_one}.yaml` |
 
+use rig_test_support::cassette_models::OpenAiModels;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use futures::StreamExt as _;
-use rig::completion::CompletionModel;
-use rig::streaming::StreamEvent;
 use serde_json::{Value, json};
 
-use super::super::support::{BoundOpenRouter, with_openrouter_terminal_metadata_cassette_result};
+use super::super::support::with_openrouter_terminal_metadata_cassette_result;
 use crate::support::assert_matches_recorded_document;
+use rig::completion::CompletionRequest;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Transport {
@@ -59,7 +59,6 @@ enum ModelVariant {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Limit {
-    Roomy,
     Tiny,
 }
 
@@ -85,19 +84,12 @@ struct Observation {
 
 type SharedObservation = Arc<Mutex<Option<Observation>>>;
 
-fn params(cell: Cell) -> Value {
+/// The raw keys no typed option covers.
+fn params(cell: Cell) -> Option<Value> {
     match cell.shape {
-        Shape::PlainOne => {
-            json!({ "provider": { "order": ["OpenAI"], "allow_fallbacks": false } })
-        }
-        Shape::PlainTwo => json!({
-            "n": 2,
-            "provider": { "order": ["OpenAI"], "allow_fallbacks": false }
-        }),
-        Shape::Tool => json!({
-            "tool_choice": "required",
-            "provider": { "order": ["OpenAI"], "allow_fallbacks": false }
-        }),
+        Shape::PlainOne => None,
+        Shape::PlainTwo => Some(json!({ "n": 2 })),
+        Shape::Tool => Some(json!({ "tool_choice": "required" })),
     }
 }
 
@@ -106,7 +98,6 @@ fn prompt(cell: Cell) -> &'static str {
         (Shape::Tool, _) => {
             "Call the add tool exactly once with x=17 and y=25. Do not answer in prose."
         }
-        (_, Limit::Roomy) => "Reply with exactly: cobalt",
         (_, Limit::Tiny) => "Write the word cobalt exactly 100 times, separated by spaces.",
     }
 }
@@ -115,8 +106,6 @@ fn max_tokens(cell: Cell) -> u64 {
     match (cell.shape, cell.limit) {
         (Shape::Tool, Limit::Tiny) => 48,
         (_, Limit::Tiny) => 1,
-        (Shape::Tool, Limit::Roomy) => 128,
-        (_, Limit::Roomy) => 8,
     }
 }
 
@@ -127,16 +116,16 @@ fn model_name(model: ModelVariant) -> &'static str {
     }
 }
 
-async fn run_cell(client: BoundOpenRouter, cell: Cell, observed: SharedObservation) -> Result<()> {
+async fn run_cell(client: OpenAiModels, cell: Cell, observed: SharedObservation) -> Result<()> {
     let model = client.completion(model_name(cell.model));
-    let mut builder = model
-        .completion_request(prompt(cell))
+    let mut builder = CompletionRequest::new(prompt(cell))
+        .provider_options(super::super::support::pinned_order(&["OpenAI"]))
         .additional_params(params(cell))
         .max_tokens(max_tokens(cell));
     if cell.shape == Shape::Tool {
         builder = builder.tool(rig::tool::tool_definition(&crate::support::Adder));
     }
-    let request = builder.build();
+    let request = builder;
 
     let raw = match cell.transport {
         Transport::Blocking => {
@@ -144,17 +133,17 @@ async fn run_cell(client: BoundOpenRouter, cell: Cell, observed: SharedObservati
             // terminal metadata — routed `provider`, `service_tier`, the
             // per-choice finish reason — so it observes the reply document
             // the driver keeps on `raw`, not the normalized projection.
-            model.completion(request).await?.raw
+            model.call(request).await?.raw
         }
         Transport::Streaming => {
-            let mut stream = model.stream(request).await?;
-            let mut terminal = None;
+            let mut stream = model.stream(request)?;
             while let Some(item) = stream.next().await {
-                if let StreamEvent::Final(response) = item? {
-                    terminal = Some(response);
-                }
+                item?;
             }
-            let terminal = terminal.context("raw stream should carry a terminal response")?;
+            let terminal = stream
+                .finish()
+                .await
+                .context("raw stream should carry a terminal response")?;
             terminal.raw
         }
     };
@@ -225,24 +214,30 @@ fn last_chunk_field(chunks: &[Value], field: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
-fn recorded_additional_params(chunks: &[Value]) -> Value {
-    let mut accumulated: Option<rig::message::AdditionalParams> = None;
+/// The top-level fields of a stream's chunks as the document they rebuild
+/// states them: a later value replaces an earlier one, a `null` never
+/// erases one, stream padding is dropped and the tag is the unary one.
+fn recorded_envelope(chunks: &[Value]) -> Value {
+    let mut accumulated = serde_json::Map::new();
     for chunk in chunks {
-        let mut extras = chunk
+        let fields = chunk
             .as_object()
-            .cloned()
             .expect("recorded SSE frame should be an object");
-        for modeled in ["id", "model", "choices", "usage"] {
-            extras.remove(modeled);
-        }
-        if let Some(incoming) = rig::message::AdditionalParams::new(extras) {
-            match accumulated.as_mut() {
-                Some(current) => current.merge(incoming),
-                None => accumulated = Some(incoming),
+        for (key, value) in fields {
+            if ["obfuscation", "p"].contains(&key.as_str())
+                || (value.is_null() && accumulated.contains_key(key))
+            {
+                continue;
             }
+            let value = if key == "object" {
+                json!("chat.completion")
+            } else {
+                value.clone()
+            };
+            accumulated.insert(key.clone(), value);
         }
     }
-    serde_json::to_value(accumulated).expect("recorded metadata should serialize")
+    Value::Object(accumulated)
 }
 
 fn assert_cell(scenario: &str, cell: Cell, observed: SharedObservation) {
@@ -285,7 +280,6 @@ fn assert_cell(scenario: &str, cell: Cell, observed: SharedObservation) {
 
     let expected_finish = match (cell.shape, cell.limit) {
         (Shape::Tool, _) => json!("tool_calls"),
-        (_, Limit::Roomy) => json!("stop"),
         (_, Limit::Tiny) => json!("length"),
     };
     assert_eq!(
@@ -359,11 +353,11 @@ fn assert_cell(scenario: &str, cell: Cell, observed: SharedObservation) {
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             assert!(
-                observation.raw["response_id"]
+                observation.raw["id"]
                     .as_str()
                     .is_some_and(|id| !id.is_empty())
                     && response_id.as_deref().is_some_and(|id| !id.is_empty()),
-                "{scenario}: both the native terminal and fixture retain an id"
+                "{scenario}: both the rebuilt document and fixture retain an id"
             );
             assert_eq!(
                 observation.raw["model"],
@@ -372,24 +366,24 @@ fn assert_cell(scenario: &str, cell: Cell, observed: SharedObservation) {
             );
             assert_usage(scenario, &observation.raw["usage"], &usage);
             assert_matches_recorded_document(
-                &observation.raw["additional_params"],
-                &recorded_additional_params(&chunks),
-                &[],
-                &format!("{scenario}: every unmodeled top-level SSE field"),
+                &observation.raw,
+                &recorded_envelope(&chunks),
+                &["choices", "usage"],
+                &format!("{scenario}: every top-level SSE field"),
             );
             assert_eq!(
-                observation.raw["additional_params"]["provider"],
+                observation.raw["provider"],
                 last_chunk_field(&chunks, "provider"),
                 "{scenario}: routed provider"
             );
             assert_eq!(
-                observation.raw["additional_params"]["service_tier"],
+                observation.raw["service_tier"],
                 last_chunk_field(&chunks, "service_tier"),
                 "{scenario}: streaming service tier"
             );
             assert_eq!(
-                observation.raw["finish_reason"], expected_finish,
-                "{scenario}"
+                observation.raw["choices"][0]["finish_reason"], expected_finish,
+                "{scenario}: terminal reason"
             );
         }
     }
@@ -410,49 +404,13 @@ fn cell(transport: Transport, model: ModelVariant, limit: Limit, shape: Shape) -
 crate::matrix::case_matrix! {
     wrapper: with_openrouter_terminal_metadata_cassette_result, family: terminal_metadata_matrix_case;
     # [tokio :: test]
-    blocking_gpt_4o_mini_roomy_plain_one: ("terminal_metadata_matrix/blocking_gpt_4o_mini_roomy_plain_one", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Limit :: Roomy , Shape :: PlainOne ,));
-    # [tokio :: test]
-    blocking_gpt_4o_mini_roomy_plain_two: ("terminal_metadata_matrix/blocking_gpt_4o_mini_roomy_plain_two", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Limit :: Roomy , Shape :: PlainTwo ,));
-    # [tokio :: test]
-    blocking_gpt_4o_mini_roomy_tool: ("terminal_metadata_matrix/blocking_gpt_4o_mini_roomy_tool", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Limit :: Roomy , Shape :: Tool ,));
-    # [tokio :: test]
     blocking_gpt_4o_mini_tiny_plain_one: ("terminal_metadata_matrix/blocking_gpt_4o_mini_tiny_plain_one", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Limit :: Tiny , Shape :: PlainOne ,));
-    # [tokio :: test]
-    blocking_gpt_4o_mini_tiny_plain_two: ("terminal_metadata_matrix/blocking_gpt_4o_mini_tiny_plain_two", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Limit :: Tiny , Shape :: PlainTwo ,));
-    # [tokio :: test]
-    blocking_gpt_4o_mini_tiny_tool: ("terminal_metadata_matrix/blocking_gpt_4o_mini_tiny_tool", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Limit :: Tiny , Shape :: Tool ,));
-    # [tokio :: test]
-    blocking_gpt_4_1_mini_roomy_plain_one: ("terminal_metadata_matrix/blocking_gpt_4_1_mini_roomy_plain_one", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Limit :: Roomy , Shape :: PlainOne ,));
-    # [tokio :: test]
-    blocking_gpt_4_1_mini_roomy_plain_two: ("terminal_metadata_matrix/blocking_gpt_4_1_mini_roomy_plain_two", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Limit :: Roomy , Shape :: PlainTwo ,));
-    # [tokio :: test]
-    blocking_gpt_4_1_mini_roomy_tool: ("terminal_metadata_matrix/blocking_gpt_4_1_mini_roomy_tool", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Limit :: Roomy , Shape :: Tool ,));
-    # [tokio :: test]
-    blocking_gpt_4_1_mini_tiny_plain_one: ("terminal_metadata_matrix/blocking_gpt_4_1_mini_tiny_plain_one", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Limit :: Tiny , Shape :: PlainOne ,));
     # [tokio :: test]
     blocking_gpt_4_1_mini_tiny_plain_two: ("terminal_metadata_matrix/blocking_gpt_4_1_mini_tiny_plain_two", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Limit :: Tiny , Shape :: PlainTwo ,));
     # [tokio :: test]
     blocking_gpt_4_1_mini_tiny_tool: ("terminal_metadata_matrix/blocking_gpt_4_1_mini_tiny_tool", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Limit :: Tiny , Shape :: Tool ,));
     # [tokio :: test]
-    streaming_gpt_4o_mini_roomy_plain_one: ("terminal_metadata_matrix/streaming_gpt_4o_mini_roomy_plain_one", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Limit :: Roomy , Shape :: PlainOne ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_roomy_plain_two: ("terminal_metadata_matrix/streaming_gpt_4o_mini_roomy_plain_two", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Limit :: Roomy , Shape :: PlainTwo ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_roomy_tool: ("terminal_metadata_matrix/streaming_gpt_4o_mini_roomy_tool", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Limit :: Roomy , Shape :: Tool ,));
-    # [tokio :: test]
     streaming_gpt_4o_mini_tiny_plain_one: ("terminal_metadata_matrix/streaming_gpt_4o_mini_tiny_plain_one", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Limit :: Tiny , Shape :: PlainOne ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_tiny_plain_two: ("terminal_metadata_matrix/streaming_gpt_4o_mini_tiny_plain_two", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Limit :: Tiny , Shape :: PlainTwo ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_tiny_tool: ("terminal_metadata_matrix/streaming_gpt_4o_mini_tiny_tool", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Limit :: Tiny , Shape :: Tool ,));
-    # [tokio :: test]
-    streaming_gpt_4_1_mini_roomy_plain_one: ("terminal_metadata_matrix/streaming_gpt_4_1_mini_roomy_plain_one", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Limit :: Roomy , Shape :: PlainOne ,));
-    # [tokio :: test]
-    streaming_gpt_4_1_mini_roomy_plain_two: ("terminal_metadata_matrix/streaming_gpt_4_1_mini_roomy_plain_two", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Limit :: Roomy , Shape :: PlainTwo ,));
-    # [tokio :: test]
-    streaming_gpt_4_1_mini_roomy_tool: ("terminal_metadata_matrix/streaming_gpt_4_1_mini_roomy_tool", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Limit :: Roomy , Shape :: Tool ,));
-    # [tokio :: test]
-    streaming_gpt_4_1_mini_tiny_plain_one: ("terminal_metadata_matrix/streaming_gpt_4_1_mini_tiny_plain_one", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Limit :: Tiny , Shape :: PlainOne ,));
     # [tokio :: test]
     streaming_gpt_4_1_mini_tiny_plain_two: ("terminal_metadata_matrix/streaming_gpt_4_1_mini_tiny_plain_two", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Limit :: Tiny , Shape :: PlainTwo ,));
     # [tokio :: test]

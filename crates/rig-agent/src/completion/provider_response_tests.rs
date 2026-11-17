@@ -4,29 +4,9 @@ use rig_core::{ProviderResponseError, http_client};
 use super::*;
 
 #[test]
-fn prompt_error_forwards_provider_response_to_completion_error() {
-    let body = r#"{"error":{"message":"boom"}}"#;
-    let inner = ProviderError::from_http_response(http::StatusCode::SERVICE_UNAVAILABLE, body);
-    let error = PromptError::CompletionError(inner);
-
-    assert_eq!(
-        error.provider_response_status(),
-        Some(http::StatusCode::SERVICE_UNAVAILABLE),
-    );
-    assert_eq!(error.provider_response_body(), Some(body));
-    assert_eq!(
-        error
-            .provider_response_json()
-            .expect("valid json")
-            .expect("present json")["error"]["message"],
-        "boom",
-    );
-}
-
-#[test]
 fn prompt_error_provider_response_helpers_forward_http_status_and_body() {
     let body = r#"{"error":{"message":"unauthorized"}}"#;
-    let error = PromptError::CompletionError(ProviderError::from_transport_error(
+    let error = PromptError::Provider(ProviderError::from_transport_error(
         http_client::Error::non_success_with_details(
             http::StatusCode::UNAUTHORIZED,
             http::HeaderMap::new(),
@@ -43,28 +23,6 @@ fn prompt_error_provider_response_helpers_forward_http_status_and_body() {
         error.provider_response_json().expect("valid JSON body"),
         Some(serde_json::json!({
             "error": { "message": "unauthorized" }
-        }))
-    );
-}
-
-#[test]
-fn prompt_error_provider_response_helpers_forward_wrapped_completion_error() {
-    let body = r#"{"error":{"code":"invalid_request","message":"bad input"}}"#;
-    let error = PromptError::CompletionError(ProviderError::ProviderResponse(
-        ProviderResponseError::without_status(body),
-    ));
-
-    assert_eq!(error.provider_response_body(), Some(body));
-    assert_eq!(error.provider_response_status(), None);
-    // rig#2314: the transport request id forwards through the wrapper too.
-    assert_eq!(error.provider_request_id(), None);
-    assert_eq!(
-        error.provider_response_json().expect("valid JSON body"),
-        Some(serde_json::json!({
-            "error": {
-                "code": "invalid_request",
-                "message": "bad input"
-            }
         }))
     );
 }
@@ -97,7 +55,7 @@ fn prompt_error_forwards_captured_response_headers() {
             headers: headers.clone(),
         }),
     ] {
-        let prompt_error = PromptError::CompletionError(completion_error);
+        let prompt_error = PromptError::Provider(completion_error);
         assert_eq!(
             prompt_error
                 .provider_response_headers()
@@ -107,7 +65,7 @@ fn prompt_error_forwards_captured_response_headers() {
             "PromptError dropped the captured headers",
         );
 
-        let structured = StructuredOutputError::PromptError(prompt_error);
+        let structured = StructuredOutputError::Prompt(prompt_error);
         assert_eq!(
             structured
                 .provider_response_headers()
@@ -122,7 +80,7 @@ fn prompt_error_forwards_captured_response_headers() {
 /// Variants that wrap no provider response report no headers.
 #[test]
 fn prompt_error_reports_no_headers_for_unrelated_variants() {
-    let error = PromptError::PromptCancelled {
+    let error = PromptError::Cancelled {
         chat_history: vec![Message::user("hi")],
         reason: "cancelled".to_string(),
     };
@@ -138,7 +96,7 @@ fn prompt_error_reports_no_headers_for_unrelated_variants() {
 /// through `PromptError` (and, transitively, `StructuredOutputError`).
 #[test]
 fn prompt_error_forwards_the_provider_request_id() {
-    let error = PromptError::CompletionError(ProviderError::ProviderResponse(
+    let error = PromptError::Provider(ProviderError::ProviderResponse(
         ProviderResponseError::new(http::StatusCode::NOT_FOUND, "{}")
             .with_provider_request_id(Some("req_failed_call".to_string())),
     ));
@@ -147,7 +105,7 @@ fn prompt_error_forwards_the_provider_request_id() {
 
 #[test]
 fn prompt_error_provider_response_helpers_return_none_for_unrelated_variant() {
-    let error = PromptError::PromptCancelled {
+    let error = PromptError::Cancelled {
         chat_history: vec![Message::user("hi")],
         reason: "cancelled".to_string(),
     };
@@ -159,22 +117,5 @@ fn prompt_error_provider_response_helpers_return_none_for_unrelated_variant() {
             .provider_response_json()
             .expect("no body is not an error"),
         None
-    );
-}
-
-#[test]
-fn structured_output_error_provider_response_helpers_forward_prompt_error() {
-    let body = r#"{"error":{"message":"bad input"}}"#;
-    let error = StructuredOutputError::PromptError(PromptError::CompletionError(
-        ProviderError::ProviderResponse(ProviderResponseError::new(
-            http::StatusCode::BAD_REQUEST,
-            body,
-        )),
-    ));
-
-    assert_eq!(error.provider_response_body(), Some(body));
-    assert_eq!(
-        error.provider_response_status(),
-        Some(http::StatusCode::BAD_REQUEST)
     );
 }

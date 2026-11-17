@@ -1,16 +1,12 @@
 //! Migrated completion adapters preserve recorded parser output under direct polling.
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
+use rig::completion::CompletionRequest;
 use rig_core::http_client::{Request, Response, StatusCode};
 use rig_core::{
-    completion::CompletionModel,
     http_client::{self, BoxedStream, HttpClientExt, LazyBody, MultipartForm, StreamingResponse},
-    prelude::*,
-    providers::{
-        anthropic::wire::Anthropic,
-        openai::wire::{DEEPSEEK, OPENAI, OpenAI},
-    },
-    streaming::{StreamEvent, StreamEvents},
+    providers::{anthropic::wire::AnthropicConfig, openai::OpenAIConfig},
+    streaming::StreamEvents,
     wasm_compat::WasmCompatSend,
 };
 use std::{
@@ -104,21 +100,22 @@ fn body(path: &str) -> Bytes {
     let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
     Bytes::from(doc["then"]["body"].as_str().unwrap().to_owned())
 }
-async fn adapted<M: CompletionModel + Clone + 'static>(model: M, direct: bool) -> StreamEvents {
-    let request = model
-        .completion_request("response parsing probe")
-        .max_tokens(1024)
-        .build();
+async fn adapted<W, T>(model: rig::Model<W, T>, direct: bool) -> StreamEvents
+where
+    W: rig::wire::Wire<Op = rig::operation::Completion>,
+    T: rig::driver::Transport<W>,
+{
+    let request = CompletionRequest::new("response parsing probe").max_tokens(1024);
     if direct {
-        Box::pin(model.stream(request).await.unwrap())
+        model.stream(request).unwrap().into_relay()
     } else {
         let handler = rig_core::serve::ErasedHandler::new(
-            rig_core::serve::adapters::CompletionAdapter::new("probe", model),
+            rig_core::serve::adapters::ModelAdapter::new("probe", model),
         );
         handler
             .handle(
                 rig_core::effect::EffectKind::Completion {
-                    request,
+                    request: request.into(),
                     stream: true,
                 },
                 rig_core::serve::Dispatch::new(rig_core::effect::EffectId::from_raw(0), true),
@@ -132,8 +129,8 @@ async fn stream(provider: &str, http: Replay, direct: bool) -> StreamEvents {
     match provider {
         "openai" => {
             adapted(
-                OpenAI::with_key(&OPENAI, "test-not-a-key")
-                    .bind(http)
+                OpenAIConfig::new("test-not-a-key")
+                    .connect(http)
                     .chat("gpt-4o"),
                 direct,
             )
@@ -141,8 +138,8 @@ async fn stream(provider: &str, http: Replay, direct: bool) -> StreamEvents {
         }
         "deepseek" => {
             adapted(
-                OpenAI::with_key(&DEEPSEEK, "test-not-a-key")
-                    .bind(http)
+                OpenAIConfig::with_key(&rig::providers::openai::wire::DEEPSEEK, "test-not-a-key")
+                    .connect(http)
                     .completion("deepseek-reasoner"),
                 direct,
             )
@@ -150,8 +147,8 @@ async fn stream(provider: &str, http: Replay, direct: bool) -> StreamEvents {
         }
         "anthropic" => {
             adapted(
-                Anthropic::new("test-not-a-key")
-                    .bind(http)
+                AnthropicConfig::new("test-not-a-key")
+                    .connect(http)
                     .completion("claude-sonnet-4-5"),
                 direct,
             )
@@ -201,7 +198,7 @@ fn recorded_streams_equal_async_consumption_across_chunking_and_pending() {
         assert!(
             reference
                 .iter()
-                .any(|e| matches!(e, Ok(StreamEvent::Final(_))))
+                .any(|e| matches!(e, Ok(rig::streaming::Relayed::Done(_))))
         );
         for chunk in [64, 4096, usize::MAX] {
             for yielding in [false, true] {
@@ -229,8 +226,7 @@ fn recorded_streams_equal_async_consumption_across_chunking_and_pending() {
                     }
                 }
                 assert_eq!(
-                    serde_json::to_value(&actual).unwrap(),
-                    serde_json::to_value(&reference).unwrap(),
+                    actual, reference,
                     "{path} chunk={chunk} yielding={yielding}"
                 );
                 if yielding {

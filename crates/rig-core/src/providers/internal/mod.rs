@@ -1,138 +1,76 @@
-//! Shared frame classification, tool-call identity, and reasoning lifecycle helpers.
-//! Companion providers use these helpers from [`Decoder`](crate::wire::Decoder)
-//! implementations that emit into [`AdapterOutput`](crate::operation::AdapterOutput).
+//! Shared frame classification and tool-call id spelling. Companion providers
+//! use these helpers from their [`Decoder`](crate::wire::Decoder)s and
+//! encoders.
 //!
 //! ```
-//! use rig_core::providers::internal::resolve_empty_tool_result_names;
-//! let mut history = Vec::new();
-//! resolve_empty_tool_result_names(&mut history);
+//! use rig_core::providers::internal::wire::classify_untyped_line;
+//! use rig_core::wire::WireEvent;
+//!
+//! let event: WireEvent<serde_json::Value> = classify_untyped_line(br#"{"done":true}"#);
+//! assert!(matches!(event, WireEvent::Known(_)));
 //! ```
 
 pub(crate) mod auth;
-pub mod chunk_lifecycle;
-#[cfg(not(target_family = "wasm"))]
-pub(crate) mod device_auth;
-pub(crate) mod openai_chat_completions_compatible;
 pub(crate) mod schema;
-/// The debug-mode sequence-law validator. Public only because it is the
-/// completion sink's `Laws` type; its checks run under `debug_assertions`.
-#[doc(hidden)]
-pub mod sequence_law;
-pub mod tool_call_bridge;
-pub mod tool_call_ids;
+/// The frame classifiers every JSON wire's decoder delegates to.
 pub mod wire;
+pub mod wire_ids;
 
-/// Refuse opaque Responses parts before an unsupported wire converts them to text.
-#[doc(hidden)]
-pub fn refuse_opaque_responses_part(
-    part: &crate::message::AssistantContent,
-    wire: &'static str,
-) -> Result<(), crate::message::UnrepresentableOpaqueContent> {
-    let opaque = match part {
-        crate::message::AssistantContent::Text(text) => {
-            crate::providers::openai::responses_api::opaque_message_part(
-                text.additional_params.as_ref(),
-            )
-            .is_some()
-        }
-        crate::message::AssistantContent::Reasoning(reasoning) => reasoning.has_opaque_parts(),
-        _ => false,
+/// A JSON object written as `json!` writes one, with each value moved in
+/// through `Value::from`: `json!` copies every value it interpolates, so a
+/// request body built around owned values is built with this instead.
+macro_rules! object {
+    ($($key:literal: $value:expr),* $(,)?) => {
+        serde_json::Value::Object(serde_json::Map::from_iter([
+            $(($key.to_owned(), serde_json::Value::from($value))),*
+        ]))
     };
-    if opaque {
-        Err(crate::message::UnrepresentableOpaqueContent::new(wire))
-    } else {
-        Ok(())
+}
+pub(crate) use object;
+
+/// An object of the `fields` that are present, in order.
+pub(crate) fn set_fields<const N: usize>(
+    fields: [(&str, Option<serde_json::Value>); N],
+) -> serde_json::Map<String, serde_json::Value> {
+    fields
+        .into_iter()
+        .filter_map(|(key, value)| Some((key.to_owned(), value?)))
+        .collect()
+}
+
+/// Every option refused for `reason`.
+pub(crate) fn refuse_all(
+    fields: crate::completion::options::OptionFields<'_>,
+    reason: &str,
+) -> crate::completion::options::OptionMap {
+    use crate::completion::options::{Mapping, OptionMap};
+    let refuse = |set: bool| match set {
+        true => Mapping::unsupported(reason),
+        false => Mapping::Nothing,
+    };
+    OptionMap {
+        reasoning: refuse(fields.reasoning.is_some()),
+        cache: refuse(fields.cache.is_some()),
+        service_tier: refuse(fields.service_tier.is_some()),
+        verbosity: refuse(fields.verbosity.is_some()),
+        parallel_tool_calls: refuse(fields.parallel_tool_calls.is_some()),
+        top_p: refuse(fields.top_p.is_some()),
+        seed: refuse(fields.seed.is_some()),
+        stop: refuse(!fields.stop.is_empty()),
+        cache_key: Mapping::unrouted(fields.cache_key),
     }
 }
 
-/// Fill empty tool-result names from preceding unmatched calls.
-/// Match local correlation handles before provider identifiers. Existing names
-/// disambiguate multiple matches; ambiguous or missing matches remain unchanged.
-/// This helper is available to companion serializers but is not a stable public API.
-pub fn resolve_empty_tool_result_names(history: &mut [crate::message::Message]) {
-    use crate::message::{AssistantContent, Message, ProviderCallId, ToolCallId, UserContent};
+/// The session id a dialect's session header carries: the request's cache
+/// key, so one conversation's requests share it, or a fresh id without one.
+pub(crate) fn session_id(cache_key: Option<&str>) -> String {
+    cache_key.map_or_else(crate::id::generate, str::to_owned)
+}
 
-    /// An outstanding call of either kind: what a result is matched against.
-    struct PendingCall {
-        id: ToolCallId,
-        provider: Option<ProviderCallId>,
-        name: String,
-    }
-
-    // IDs are completion-local. Resolve only against preceding outstanding
-    // calls, never a future turn that happens to reuse the same generated key.
-    let mut pending: Vec<PendingCall> = Vec::new();
-    for message in history {
-        match message {
-            Message::Assistant { content, .. } => {
-                pending.extend(content.iter().filter_map(|item| match item {
-                    AssistantContent::ToolCall(call) => Some(PendingCall {
-                        id: call.id.clone(),
-                        provider: call.provider.clone(),
-                        name: call.function.name.clone(),
-                    }),
-                    AssistantContent::CustomToolCall(call) => Some(PendingCall {
-                        id: call.id.clone(),
-                        provider: call.provider.clone(),
-                        name: call.name.clone(),
-                    }),
-                    AssistantContent::Text(_)
-                    | AssistantContent::Reasoning(_)
-                    | AssistantContent::Image(_)
-                    | AssistantContent::ProviderItem(_) => None,
-                }));
-            }
-            Message::User { content } => {
-                for item in content {
-                    let UserContent::ToolResult(result) = item else {
-                        continue;
-                    };
-                    let local: Vec<_> = pending
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, call)| call.id == result.call)
-                        .map(|(index, _)| index)
-                        .collect();
-                    let mut candidates = if local.is_empty() {
-                        // Provider aliases are their own namespace, not strings
-                        // inserted alongside generated correlation keys.
-                        pending
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, call)| match (&call.provider, &result.provider) {
-                                (Some(call), Some(result)) => {
-                                    call.call_id == result.call_id
-                                        || call.item_id.as_ref().is_some_and(|id| {
-                                            id == &result.call_id
-                                                || result.item_id.as_ref() == Some(id)
-                                        })
-                                        || result.item_id.as_ref() == Some(&call.call_id)
-                                }
-                                _ => false,
-                            })
-                            .map(|(index, _)| index)
-                            .collect()
-                    } else {
-                        local
-                    };
-                    if candidates.len() > 1 && !result.name.is_empty() {
-                        candidates.retain(|index| {
-                            pending
-                                .get(*index)
-                                .is_some_and(|call| call.name == result.name)
-                        });
-                    }
-                    if let [index] = candidates.as_slice() {
-                        let call = pending.remove(*index);
-                        if result.name.is_empty() {
-                            result.name = call.name;
-                        }
-                    }
-                }
-            }
-            Message::System { .. } => {}
-        }
-    }
+/// [`session_id`] for `request`. The cache key is a routing hint, which a
+/// header carries outside the option mapping.
+pub(crate) fn request_session_id(request: &crate::completion::CompletionRequest) -> String {
+    session_id(request.options.cache_key.as_deref())
 }
 
 /// A rig logging target for [`trace_json`]. An enum (not a `&str`) because
@@ -202,57 +140,6 @@ pub(crate) mod named_dialect {
             serde::de::Error::custom(format!("`{name}` is not a registered {family} dialect"))
         })
     }
-}
-
-#[cfg(test)]
-mod tests;
-
-#[cfg(test)]
-mod tool_call_id_tests;
-
-/// Reads the provider's transport request id off a response's headers, when
-/// the provider names such a header and the response carries a non-empty
-/// value. `None` is the documented "not reported" outcome.
-pub(crate) fn request_id_from_headers(
-    headers: &http::HeaderMap,
-    request_id_header: Option<&str>,
-) -> Option<String> {
-    request_id_header.and_then(|header| {
-        headers
-            .get(header)
-            .and_then(|value| value.to_str().ok())
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    })
-}
-
-/// The headers of a reply whose lowercase name starts with `prefix`, as
-/// [`crate::completion::ProviderResponseHeaders`]: a header repeated in the
-/// reply is joined with `", "` in arrival order (RFC 9110, section 5.3), and
-/// a value is kept exactly unless it is not valid UTF-8, which alone is
-/// converted lossily. `None` captures nothing.
-pub(crate) fn captured_response_headers(
-    headers: &http::HeaderMap,
-    prefix: Option<&str>,
-) -> crate::completion::ProviderResponseHeaders {
-    let Some(prefix) = prefix else {
-        return crate::completion::ProviderResponseHeaders::new();
-    };
-    headers
-        .keys()
-        .filter(|name| name.as_str().starts_with(prefix))
-        .map(|name| {
-            let values: Vec<String> = headers
-                .get_all(name)
-                .iter()
-                .map(|value| match String::from_utf8(value.as_bytes().to_vec()) {
-                    Ok(value) => value,
-                    Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
-                })
-                .collect();
-            (name.as_str().to_owned(), values.join(", "))
-        })
-        .collect()
 }
 
 /// Append `pairs` to `path` as a percent-encoded query string.

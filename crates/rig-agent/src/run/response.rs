@@ -21,9 +21,6 @@ pub struct CompletionCall {
     /// A counter the provider did not report is `None`; a reported zero is
     /// `Some(0)`. Every counter is `None` when no usage was reported at all.
     pub usage: Usage,
-    /// Provider-assigned assistant message ID for this call, when reported.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message_id: Option<String>,
     /// Provider-assigned response-scoped ID for this call, when reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_id: Option<String>,
@@ -48,7 +45,6 @@ impl CompletionCall {
         Self {
             call_index,
             usage,
-            message_id: None,
             response_id: None,
             provider_request_id: None,
             finish_reason: None,
@@ -58,7 +54,6 @@ impl CompletionCall {
 
     /// Attach the response identity metadata this call's attempt reported.
     pub fn with_identity(mut self, identity: ResponseIdentity) -> Self {
-        self.message_id = identity.message_id;
         self.response_id = identity.response_id;
         self.provider_request_id = identity.provider_request_id;
         self
@@ -73,7 +68,6 @@ impl CompletionCall {
     /// This call's identity metadata as one [`ResponseIdentity`] carrier.
     pub fn identity(&self) -> ResponseIdentity {
         ResponseIdentity {
-            message_id: self.message_id.clone(),
             response_id: self.response_id.clone(),
             provider_request_id: self.provider_request_id.clone(),
         }
@@ -84,8 +78,6 @@ impl CompletionCall {
 /// `MultiTurnStreamItem::FinalResponse` stream items.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptResponse {
-    /// Concatenated assistant text for the final turn.
-    pub output: String,
     /// Aggregated token usage across the whole run.
     pub usage: Usage,
     /// Successfully completed completion requests made by this agent run.
@@ -98,23 +90,16 @@ pub struct PromptResponse {
     pub completion_calls: Vec<CompletionCall>,
     /// The run's transcript: the prompt, every accepted assistant turn, every
     /// committed tool result and the corrective feedback of any retried turn,
-    /// excluding the input history the run started from. This is what a
-    /// configured conversation memory is asked to persist; whether that
-    /// append was acknowledged is [`memory_append`](Self::memory_append).
-    /// `None` only for a response built without a run behind it.
-    pub messages: Option<Vec<Message>>,
-    /// How the run's conversation-memory append settled, when the run had a
-    /// memory backend and conversation to append to; `None` when memory was
-    /// not configured for the run, bypassed by explicit history, disabled, or
-    /// the run was resumed (the driver that persisted it owns the append).
-    /// Set by the driver after the append dispatch resolved, so the
-    /// protocol's own `Done` response never carries it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory_append: Option<MemoryAppend>,
-    /// Structured assistant content for the final turn.
-    ///
-    /// Where [`output`](Self::output) is the concatenated text, this preserves
-    /// the individual content parts (text, reasoning, images, …).
+    /// excluding the input history the run started from: what a caller keeping
+    /// the conversation appends to it. Empty only for a response built without
+    /// a run behind it.
+    #[serde(default)]
+    pub messages: Vec<Message>,
+    /// Structured assistant content for the final turn: its text,
+    /// reasoning, images, and other parts. In output-tool mode the model's
+    /// prose and tool calls are replaced by one text part holding the
+    /// serialized structured output. [`output`](Self::output) is derived
+    /// from it.
     pub content: Vec<AssistantContent>,
     /// Number of synthetic output-tool calls in the turn that finalized this
     /// response. Kept crate-private because it is runner bookkeeping rather
@@ -123,56 +108,26 @@ pub struct PromptResponse {
     output_tool_calls: usize,
 }
 
-/// Outcome of the memory append, independent of the accepted run answer.
-/// Acknowledgement provides only the backend's durability guarantee; failure
-/// does not prove no write occurred. Dropping an in-flight append yields no
-/// response, and this outcome does not guarantee exactly-once persistence.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum MemoryAppend {
-    /// The backend acknowledged the append of [`PromptResponse::messages`].
-    Acknowledged,
-    /// The append dispatch failed or was refused, as reported after outcome hooks.
-    /// Persistence may still have occurred. The effect log retains the handler's
-    /// original answer rather than any hook replacement.
-    Failed {
-        /// Why the append failed.
-        report: rig_core::error::ErrorReport,
-    },
-}
-
-impl MemoryAppend {
-    /// Whether the backend acknowledged the append.
-    pub fn is_acknowledged(&self) -> bool {
-        matches!(self, Self::Acknowledged)
-    }
-
-    /// The failure report, when the append failed.
-    pub fn failure(&self) -> Option<&rig_core::error::ErrorReport> {
-        match self {
-            Self::Acknowledged => None,
-            Self::Failed { report } => Some(report),
-        }
-    }
-}
-
 impl std::fmt::Display for PromptResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.output.fmt(f)
+        self.output().fmt(f)
     }
 }
 
 impl PromptResponse {
-    /// A response whose final text is `output`, with the run's `usage`.
+    /// A response whose final turn is the single text part `output`, with the
+    /// run's `usage`.
     pub fn new(output: impl Into<String>, usage: Usage) -> Self {
-        let output = output.into();
+        Self::from_content(vec![AssistantContent::text(output)], usage)
+    }
+
+    /// A response whose final turn is `content`.
+    pub(crate) fn from_content(content: Vec<AssistantContent>, usage: Usage) -> Self {
         Self {
-            content: vec![AssistantContent::text(output.clone())],
-            output,
+            content,
             usage,
             completion_calls: Vec::new(),
-            messages: None,
-            memory_append: None,
+            messages: Vec::new(),
             output_tool_calls: 0,
         }
     }
@@ -182,9 +137,9 @@ impl PromptResponse {
         Self::new(String::new(), Usage::default())
     }
 
-    /// Attach the run's accumulated message history.
+    /// Attach the run's transcript.
     pub fn with_messages(mut self, messages: Vec<Message>) -> Self {
-        self.messages = Some(messages);
+        self.messages = messages;
         self
     }
 
@@ -194,21 +149,8 @@ impl PromptResponse {
         self
     }
 
-    /// Record how the run's conversation-memory append settled; the driver
-    /// sets this once the append dispatch resolved.
-    pub fn with_memory_append(mut self, memory_append: Option<MemoryAppend>) -> Self {
-        self.memory_append = memory_append;
-        self
-    }
-
-    /// Set the structured assistant content for the final turn.
-    pub fn with_content(mut self, content: Vec<AssistantContent>) -> Self {
-        self.content = content;
-        self
-    }
-
     /// Record how many times the output tool was called.
-    pub fn with_output_tool_calls(mut self, count: usize) -> Self {
+    pub(crate) fn with_output_tool_calls(mut self, count: usize) -> Self {
         self.output_tool_calls = count;
         self
     }
@@ -218,9 +160,10 @@ impl PromptResponse {
         self.output_tool_calls
     }
 
-    /// The concatenated assistant text for the final turn.
-    pub fn output(&self) -> &str {
-        &self.output
+    /// The concatenated text parts of [`content`](Self::content). In
+    /// output-tool mode this is the serialized structured output.
+    pub fn output(&self) -> String {
+        super::transcript::choice_text(&self.content)
     }
 
     /// Aggregated token usage across the whole run.
@@ -228,18 +171,13 @@ impl PromptResponse {
         self.usage
     }
 
-    /// The run's accumulated message history, if tracked.
-    pub fn messages(&self) -> Option<&[Message]> {
-        self.messages.as_deref()
+    /// The run's transcript (see the [field](Self::messages)).
+    pub fn messages(&self) -> &[Message] {
+        &self.messages
     }
 
-    /// How the run's conversation-memory append settled, when the run had
-    /// one (see the [field](Self::memory_append)).
-    pub fn memory_append(&self) -> Option<&MemoryAppend> {
-        self.memory_append.as_ref()
-    }
-
-    /// The structured assistant content for the final turn.
+    /// The structured assistant content for the final turn (see the
+    /// [field](Self::content)).
     pub fn content(&self) -> &[AssistantContent] {
         &self.content
     }
@@ -258,28 +196,75 @@ impl PromptResponse {
     }
 }
 
+/// Replace calls and prose in a finished output-tool turn with final output text,
+/// retaining reasoning and images. Call only after finalization, when remaining
+/// calls are output-tool calls. Persisted history retains prose independently;
+/// returns `None` if no call is present.
+pub(crate) fn finalize_output_tool_choice(
+    choice: &[AssistantContent],
+    output: &str,
+) -> Option<Vec<AssistantContent>> {
+    let finalized_via_output_tool = choice
+        .iter()
+        .any(|item| matches!(item, AssistantContent::ToolCall(_)));
+    if !finalized_via_output_tool {
+        return None;
+    }
+    let mut items: Vec<AssistantContent> = choice
+        .iter()
+        .filter(|item| {
+            !matches!(
+                item,
+                AssistantContent::ToolCall(_) | AssistantContent::Text(_)
+            )
+        })
+        .cloned()
+        .collect();
+    items.push(AssistantContent::text(output.to_string()));
+    Some(items)
+}
+
 use thiserror::Error;
 
-use rig_core::memory::MemoryError;
-
-/// Errors from classic agent prompting.
+/// Why an agent run failed, whether it was awaited or streamed.
+///
+/// Variants that wrap another error display it unchanged and forward its
+/// source.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum PromptError {
     /// A provider completion failed.
-    #[error("CompletionError: {0}")]
-    CompletionError(#[from] ProviderError),
+    #[error(transparent)]
+    Provider(ProviderError),
 
-    /// Structured effect failure from the bus, a handler, a hook, or a stream item.
-    #[error("{0}")]
+    /// Structured effect failure from a handler, a hook, or a stream item. A
+    /// relayed provider failure arrives as its report.
+    #[error(transparent)]
     Report(#[from] rig_core::error::ErrorReport),
 
-    /// Conversation memory failed to load or persist history.
-    #[error("MemoryError: {0}")]
-    MemoryError(#[from] MemoryError),
+    /// The run's conversation could not be loaded from its memory store,
+    /// before any model call, or the finished run could not be saved there
+    /// ([`AgentBuilder::memory`](crate::AgentBuilder::memory)). The run did
+    /// not succeed. A failed save may already have set aside a torn last
+    /// line the log ended in (to `recovered/` in the store) and stored the
+    /// blobs of the run's images; its own append stored nothing or, cut
+    /// short, a cut last line, which the next save sets aside. A remote
+    /// store that applied the append before failing to answer may hold all
+    /// of it.
+    #[error("the conversation memory failed: {error}")]
+    Memory {
+        /// Why the store refused or failed, such as
+        /// [`SessionError::Changed`](rig_memory::SessionError::Changed) when
+        /// another run saved to the log after this one loaded it.
+        #[source]
+        error: rig_memory::SessionError,
+        /// The finished run whose save failed; `None` when the load did.
+        response: Option<Box<PromptResponse>>,
+    },
 
     /// The run exhausted its total model-call budget.
-    #[error("MaxTurnsError: reached max turns limit: {max_turns}")]
-    MaxTurnsError {
+    #[error("reached the max turns limit of {max_turns}")]
+    MaxTurns {
         /// Configured total model-call budget.
         max_turns: usize,
         /// Canonical history available when the budget was exhausted.
@@ -288,10 +273,11 @@ pub enum PromptError {
         prompt: Message,
     },
 
-    /// A prompting loop was cancelled.
-    #[error("PromptCancelled: {reason}")]
-    PromptCancelled {
-        /// Canonical history available at cancellation.
+    /// The run was cancelled.
+    #[error("the run was cancelled: {reason}")]
+    Cancelled {
+        /// The run's history at cancellation, every tool call answered
+        /// (closed by [`repair`](rig_core::conversation::pairing::repair)).
         chat_history: Vec<Message>,
         /// Human-readable cancellation reason.
         reason: String,
@@ -299,7 +285,7 @@ pub enum PromptError {
 
     /// The model attempted to call a tool unavailable for the current turn.
     #[error(
-        "UnknownToolCall: model attempted to call unknown or disallowed tool `{tool_name}`. Available tools: {available_tools:?}. Allowed tools for this turn: {allowed_tools:?}"
+        "model attempted to call unknown or disallowed tool `{tool_name}`. Available tools: {available_tools:?}. Allowed tools for this turn: {allowed_tools:?}"
     )]
     UnknownToolCall {
         /// Tool name emitted by the model.
@@ -311,19 +297,16 @@ pub enum PromptError {
         /// Canonical history available at failure.
         chat_history: Vec<Message>,
     },
+}
 
-    /// The model emitted a tool call that name-keyed dispatch cannot run
-    /// without erasing what it is: a namespaced call or a custom (raw-input)
-    /// call. Refused before tool authorization, invalid-call recovery,
-    /// dispatch hooks, or execution see it.
-    #[error("UndispatchableToolCall: {call}")]
-    UndispatchableToolCall {
-        /// The refused call.
-        call: rig_core::message::UndispatchableToolCall,
-        /// Canonical history available at failure, including the turn that
-        /// carried the call.
-        chat_history: Vec<Message>,
-    },
+/// A relayed failure is the report the origin sent.
+impl From<ProviderError> for PromptError {
+    fn from(error: ProviderError) -> Self {
+        match error {
+            ProviderError::Relayed(report) => Self::Report(*report),
+            error => Self::Provider(error),
+        }
+    }
 }
 
 /// Forward provider response accessors through wrapped errors and optional reports.
@@ -382,22 +365,17 @@ macro_rules! forward_provider_response_helpers {
     };
 }
 
-forward_provider_response_helpers!(
-    PromptError,
-    CompletionError,
-    "completion error",
-    report = Report
-);
+pub(crate) use forward_provider_response_helpers;
+
+forward_provider_response_helpers!(PromptError, Provider, "completion error", report = Report);
 
 impl PromptError {
-    /// Build a [`PromptError::PromptCancelled`] from the history available at
-    /// cancellation and a reason.
-    pub fn prompt_cancelled(
-        chat_history: impl IntoIterator<Item = Message>,
-        reason: impl Into<String>,
-    ) -> Self {
-        Self::PromptCancelled {
-            chat_history: chat_history.into_iter().collect(),
+    /// Build a [`PromptError::Cancelled`]. A driver gets the history from
+    /// [`AgentRun::cancel_error`](super::AgentRun::cancel_error), or closes
+    /// its own with [`repair`](rig_core::conversation::pairing::repair).
+    pub fn cancelled(chat_history: Vec<Message>, reason: impl Into<String>) -> Self {
+        Self::Cancelled {
+            chat_history,
             reason: reason.into(),
         }
     }

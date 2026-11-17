@@ -3,28 +3,25 @@
 use super::*;
 use std::{fs, time::Instant};
 
-pub(super) fn tracked_inputs(root: &Path) -> Result<Vec<String>> {
-    Ok(output(root, "git", &["ls-files", "-z"])?
+/// The paths a `git … -z` command prints, NUL-separated.
+pub(super) fn git_paths(root: &Path, args: &[&str]) -> Result<Vec<String>> {
+    Ok(output(root, "git", args)?
         .split('\0')
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .collect())
 }
+pub(super) fn tracked_inputs(root: &Path) -> Result<Vec<String>> {
+    git_paths(root, &["ls-files", "-z"])
+}
 pub(super) fn untracked_inputs(root: &Path) -> Result<Vec<String>> {
-    Ok(output(
-        root,
-        "git",
-        &["ls-files", "--others", "--exclude-standard", "-z"],
-    )?
-    .split('\0')
-    .filter(|s| !s.is_empty())
-    .map(str::to_owned)
-    .collect())
+    git_paths(root, &["ls-files", "--others", "--exclude-standard", "-z"])
 }
 
-/// The command for one step. Verification is always replay, and CLI or
-/// environment retry overrides must not defeat the no-retry contract of the
-/// guards profile. Model downloads go under the target directory.
+/// The command for one step. Verification is always replay, matches request
+/// bodies by shape, checks the request snapshots and never rewrites them, and CLI or environment retry
+/// overrides must not defeat the no-retry contract of the guards profile.
+/// Model downloads go under the target directory.
 pub(super) fn command(root: &Path, step: &Step, target: &Path) -> Command {
     let mut cmd = Command::new(&step.program);
     let cache = target.join("verify/fastembed-cache");
@@ -32,6 +29,8 @@ pub(super) fn command(root: &Path, step: &Step, target: &Path) -> Command {
         .current_dir(root)
         .envs(&step.env)
         .env("RIG_PROVIDER_TEST_MODE", "replay")
+        .env("RIG_CASSETTE_SNAPSHOTS", "check")
+        .env("RIG_CASSETTE_MATCHING", "shape")
         .env("FASTEMBED_CACHE_DIR", &cache)
         .env("HF_HOME", &cache)
         .env_remove("RIG_REGENERATE_GOLDEN")
@@ -52,6 +51,8 @@ fn internal(root: &Path, target: &Path, step: &Step) -> Result<()> {
         "@layout" => crate::test_layout::check(root).map_err(invalid),
         "@packaging" => crate::packaging::check(root).map_err(invalid),
         "@wires" => crate::wires::check(root).map_err(invalid),
+        "@options-guards" => super::guards::check(root).map_err(invalid),
+        "@stage-order" => crate::stage_order::check(root).map_err(invalid),
         "@fixture-paths" => {
             // `cargo test` runs from the crate root and nextest from the
             // workspace root, so a CWD-relative fixture path passes under one
@@ -74,6 +75,69 @@ fn internal(root: &Path, target: &Path, step: &Step) -> Result<()> {
                     if line.contains("\"tests/data") || line.contains("\"./tests/data") {
                         return Err(invalid(format!(
                             "CWD-relative fixture path in {path}; anchor it to CARGO_MANIFEST_DIR"
+                        )));
+                    }
+                }
+            }
+            Ok(())
+        }
+        "@ecs-boundary" => {
+            // rig-ecs is a library runtime: with every feature on, nothing
+            // in its normal dependency tree is a view, the `rig` facade,
+            // the launcher protocol, the app or an HTTP stack, and it
+            // touches no files: stores are the app's.
+            const FORBIDDEN: [&str; 9] = [
+                "rig",
+                "rig-harness-protocol",
+                "rig-harness",
+                "rig-tools",
+                "rig-reqwest",
+                "reqwest",
+                "ratatui",
+                "crossterm",
+                "ignore",
+            ];
+            let tree = output(
+                root,
+                "cargo",
+                &[
+                    "tree",
+                    "--locked",
+                    "-p",
+                    "rig-ecs",
+                    "--all-features",
+                    "-e",
+                    "normal",
+                    "--prefix",
+                    "none",
+                    "--format",
+                    "{p}",
+                ],
+            )?;
+            if let Some(name) = tree
+                .lines()
+                .filter_map(|line| line.split_whitespace().next())
+                .find(|name| FORBIDDEN.contains(name))
+            {
+                return Err(invalid(format!(
+                    "rig-ecs depends on `{name}`; the runtime must not depend on a view, the \
+                     `rig` facade, the app or an HTTP stack"
+                )));
+            }
+            for path in tracked_inputs(root)?
+                .into_iter()
+                .chain(untracked_inputs(root)?)
+                .filter(|p| p.starts_with("crates/rig-ecs/src/") && p.ends_with(".rs"))
+            {
+                let Ok(text) = fs::read_to_string(root.join(&path)) else {
+                    continue;
+                };
+                for (number, line) in text.lines().enumerate() {
+                    let code = line.split("//").next().unwrap_or_default();
+                    if paths(code, "std::fs").next().is_some() {
+                        return Err(invalid(format!(
+                            "{path}:{}: rig-ecs names `std::fs`; the app's store touches files",
+                            number + 1
                         )));
                     }
                 }
@@ -179,4 +243,14 @@ pub(super) fn run(root: &Path, metadata: &Value, plan: &[Check]) -> Result<()> {
         start.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+/// What follows each `prefix` (such as `rig::`) in `code` that starts a
+/// path, not the end of a longer name such as `my_rig::`.
+fn paths<'a>(code: &'a str, prefix: &'a str) -> impl Iterator<Item = &'a str> {
+    code.match_indices(prefix).filter_map(move |(at, _)| {
+        let before = code.get(..at)?.chars().next_back();
+        let starts = !before.is_some_and(|c| c.is_alphanumeric() || c == '_');
+        code.get(at + prefix.len()..).filter(|_| starts)
+    })
 }

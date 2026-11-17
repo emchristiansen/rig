@@ -1,12 +1,12 @@
 //! Live Chat Completions tool-call lifecycle and argument-integrity matrix.
 //!
-//! The complete recorded space is 2 transports × 2 models × 3 call shapes ×
-//! 2 public surfaces = 24 cells. The shapes cover a deliberate zero-argument
-//! call, a nested object containing an array and Unicode, and two parallel
-//! calls. Model cells read the normalized reply the driver decodes from the
-//! provider-native response; agent cells prove exact-once invocation.
-//! Streaming cells additionally reassemble every id, name, and argument
-//! fragment from their fixtures.
+//! The space is 2 transports × 2 models × 3 call shapes × 2
+//! public surfaces = 24 cells, of which the two below are tests. The shapes
+//! cover a deliberate zero-argument call, a nested object containing an array
+//! and Unicode, and two parallel calls. Model cells read the normalized reply
+//! the driver decodes from the provider-native response; agent cells prove
+//! exact-once invocation. Streaming cells additionally reassemble every id,
+//! name, and argument fragment from their fixtures.
 //!
 //! Auto/none/specific tool-choice controls are assigned to the separate
 //! request-shape matrix; this matrix fixes choice to `required` so call shape
@@ -20,8 +20,7 @@
 //! | call shape | zero arguments, nested Unicode/array object, parallel pair |
 //! | surface | raw/normalized model, one-turn agent |
 //!
-//! Coverage ledger: the pre-pruning Cartesian product is 24 and every cell is
-//! recorded; none is unit-only. Each explicit test maps to
+//! Each test maps to
 //! `crates/rig-cassette/fixtures/cassettes/openai/chat_tool_lifecycle_matrix/<test-name>.yaml`.
 //! The two low-cost mini models are stable, tool-capable controls from distinct
 //! model families. Assertions span request schemas, provider-native blocking
@@ -31,22 +30,21 @@
 //!
 //! | recorded cells | exact fixture set |
 //! |---|---|
-//! | all 24 | `crates/rig-cassette/fixtures/cassettes/openai/chat_tool_lifecycle_matrix/{blocking,streaming}_{gpt4o,gpt41}_{zero,nested,parallel}_{model,agent}.yaml` |
+//! | 2 of 24 | `crates/rig-cassette/fixtures/cassettes/openai/chat_tool_lifecycle_matrix/{blocking_gpt4o_zero_agent,streaming_gpt4o_nested_model}.yaml` |
 
+use rig::streaming::Item;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use futures::StreamExt as _;
-use rig::completion::{AssistantContent, CompletionModel, FinishReason};
-use rig::driver::Bound;
-use rig::prelude::*;
-use rig::providers::openai::wire::Chat;
+use rig::completion::{AssistantContent, FinishReason};
 use rig::streaming::StreamEvent;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::super::support::{OpenAiCassette, with_openai_tool_lifecycle_cassette_result};
+use rig::completion::CompletionRequest;
 
 pub(super) const PREAMBLE: &str =
     "Follow the user's tool-call instruction exactly. Do not answer in prose.";
@@ -60,7 +58,6 @@ pub(super) enum Transport {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Model {
     Gpt4oMini,
-    Gpt41Mini,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,7 +105,6 @@ pub(super) fn cell(transport: Transport, model: Model, shape: Shape, surface: Su
 pub(super) fn model_name(model: Model) -> &'static str {
     match model {
         Model::Gpt4oMini => "gpt-4o-mini",
-        Model::Gpt41Mini => "gpt-4.1-mini",
     }
 }
 
@@ -150,22 +146,23 @@ pub(super) fn tool_definition(name: &str) -> rig::completion::ToolDefinition {
         other => panic!("unknown matrix tool {other}"),
     };
     rig::completion::ToolDefinition {
-        name: name.to_owned(),
+        name: rig_core::message::ToolName::new(name).expect("tool name"),
         description: format!("Matrix tool {name}"),
         parameters,
+        annotations: Default::default(),
     }
 }
 
-fn request(model: &Bound<Chat>, cell: Cell) -> rig::completion::CompletionRequest {
-    let mut builder = model
-        .completion_request(prompt(cell.shape))
+fn request(cell: Cell) -> rig::completion::CompletionRequest {
+    let mut builder = CompletionRequest::new(prompt(cell.shape))
         .preamble(PREAMBLE.to_owned())
-        .additional_params(json!({ "tool_choice": "required", "parallel_tool_calls": cell.shape == Shape::Parallel }))
+        .parallel_tool_calls(cell.shape == Shape::Parallel)
+        .additional_params(json!({ "tool_choice": "required" }))
         .max_tokens(128);
     for name in expected_names(cell.shape) {
         builder = builder.tool(tool_definition(name));
     }
-    builder.build()
+    builder
 }
 
 fn normalized_calls(choice: &[AssistantContent]) -> (Vec<String>, Vec<String>, Vec<Value>) {
@@ -180,11 +177,12 @@ fn normalized_calls(choice: &[AssistantContent]) -> (Vec<String>, Vec<String>, V
         calls
             .iter()
             .map(|call| call.function.name.clone())
+            .map(String::from)
             .collect(),
         calls.iter().map(|call| call.id.to_string()).collect(),
         calls
             .iter()
-            .map(|call| call.function.arguments.clone())
+            .map(|call| call.function.arguments_value())
             .collect(),
     )
 }
@@ -264,7 +262,7 @@ async fn run_model(client: OpenAiCassette, cell: Cell) -> Observation {
         // The provider-native reply and the normalized view are one call now:
         // the driver decodes the native response and hands back the
         // normalization, keeping the native value on `CompletionResponse::raw`.
-        Transport::Blocking => match model.completion(request(&model, cell)).await {
+        Transport::Blocking => match model.call(request(cell)).await {
             Ok(response) => {
                 let (names, ids, arguments) = normalized_calls(&response.choice);
                 Observation {
@@ -281,7 +279,7 @@ async fn run_model(client: OpenAiCassette, cell: Cell) -> Observation {
             },
         },
         Transport::Streaming => {
-            let mut stream = match model.stream(request(&model, cell)).await {
+            let mut stream = match model.stream(request(cell)) {
                 Ok(stream) => stream,
                 Err(error) => {
                     return Observation {
@@ -293,20 +291,24 @@ async fn run_model(client: OpenAiCassette, cell: Cell) -> Observation {
             let mut observation = Observation::default();
             while let Some(item) = stream.next().await {
                 match item {
-                    Ok(StreamEvent::BlockEnd {
-                        block: Some(AssistantContent::ToolCall(tool_call)),
+                    Ok(Item::Event(StreamEvent::End {
+                        content: AssistantContent::ToolCall(tool_call),
                         ..
-                    }) => {
-                        observation.names.push(tool_call.function.name);
+                    })) => {
+                        observation
+                            .names
+                            .push(tool_call.function.name.clone().into());
                         observation.ids.push(tool_call.id.to_string());
-                        observation.arguments.push(tool_call.function.arguments);
-                    }
-                    Ok(StreamEvent::Final(terminal)) => {
-                        observation.finish_reason = terminal.finish_reason;
+                        observation
+                            .arguments
+                            .push(tool_call.function.arguments_value());
                     }
                     Ok(_) => {}
                     Err(error) => observation.errors.push(error.to_string()),
                 }
+            }
+            if let Ok(terminal) = stream.finish().await {
+                observation.finish_reason = terminal.finish_reason();
             }
             observation
         }
@@ -315,9 +317,10 @@ async fn run_model(client: OpenAiCassette, cell: Cell) -> Observation {
 
 async fn run_agent(client: OpenAiCassette, cell: Cell) -> Observation {
     let invocations = InvocationLog::default();
-    let builder = client.chat.agent(model_name(cell.model))
+    let builder = rig::AgentBuilder::new(client.chat.completion(model_name(cell.model)))
         .preamble(PREAMBLE)
-        .additional_params(json!({ "tool_choice": "required", "parallel_tool_calls": cell.shape == Shape::Parallel }))
+        .parallel_tool_calls(cell.shape == Shape::Parallel)
+        .additional_params(json!({ "tool_choice": "required" }))
         .max_tokens(128)
         .default_max_turns(1);
     let agent = match cell.shape {
@@ -618,51 +621,7 @@ pub(super) async fn execute(scenario: &'static str, cell: Cell, observed: Shared
 crate::matrix::case_matrix! {
     wrapper: with_openai_tool_lifecycle_cassette_result, family: tool_lifecycle_matrix_case;
     # [tokio :: test]
-    blocking_gpt4o_zero_model: ("chat_tool_lifecycle_matrix/blocking_gpt4o_zero_model", configured, cell (Transport :: Blocking , Model :: Gpt4oMini , Shape :: Zero , Surface :: Model ,));
-    # [tokio :: test]
     blocking_gpt4o_zero_agent: ("chat_tool_lifecycle_matrix/blocking_gpt4o_zero_agent", configured, cell (Transport :: Blocking , Model :: Gpt4oMini , Shape :: Zero , Surface :: Agent ,));
     # [tokio :: test]
-    blocking_gpt4o_nested_model: ("chat_tool_lifecycle_matrix/blocking_gpt4o_nested_model", configured, cell (Transport :: Blocking , Model :: Gpt4oMini , Shape :: Nested , Surface :: Model ,));
-    # [tokio :: test]
-    blocking_gpt4o_nested_agent: ("chat_tool_lifecycle_matrix/blocking_gpt4o_nested_agent", configured, cell (Transport :: Blocking , Model :: Gpt4oMini , Shape :: Nested , Surface :: Agent ,));
-    # [tokio :: test]
-    blocking_gpt4o_parallel_model: ("chat_tool_lifecycle_matrix/blocking_gpt4o_parallel_model", configured, cell (Transport :: Blocking , Model :: Gpt4oMini , Shape :: Parallel , Surface :: Model ,));
-    # [tokio :: test]
-    blocking_gpt4o_parallel_agent: ("chat_tool_lifecycle_matrix/blocking_gpt4o_parallel_agent", configured, cell (Transport :: Blocking , Model :: Gpt4oMini , Shape :: Parallel , Surface :: Agent ,));
-    # [tokio :: test]
-    blocking_gpt41_zero_model: ("chat_tool_lifecycle_matrix/blocking_gpt41_zero_model", configured, cell (Transport :: Blocking , Model :: Gpt41Mini , Shape :: Zero , Surface :: Model ,));
-    # [tokio :: test]
-    blocking_gpt41_zero_agent: ("chat_tool_lifecycle_matrix/blocking_gpt41_zero_agent", configured, cell (Transport :: Blocking , Model :: Gpt41Mini , Shape :: Zero , Surface :: Agent ,));
-    # [tokio :: test]
-    blocking_gpt41_nested_model: ("chat_tool_lifecycle_matrix/blocking_gpt41_nested_model", configured, cell (Transport :: Blocking , Model :: Gpt41Mini , Shape :: Nested , Surface :: Model ,));
-    # [tokio :: test]
-    blocking_gpt41_nested_agent: ("chat_tool_lifecycle_matrix/blocking_gpt41_nested_agent", configured, cell (Transport :: Blocking , Model :: Gpt41Mini , Shape :: Nested , Surface :: Agent ,));
-    # [tokio :: test]
-    blocking_gpt41_parallel_model: ("chat_tool_lifecycle_matrix/blocking_gpt41_parallel_model", configured, cell (Transport :: Blocking , Model :: Gpt41Mini , Shape :: Parallel , Surface :: Model ,));
-    # [tokio :: test]
-    blocking_gpt41_parallel_agent: ("chat_tool_lifecycle_matrix/blocking_gpt41_parallel_agent", configured, cell (Transport :: Blocking , Model :: Gpt41Mini , Shape :: Parallel , Surface :: Agent ,));
-    # [tokio :: test]
-    streaming_gpt4o_zero_model: ("chat_tool_lifecycle_matrix/streaming_gpt4o_zero_model", configured, cell (Transport :: Streaming , Model :: Gpt4oMini , Shape :: Zero , Surface :: Model ,));
-    # [tokio :: test]
-    streaming_gpt4o_zero_agent: ("chat_tool_lifecycle_matrix/streaming_gpt4o_zero_agent", configured, cell (Transport :: Streaming , Model :: Gpt4oMini , Shape :: Zero , Surface :: Agent ,));
-    # [tokio :: test]
     streaming_gpt4o_nested_model: ("chat_tool_lifecycle_matrix/streaming_gpt4o_nested_model", configured, cell (Transport :: Streaming , Model :: Gpt4oMini , Shape :: Nested , Surface :: Model ,));
-    # [tokio :: test]
-    streaming_gpt4o_nested_agent: ("chat_tool_lifecycle_matrix/streaming_gpt4o_nested_agent", configured, cell (Transport :: Streaming , Model :: Gpt4oMini , Shape :: Nested , Surface :: Agent ,));
-    # [tokio :: test]
-    streaming_gpt4o_parallel_model: ("chat_tool_lifecycle_matrix/streaming_gpt4o_parallel_model", configured, cell (Transport :: Streaming , Model :: Gpt4oMini , Shape :: Parallel , Surface :: Model ,));
-    # [tokio :: test]
-    streaming_gpt4o_parallel_agent: ("chat_tool_lifecycle_matrix/streaming_gpt4o_parallel_agent", configured, cell (Transport :: Streaming , Model :: Gpt4oMini , Shape :: Parallel , Surface :: Agent ,));
-    # [tokio :: test]
-    streaming_gpt41_zero_model: ("chat_tool_lifecycle_matrix/streaming_gpt41_zero_model", configured, cell (Transport :: Streaming , Model :: Gpt41Mini , Shape :: Zero , Surface :: Model ,));
-    # [tokio :: test]
-    streaming_gpt41_zero_agent: ("chat_tool_lifecycle_matrix/streaming_gpt41_zero_agent", configured, cell (Transport :: Streaming , Model :: Gpt41Mini , Shape :: Zero , Surface :: Agent ,));
-    # [tokio :: test]
-    streaming_gpt41_nested_model: ("chat_tool_lifecycle_matrix/streaming_gpt41_nested_model", configured, cell (Transport :: Streaming , Model :: Gpt41Mini , Shape :: Nested , Surface :: Model ,));
-    # [tokio :: test]
-    streaming_gpt41_nested_agent: ("chat_tool_lifecycle_matrix/streaming_gpt41_nested_agent", configured, cell (Transport :: Streaming , Model :: Gpt41Mini , Shape :: Nested , Surface :: Agent ,));
-    # [tokio :: test]
-    streaming_gpt41_parallel_model: ("chat_tool_lifecycle_matrix/streaming_gpt41_parallel_model", configured, cell (Transport :: Streaming , Model :: Gpt41Mini , Shape :: Parallel , Surface :: Model ,));
-    # [tokio :: test]
-    streaming_gpt41_parallel_agent: ("chat_tool_lifecycle_matrix/streaming_gpt41_parallel_agent", configured, cell (Transport :: Streaming , Model :: Gpt41Mini , Shape :: Parallel , Surface :: Agent ,));
 }

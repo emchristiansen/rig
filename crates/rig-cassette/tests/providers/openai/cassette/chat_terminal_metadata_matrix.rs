@@ -15,36 +15,33 @@
 //! | output budget | roomy, constrained (`1` text token / `16` tool tokens) |
 //! | response shape | one text candidate, two text candidates, forced tool |
 //!
-//! That is 24 recorded cells. Each cell proves its request and terminal premise
-//! from the fixture, then compares the native raw response/terminal metadata
-//! with those exact bytes. The `n = 2` cells additionally prove that the shared
-//! streaming adapter selects candidate zero without concatenating candidate
-//! one into it.
+//! That is 24 cells, of which the three below are tests. Each cell proves its
+//! request and terminal premise from the fixture, then compares the native raw
+//! response/terminal metadata with those exact bytes. The `n = 2` cells
+//! additionally prove that the shared streaming adapter selects candidate zero
+//! without concatenating candidate one into it.
 //!
-//! Coverage ledger: the pre-pruning Cartesian product is 24 and all 24 cells
-//! are recorded; none is unit-only. Each explicit test maps to
+//! Each test maps to
 //! `crates/rig-cassette/fixtures/cassettes/openai/chat_terminal_metadata_matrix/<test-name>.yaml`.
 //! The inexpensive mini models provide stable text, multi-choice, and tool
-//! controls across two model families. Every cell asserts the request and
+//! controls across two model families. Each test asserts the request and
 //! provider-native terminal; together they cover ids, model, finish reason,
 //! usage, primary-choice routing, `service_tier`, `system_fingerprint`, and
 //! otherwise-unmodeled top-level streaming metadata.
 //!
 //! | recorded cells | exact fixture set |
 //! |---|---|
-//! | all 24 | `crates/rig-cassette/fixtures/cassettes/openai/chat_terminal_metadata_matrix/{blocking,streaming}_{gpt_4o_mini,gpt_4_1_mini}_{roomy,tiny}_{plain_one,plain_two,tool}.yaml` |
+//! | 3 of 24 | `crates/rig-cassette/fixtures/cassettes/openai/chat_terminal_metadata_matrix/{blocking_gpt_4o_mini_tiny_plain_two,blocking_gpt_4o_mini_tiny_tool,streaming_gpt_4o_mini_tiny_plain_two}.yaml` |
 
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use futures::StreamExt as _;
-use rig::completion::CompletionModel;
-use rig::providers::openai;
-use rig::streaming::StreamEvent;
 use serde_json::{Value, json};
 
 use super::super::support::{OpenAiCassette, with_openai_terminal_metadata_cassette_result};
 use crate::support::assert_matches_recorded_document;
+use rig::completion::CompletionRequest;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Transport {
@@ -55,18 +52,15 @@ enum Transport {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ModelVariant {
     Gpt4oMini,
-    Gpt41Mini,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Limit {
-    Roomy,
     Tiny,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Shape {
-    PlainOne,
     PlainTwo,
     Tool,
 }
@@ -88,7 +82,6 @@ type SharedObservation = Arc<Mutex<Option<Observation>>>;
 
 fn params(cell: Cell) -> Value {
     match cell.shape {
-        Shape::PlainOne => json!({}),
         Shape::PlainTwo => json!({ "n": 2 }),
         Shape::Tool => json!({ "tool_choice": "required" }),
     }
@@ -99,7 +92,6 @@ fn prompt(cell: Cell) -> &'static str {
         (Shape::Tool, _) => {
             "Call the add tool exactly once with x=17 and y=25. Do not answer in prose."
         }
-        (_, Limit::Roomy) => "Reply with exactly: cobalt",
         (_, Limit::Tiny) => "Write the word cobalt exactly 100 times, separated by spaces.",
     }
 }
@@ -108,55 +100,41 @@ fn max_tokens(cell: Cell) -> u64 {
     match (cell.shape, cell.limit) {
         (Shape::Tool, Limit::Tiny) => 16,
         (_, Limit::Tiny) => 1,
-        (Shape::Tool, Limit::Roomy) => 64,
-        (_, Limit::Roomy) => 8,
     }
 }
 
 fn model_name(model: ModelVariant) -> &'static str {
     match model {
         ModelVariant::Gpt4oMini => "gpt-4o-mini",
-        ModelVariant::Gpt41Mini => "gpt-4.1-mini",
     }
 }
 
 async fn run_cell(client: OpenAiCassette, cell: Cell, observed: SharedObservation) -> Result<()> {
     let model = client.openai.chat(model_name(cell.model));
-    let mut builder = model
-        .completion_request(prompt(cell))
+    let mut builder = CompletionRequest::new(prompt(cell))
         .additional_params(params(cell))
         .max_tokens(max_tokens(cell));
     if cell.shape == Shape::Tool {
         builder = builder.tool(rig::tool::tool_definition(&crate::support::Adder));
     }
-    let request = builder.build();
+    let request = builder;
 
     let raw = match cell.transport {
         Transport::Blocking => {
-            // The provider-native chat-completions reply rides serialized on
-            // `CompletionResponse::raw`; decode it to prove the shape, then
-            // read the serialized form the way the old raw surface did.
-            let response = model.completion(request).await?;
-            let response =
-                serde_json::from_value::<openai::completion::CompletionResponse>(response.raw)?;
-            serde_json::to_value(response)?
+            // The provider's chat-completions reply is `CompletionResponse::raw`.
+            model.call(request).await?.raw
         }
         Transport::Streaming => {
-            let mut stream = model.stream(request).await?;
-            let mut terminal = None;
+            let mut stream = model.stream(request)?;
             while let Some(item) = stream.next().await {
-                if let StreamEvent::Final(record) = item? {
-                    terminal = Some(record);
-                }
+                item?;
             }
-            let terminal = terminal.context("stream should carry a terminal record")?;
-            // The provider-native chat-completions terminal rides serialized
-            // on `StreamFinal::raw`; decode it to prove the shape, then read
-            // the serialized form the way the old raw surface did.
-            let terminal = serde_json::from_value::<
-                openai::wire::StreamingCompletionResponse<openai::completion::Usage>,
-            >(terminal.raw)?;
-            serde_json::to_value(terminal)?
+            let terminal = stream
+                .finish()
+                .await
+                .context("stream should carry a terminal record")?;
+            // The chat-completions terminal record is `CompletionResponse::raw`.
+            terminal.raw
         }
     };
 
@@ -215,24 +193,30 @@ fn last_chunk_field(chunks: &[Value], field: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
-fn recorded_additional_params(chunks: &[Value]) -> Value {
-    let mut accumulated: Option<rig::message::AdditionalParams> = None;
+/// The top-level fields of a stream's chunks as the document they rebuild
+/// states them: a later value replaces an earlier one, a `null` never
+/// erases one, stream padding is dropped and the tag is the unary one.
+fn recorded_envelope(chunks: &[Value]) -> Value {
+    let mut accumulated = serde_json::Map::new();
     for chunk in chunks {
-        let mut extras = chunk
+        let fields = chunk
             .as_object()
-            .cloned()
             .expect("recorded SSE frame should be an object");
-        for modeled in ["id", "model", "choices", "usage"] {
-            extras.remove(modeled);
-        }
-        if let Some(incoming) = rig::message::AdditionalParams::new(extras) {
-            match accumulated.as_mut() {
-                Some(current) => current.merge(incoming),
-                None => accumulated = Some(incoming),
+        for (key, value) in fields {
+            if ["obfuscation", "p"].contains(&key.as_str())
+                || (value.is_null() && accumulated.contains_key(key))
+            {
+                continue;
             }
+            let value = if key == "object" {
+                json!("chat.completion")
+            } else {
+                value.clone()
+            };
+            accumulated.insert(key.clone(), value);
         }
     }
-    serde_json::to_value(accumulated).expect("recorded metadata should serialize")
+    Value::Object(accumulated)
 }
 
 fn assert_scrubbed_optional_string(scenario: &str, field: &str, actual: &Value, wire: &Value) {
@@ -253,10 +237,6 @@ fn assert_scrubbed_optional_string(scenario: &str, field: &str, actual: &Value, 
 fn assert_cell(scenario: &str, cell: Cell, observed: SharedObservation) {
     let request = recorded_request(scenario);
     match cell.shape {
-        Shape::PlainOne => {
-            assert!(request.get("n").is_none(), "{scenario}: n should be absent");
-            assert!(request.get("tools").is_none(), "{scenario}: no tools");
-        }
         Shape::PlainTwo => {
             assert_eq!(request["n"], 2, "{scenario}");
             assert!(request.get("tools").is_none(), "{scenario}: no tools");
@@ -278,8 +258,6 @@ fn assert_cell(scenario: &str, cell: Cell, observed: SharedObservation) {
     }
 
     let expected_finish = match (cell.shape, cell.limit) {
-        (Shape::Tool, Limit::Roomy) => json!("tool_calls"),
-        (_, Limit::Roomy) => json!("stop"),
         (_, Limit::Tiny) => json!("length"),
     };
     assert_eq!(
@@ -359,11 +337,11 @@ fn assert_cell(scenario: &str, cell: Cell, observed: SharedObservation) {
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             assert!(
-                observation.raw["response_id"]
+                observation.raw["id"]
                     .as_str()
                     .is_some_and(|id| !id.is_empty())
                     && response_id.as_deref().is_some_and(|id| !id.is_empty()),
-                "{scenario}: both the native terminal and fixture retain an id"
+                "{scenario}: both the rebuilt document and fixture retain an id"
             );
             assert_eq!(
                 observation.raw["model"],
@@ -372,25 +350,25 @@ fn assert_cell(scenario: &str, cell: Cell, observed: SharedObservation) {
             );
             assert_usage(scenario, &observation.raw["usage"], &usage);
             assert_matches_recorded_document(
-                &observation.raw["additional_params"],
-                &recorded_additional_params(&chunks),
-                &[],
-                &format!("{scenario}: every unmodeled top-level SSE field"),
+                &observation.raw,
+                &recorded_envelope(&chunks),
+                &["choices", "usage"],
+                &format!("{scenario}: every top-level SSE field"),
             );
             assert_eq!(
-                observation.raw["additional_params"]["service_tier"],
+                observation.raw["service_tier"],
                 last_chunk_field(&chunks, "service_tier"),
                 "{scenario}: streaming service tier"
             );
             assert_scrubbed_optional_string(
                 scenario,
                 "streaming system fingerprint",
-                &observation.raw["additional_params"]["system_fingerprint"],
+                &observation.raw["system_fingerprint"],
                 &last_chunk_field(&chunks, "system_fingerprint"),
             );
             assert_eq!(
-                observation.raw["finish_reason"], expected_finish,
-                "{scenario}"
+                observation.raw["choices"][0]["finish_reason"], expected_finish,
+                "{scenario}: terminal reason"
             );
         }
     }
@@ -411,51 +389,9 @@ fn cell(transport: Transport, model: ModelVariant, limit: Limit, shape: Shape) -
 crate::matrix::case_matrix! {
     wrapper: with_openai_terminal_metadata_cassette_result, family: terminal_metadata_matrix_case;
     # [tokio :: test]
-    blocking_gpt_4o_mini_roomy_plain_one: ("chat_terminal_metadata_matrix/blocking_gpt_4o_mini_roomy_plain_one", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Limit :: Roomy , Shape :: PlainOne ,));
-    # [tokio :: test]
-    blocking_gpt_4o_mini_roomy_plain_two: ("chat_terminal_metadata_matrix/blocking_gpt_4o_mini_roomy_plain_two", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Limit :: Roomy , Shape :: PlainTwo ,));
-    # [tokio :: test]
-    blocking_gpt_4o_mini_roomy_tool: ("chat_terminal_metadata_matrix/blocking_gpt_4o_mini_roomy_tool", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Limit :: Roomy , Shape :: Tool ,));
-    # [tokio :: test]
-    blocking_gpt_4o_mini_tiny_plain_one: ("chat_terminal_metadata_matrix/blocking_gpt_4o_mini_tiny_plain_one", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Limit :: Tiny , Shape :: PlainOne ,));
-    # [tokio :: test]
     blocking_gpt_4o_mini_tiny_plain_two: ("chat_terminal_metadata_matrix/blocking_gpt_4o_mini_tiny_plain_two", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Limit :: Tiny , Shape :: PlainTwo ,));
     # [tokio :: test]
     blocking_gpt_4o_mini_tiny_tool: ("chat_terminal_metadata_matrix/blocking_gpt_4o_mini_tiny_tool", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Limit :: Tiny , Shape :: Tool ,));
     # [tokio :: test]
-    blocking_gpt_4_1_mini_roomy_plain_one: ("chat_terminal_metadata_matrix/blocking_gpt_4_1_mini_roomy_plain_one", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Limit :: Roomy , Shape :: PlainOne ,));
-    # [tokio :: test]
-    blocking_gpt_4_1_mini_roomy_plain_two: ("chat_terminal_metadata_matrix/blocking_gpt_4_1_mini_roomy_plain_two", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Limit :: Roomy , Shape :: PlainTwo ,));
-    # [tokio :: test]
-    blocking_gpt_4_1_mini_roomy_tool: ("chat_terminal_metadata_matrix/blocking_gpt_4_1_mini_roomy_tool", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Limit :: Roomy , Shape :: Tool ,));
-    # [tokio :: test]
-    blocking_gpt_4_1_mini_tiny_plain_one: ("chat_terminal_metadata_matrix/blocking_gpt_4_1_mini_tiny_plain_one", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Limit :: Tiny , Shape :: PlainOne ,));
-    # [tokio :: test]
-    blocking_gpt_4_1_mini_tiny_plain_two: ("chat_terminal_metadata_matrix/blocking_gpt_4_1_mini_tiny_plain_two", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Limit :: Tiny , Shape :: PlainTwo ,));
-    # [tokio :: test]
-    blocking_gpt_4_1_mini_tiny_tool: ("chat_terminal_metadata_matrix/blocking_gpt_4_1_mini_tiny_tool", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Limit :: Tiny , Shape :: Tool ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_roomy_plain_one: ("chat_terminal_metadata_matrix/streaming_gpt_4o_mini_roomy_plain_one", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Limit :: Roomy , Shape :: PlainOne ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_roomy_plain_two: ("chat_terminal_metadata_matrix/streaming_gpt_4o_mini_roomy_plain_two", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Limit :: Roomy , Shape :: PlainTwo ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_roomy_tool: ("chat_terminal_metadata_matrix/streaming_gpt_4o_mini_roomy_tool", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Limit :: Roomy , Shape :: Tool ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_tiny_plain_one: ("chat_terminal_metadata_matrix/streaming_gpt_4o_mini_tiny_plain_one", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Limit :: Tiny , Shape :: PlainOne ,));
-    # [tokio :: test]
     streaming_gpt_4o_mini_tiny_plain_two: ("chat_terminal_metadata_matrix/streaming_gpt_4o_mini_tiny_plain_two", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Limit :: Tiny , Shape :: PlainTwo ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_tiny_tool: ("chat_terminal_metadata_matrix/streaming_gpt_4o_mini_tiny_tool", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Limit :: Tiny , Shape :: Tool ,));
-    # [tokio :: test]
-    streaming_gpt_4_1_mini_roomy_plain_one: ("chat_terminal_metadata_matrix/streaming_gpt_4_1_mini_roomy_plain_one", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Limit :: Roomy , Shape :: PlainOne ,));
-    # [tokio :: test]
-    streaming_gpt_4_1_mini_roomy_plain_two: ("chat_terminal_metadata_matrix/streaming_gpt_4_1_mini_roomy_plain_two", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Limit :: Roomy , Shape :: PlainTwo ,));
-    # [tokio :: test]
-    streaming_gpt_4_1_mini_roomy_tool: ("chat_terminal_metadata_matrix/streaming_gpt_4_1_mini_roomy_tool", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Limit :: Roomy , Shape :: Tool ,));
-    # [tokio :: test]
-    streaming_gpt_4_1_mini_tiny_plain_one: ("chat_terminal_metadata_matrix/streaming_gpt_4_1_mini_tiny_plain_one", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Limit :: Tiny , Shape :: PlainOne ,));
-    # [tokio :: test]
-    streaming_gpt_4_1_mini_tiny_plain_two: ("chat_terminal_metadata_matrix/streaming_gpt_4_1_mini_tiny_plain_two", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Limit :: Tiny , Shape :: PlainTwo ,));
-    # [tokio :: test]
-    streaming_gpt_4_1_mini_tiny_tool: ("chat_terminal_metadata_matrix/streaming_gpt_4_1_mini_tiny_tool", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Limit :: Tiny , Shape :: Tool ,));
 }

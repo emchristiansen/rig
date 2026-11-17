@@ -1,34 +1,11 @@
 //! Anthropic streaming smoke test.
 
-use rig::prelude::*;
 use rig::providers::anthropic;
 
 use super::super::support::{with_anthropic_cassette, with_anthropic_gateway_cassette};
 use crate::support::{
-    STREAMING_PREAMBLE, STREAMING_PROMPT, assert_nonempty_response,
-    collect_stream_final_response_and_provider_final,
+    STREAMING_PREAMBLE, STREAMING_PROMPT, collect_stream_final_response_and_provider_final,
 };
-
-#[tokio::test]
-async fn streaming_smoke() {
-    with_anthropic_cassette("streaming/streaming_smoke", |client| async move {
-        let agent = client
-            .agent(anthropic::completion::CLAUDE_SONNET_4_6)
-            .preamble(STREAMING_PREAMBLE)
-            .build();
-
-        let mut stream = agent.prompt(STREAMING_PROMPT).stream();
-        let (response, provider_final): (_, rig::streaming::StreamFinal) =
-            collect_stream_final_response_and_provider_final(&mut stream)
-                .await
-                .expect("streaming prompt should succeed");
-
-        assert_nonempty_response(&response);
-        assert_eq!(provider_final.provider, "anthropic");
-        assert!(provider_final.usage.total_tokens.is_some_and(|n| n > 0));
-    })
-    .await;
-}
 
 /// Regression: the streamed terminal must carry the metadata the provider puts
 /// on `message_delta`.
@@ -63,19 +40,17 @@ async fn gateway_reports_input_tokens_on_message_delta() {
     with_anthropic_gateway_cassette(
         "streaming/gateway_message_delta_metadata",
         |client| async move {
-            let agent = client
-                .agent("anthropic/claude-haiku-4.5")
+            let agent = rig::AgentBuilder::new(client.completion("anthropic/claude-haiku-4.5"))
                 .preamble(STREAMING_PREAMBLE)
                 .max_tokens(16)
                 .build();
 
             let mut stream = agent.prompt(STREAMING_PROMPT).stream();
-            let (_response, provider_final): (_, rig::streaming::StreamFinal) =
+            let (_response, provider_final) =
                 collect_stream_final_response_and_provider_final(&mut stream)
                     .await
                     .expect("streaming prompt should succeed");
 
-            assert_eq!(provider_final.provider, "anthropic");
             assert_eq!(
                 provider_final.finish_reason,
                 Some(rig::completion::FinishReason::Length),
@@ -124,14 +99,14 @@ async fn anthropic_proper_agrees_on_input_tokens_across_both_frames() {
     with_anthropic_cassette(
         "streaming/input_tokens_agree_across_frames",
         |client| async move {
-            let agent = client
-                .agent(anthropic::completion::CLAUDE_SONNET_4_6)
-                .preamble(STREAMING_PREAMBLE)
-                .max_tokens(64)
-                .build();
+            let agent =
+                rig::AgentBuilder::new(client.completion(anthropic::completion::CLAUDE_SONNET_4_6))
+                    .preamble(STREAMING_PREAMBLE)
+                    .max_tokens(64)
+                    .build();
 
             let mut stream = agent.prompt(STREAMING_PROMPT).stream();
-            let (_response, provider_final): (_, rig::streaming::StreamFinal) =
+            let (_response, provider_final) =
                 collect_stream_final_response_and_provider_final(&mut stream)
                     .await
                     .expect("streaming prompt should succeed");

@@ -13,13 +13,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use rig_agent::agent::{AgentBuilder, MultiTurnStreamItem};
-use rig_agent::completion::CompletionModel;
 use rig_core::message::{
-    AssistantContent, ImageMediaType, Message, ReasoningContent, ToolResultContent, UserContent,
+    AssistantContent, ImageMediaType, Message, Native, Reasoning, ToolResultContent, UserContent,
 };
 use rig_core::tool::{Tool, ToolOutput};
 
-use super::{Dialect, Token, continues, lost_tokens, response_tokens, unpaired_tool_calls};
+use super::{
+    Dialect, Options, Token, continues, lost_tokens, response_tokens, unpaired_tool_calls,
+};
 
 /// The alpha record's code.
 pub const ALPHA_CODE: &str = "alpha-code-7431";
@@ -126,6 +127,8 @@ pub struct Cell {
     pub model: &'static str,
     /// Provider-specific request parameters, typically the reasoning switch.
     pub params: fn() -> Option<Value>,
+    /// Typed request options, beside `params`.
+    pub options: fn() -> Options,
     /// Output budget per model call. Thinking models spend it on reasoning
     /// first, so a wire whose thinking cannot be capped needs more.
     pub max_tokens: u64,
@@ -302,10 +305,10 @@ fn prompts(with_image: bool) -> [String; 3] {
 }
 
 /// Drive the three-prompt run and return what happened.
-pub async fn run<M>(model: M, cell: Cell) -> Observation
-where
-    M: CompletionModel + 'static,
-{
+pub async fn run(
+    model: impl Into<rig_core::DynModel<rig_core::operation::Completion>>,
+    cell: Cell,
+) -> Observation {
     let journal = Arc::new(Mutex::new(Journal::default()));
     let mut builder = AgentBuilder::new(model)
         .preamble(PREAMBLE)
@@ -314,7 +317,8 @@ where
     if let Some(params) = (cell.params)() {
         builder = builder.additional_params(params);
     }
-    let builder = builder
+    let builder = (cell.options)()
+        .configure(builder)
         .tool(LookupTool(Arc::clone(&journal)))
         .tool(VerifyTool(Arc::clone(&journal)));
     let agent = if cell.expect.image_tool_result {
@@ -332,7 +336,7 @@ where
                     .chat(prompt.as_str(), &mut history)
                     .await
                     .unwrap_or_else(|error| panic!("[{}] chat failed: {error}", cell.provider));
-                response.output
+                response.output()
             }
             Transport::Streaming => {
                 let mut stream = agent
@@ -347,7 +351,7 @@ where
                     });
                     if let MultiTurnStreamItem::FinalResponse(response) = item {
                         text = Some(response.output().to_owned());
-                        history.extend(response.messages.unwrap_or_default());
+                        history.extend(response.messages);
                     }
                 }
                 text.unwrap_or_else(|| panic!("[{}] stream ended without a final", cell.provider))
@@ -362,19 +366,35 @@ where
     }
 }
 
-fn reasoning_blocks(history: &[Message]) -> Vec<&ReasoningContent> {
+/// Whether a provider item carries a non-empty `key`.
+pub(crate) fn item_has(native: Option<&Native>, key: &str) -> bool {
+    let present = |item: &Value| {
+        item.get(key)
+            .is_some_and(|value| value.as_str().is_none_or(|value| !value.is_empty()))
+    };
+    // A Chat Completions reasoning block holds its details in an array.
+    native.is_some_and(|native| {
+        present(&native.item)
+            || native.item["reasoning_details"]
+                .as_array()
+                .is_some_and(|details| details.iter().any(present))
+    })
+}
+
+fn reasoning_blocks(history: &[Message]) -> Vec<&Reasoning> {
     history
         .iter()
         .filter_map(|message| match message {
-            Message::Assistant { content, .. } => Some(content),
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
+                Some(content)
+            }
             _ => None,
         })
         .flatten()
         .filter_map(|content| match content {
-            AssistantContent::Reasoning(reasoning) => Some(&reasoning.content),
+            AssistantContent::Reasoning(reasoning) => Some(reasoning),
             _ => None,
         })
-        .flatten()
         .collect()
 }
 
@@ -384,15 +404,15 @@ fn tool_call_signatures(history: &[Message]) -> usize {
     history
         .iter()
         .filter_map(|message| match message {
-            Message::Assistant { content, .. } => Some(content),
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
+                Some(content)
+            }
             _ => None,
         })
         .flatten()
         .filter(|content| match content {
-            AssistantContent::ToolCall(call) => call.signature.is_some(),
-            AssistantContent::Text(text) => {
-                rig_core::providers::gemini::text_thought_signature(text).is_some()
-            }
+            AssistantContent::ToolCall(call) => item_has(call.native.as_ref(), "thoughtSignature"),
+            AssistantContent::Text(text) => item_has(text.native.as_ref(), "thoughtSignature"),
             _ => false,
         })
         .count()
@@ -447,7 +467,7 @@ pub fn assert_run(cell: Cell, observation: &Observation) {
     let mut prompts = 0usize;
     for message in &observation.history {
         match message {
-            Message::Assistant { content, .. } => {
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
                 assert!(
                     open.is_empty(),
                     "[{provider}] assistant turn follows unanswered calls {open:?}"
@@ -489,17 +509,12 @@ pub fn assert_run(cell: Cell, observation: &Observation) {
 
     let blocks = reasoning_blocks(&observation.history);
     let signed = blocks.iter().any(|block| {
-        matches!(
-            block,
-            ReasoningContent::Text {
-                signature: Some(_),
-                ..
-            }
-        )
+        item_has(block.native.as_ref(), "signature")
+            || item_has(block.native.as_ref(), "thoughtSignature")
     }) || tool_call_signatures(&observation.history) > 0;
     let encrypted = blocks
         .iter()
-        .any(|block| matches!(block, ReasoningContent::Encrypted(_)));
+        .any(|block| item_has(block.native.as_ref(), "encrypted_content"));
     let expectations = [
         ("reasoning", cell.expect.reasoning, !blocks.is_empty()),
         ("signed", cell.expect.signed, signed),

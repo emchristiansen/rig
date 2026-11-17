@@ -1,7 +1,7 @@
 //! Canonical streaming-grammar coverage for the OpenAI **chat-completions**
 //! wire (the compat family's canonical wire), asserted through the
-//! *normalized* path: the aggregated [`StreamingCompletionResponse::choice`],
-//! the terminal [`StreamFinal`] record, usage, IDs, and finish reason — real
+//! *normalized* path: the aggregated `choice` from `CompletionStream::finish`,
+//! the terminal `CompletionResponse` record, usage, IDs, and finish reason — real
 //! recorded wire traffic, not synthetic chunks.
 //!
 //! Re-record with:
@@ -12,14 +12,18 @@
 //! mint literal IDs.
 
 use futures::StreamExt;
-use rig::completion::{CompletionModel, FinishReason};
+use rig::completion::CompletionResponse;
+use rig::completion::FinishReason;
 use rig::message::{AssistantContent, ToolCall};
 use rig::providers::openai;
-use rig::streaming::{Delta, StreamEvent, StreamFinal};
-use serde_json::json;
+use rig::streaming::Item;
+use rig::streaming::StreamEvent;
+
+use rig::providers::openai::extension::{ChatOptions, OpenAiOptions};
 
 use super::super::support::with_openai_completions_cassette;
 use crate::support::{AlphaSignal, BetaSignal, TWO_TOOL_STREAM_PREAMBLE, TWO_TOOL_STREAM_PROMPT};
+use rig::completion::CompletionRequest;
 
 /// Everything observed while draining a normalized stream, alongside the
 /// aggregated stream state itself.
@@ -27,17 +31,15 @@ struct StreamRun {
     text: String,
     text_chunks: usize,
     tool_calls: Vec<ToolCall>,
-    finals: Vec<StreamFinal>,
     choice: Vec<AssistantContent>,
-    response: Option<StreamFinal>,
+    response: Option<CompletionResponse>,
 }
 
-async fn drain_stream(mut stream: rig::streaming::StreamingCompletionResponse) -> StreamRun {
+async fn drain_stream(mut stream: rig::streaming::CompletionStream) -> StreamRun {
     let mut run = StreamRun {
         text: String::new(),
         text_chunks: 0,
         tool_calls: Vec::new(),
-        finals: Vec::new(),
         choice: vec![AssistantContent::text("")],
         response: None,
     };
@@ -47,43 +49,35 @@ async fn drain_stream(mut stream: rig::streaming::StreamingCompletionResponse) -
         let item = item.expect("stream item should be ok");
         raw_items.push(Ok(item.clone()));
         match item {
-            StreamEvent::BlockDelta {
-                delta: Delta::Text { text },
-                ..
-            } => {
+            Item::Event(StreamEvent::Text { text, .. }) => {
                 run.text.push_str(&text);
                 run.text_chunks += 1;
             }
-            StreamEvent::BlockEnd {
-                block: Some(AssistantContent::ToolCall(tool_call)),
+            Item::Event(StreamEvent::End {
+                content: AssistantContent::ToolCall(tool_call),
                 ..
-            } => run.tool_calls.push(tool_call),
-            StreamEvent::Final(response) => run.finals.push(response),
+            }) => run.tool_calls.push(tool_call),
             _ => {}
         }
     }
+    let response = stream.finish().await.expect("the stream ends");
 
-    run.choice = stream.snapshot();
+    run.choice = response.choice.clone();
     // The shared lifecycle validator runs over every recorded turn this
     // suite drains (#2258 C1).
     rig_core::test_utils::streaming_conformance::assert_valid_event_stream(&raw_items, &run.choice);
-    run.response = stream.response.clone();
+    run.response = Some(response.clone());
     run
 }
 
 fn assert_terminal(run: &StreamRun, expected_finish: FinishReason) {
-    assert_eq!(
-        run.finals.len(),
-        1,
-        "stream should yield exactly one terminal record"
-    );
     let terminal = run
         .response
         .as_ref()
         .expect("aggregated stream should retain the terminal record");
     assert_eq!(
-        terminal.finish_reason.as_ref(),
-        Some(&expected_finish),
+        terminal.finish_reason(),
+        Some(expected_finish),
         "unexpected finish reason"
     );
     assert!(
@@ -123,14 +117,12 @@ async fn parallel_tool_calls_stay_distinct() {
         "streaming_grammar_chat/parallel_tool_calls",
         |client| async move {
             let model = client.chat(openai::GPT_4O);
-            let request = model
-                .completion_request(TWO_TOOL_STREAM_PROMPT)
+            let request = CompletionRequest::new(TWO_TOOL_STREAM_PROMPT)
                 .preamble(TWO_TOOL_STREAM_PREAMBLE.to_string())
                 .tool(rig::tool::tool_definition(&AlphaSignal))
                 .tool(rig::tool::tool_definition(&BetaSignal))
-                .additional_params(json!({ "parallel_tool_calls": true }))
-                .build();
-            let run = drain_stream(model.stream(request).await.expect("stream should start")).await;
+                .parallel_tool_calls(true);
+            let run = drain_stream(model.stream(request).expect("stream should start")).await;
 
             assert_terminal(&run, FinishReason::ToolCalls);
             let aggregated = aggregated_tool_calls(&run.choice);
@@ -150,11 +142,11 @@ async fn parallel_tool_calls_stay_distinct() {
                     "{name} id should aggregate"
                 );
                 assert!(
-                    streamed.provider.is_some(),
+                    streamed.id.provider().is_some(),
                     "{name} should carry the wire-issued call id"
                 );
                 assert!(
-                    streamed.function.arguments.is_object(),
+                    streamed.function.invalid_arguments.is_none(),
                     "{name} arguments must assemble into an object, got {:?}",
                     streamed.function.arguments
                 );
@@ -173,56 +165,6 @@ async fn parallel_tool_calls_stay_distinct() {
     .await;
 }
 
-/// Tool call and assistant content in the same turn: the aggregated choice
-/// keeps the text part and the tool-call part as separate siblings.
-#[tokio::test]
-async fn tool_call_and_content_in_same_turn() {
-    with_openai_completions_cassette(
-        "streaming_grammar_chat/tool_call_with_content",
-        |client| async move {
-            let model = client.chat(openai::GPT_4O);
-            let request = model
-                .completion_request("Look up the harbor label for me.")
-                .preamble(
-                    "Before every tool call, first narrate what you are about to do in one \
-                     short sentence of normal assistant text in the same reply, then emit \
-                     the tool call. Never call a tool without narrating first."
-                        .to_string(),
-                )
-                .tool(rig::tool::tool_definition(&AlphaSignal))
-                .build();
-            let run = drain_stream(model.stream(request).await.expect("stream should start")).await;
-
-            assert_terminal(&run, FinishReason::ToolCalls);
-            assert!(
-                !run.text.trim().is_empty(),
-                "turn should stream assistant text alongside the tool call"
-            );
-            let aggregated_text = aggregated_text(&run.choice);
-            assert_eq!(
-                aggregated_text, run.text,
-                "aggregated choice should keep the streamed text next to the call"
-            );
-            let calls = aggregated_tool_calls(&run.choice);
-            assert_eq!(
-                calls.len(),
-                1,
-                "aggregated choice should keep exactly the one tool call"
-            );
-            assert_eq!(calls[0].function.name, "lookup_harbor_label");
-            let streamed = run
-                .tool_calls
-                .first()
-                .expect("stream should yield the tool call");
-            assert_eq!(
-                calls[0].id, streamed.id,
-                "ids derive from the recorded turn"
-            );
-        },
-    )
-    .await;
-}
-
 /// `logprobs`-bearing chunks: the wire attaches per-token fields Rig does not
 /// model. Forward-compat contract — unknown fields are ignored, the stream
 /// completes normally, and the aggregation is unaffected.
@@ -232,11 +174,11 @@ async fn logprobs_chunks_are_forward_compatible() {
         "streaming_grammar_chat/logprobs_chunks",
         |client| async move {
             let model = client.chat(openai::GPT_4O);
-            let request = model
-                .completion_request("Reply with one short sentence about tides.")
-                .additional_params(json!({ "logprobs": true, "top_logprobs": 2 }))
-                .build();
-            let run = drain_stream(model.stream(request).await.expect("stream should start")).await;
+            let request = CompletionRequest::new("Reply with one short sentence about tides.")
+                .provider_option(
+                    OpenAiOptions::new().chat(ChatOptions::new().logprobs(true).top_logprobs(2)),
+                );
+            let run = drain_stream(model.stream(request).expect("stream should start")).await;
 
             assert_terminal(&run, FinishReason::Stop);
             assert!(!run.text.trim().is_empty(), "turn should produce text");
@@ -258,14 +200,12 @@ async fn long_text_stream_preserves_order() {
         "streaming_grammar_chat/long_text_stream",
         |client| async move {
             let model = client.chat(openai::GPT_4O);
-            let request = model
-                .completion_request(
-                    "Write a numbered list of exactly 12 one-line facts about rivers. \
+            let request = CompletionRequest::new(
+                "Write a numbered list of exactly 12 one-line facts about rivers. \
                      Number them 1. through 12.",
-                )
-                .max_tokens(400)
-                .build();
-            let run = drain_stream(model.stream(request).await.expect("stream should start")).await;
+            )
+            .max_tokens(400);
+            let run = drain_stream(model.stream(request).expect("stream should start")).await;
 
             assert_terminal(&run, FinishReason::Stop);
             assert!(

@@ -1,777 +1,1681 @@
-//! Completion event output and response folding. [`AdapterOutput`] manages
-//! block boundaries for provider decoders, including typed transports.
+//! Generating an assistant turn. A completion decoder writes its reply one
+//! provider item at a time, keyed by the item's wire index: the item opens
+//! when its first event arrives and takes the next position in the reply,
+//! its fragments grow it, and closing it finalizes its block with the
+//! provider's item as the block's native. Nothing regroups: blocks keep the
+//! order their items opened in. The provider's end of the reply is a
+//! [`Finish`], which the fold needs to produce the response.
 //!
 //! ```
-//! use rig_core::operation::AdapterOutput;
+//! use rig_core::operation::Finish;
+//! use rig_core::completion::FinishReason;
 //!
-//! let mut output = AdapterOutput::self_closing();
-//! output.text("Hello");
-//! output.close_active_blocks();
-//! assert_eq!(output.len(), 3);
+//! let finish = Finish {
+//!     reason: Some(FinishReason::Stop),
+//!     ..Finish::default()
+//! };
+//! assert_eq!(finish.reason, Some(FinishReason::Stop));
 //! ```
 
-use crate::completion::{CompletionRequest, CompletionResponse};
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use crate::completion::{CompletionRequest, CompletionResponse, FinishReason, Usage};
 use crate::error::ProviderError;
-use crate::streaming::{
-    Absorbed, BlockAccumulator, BlockClose, BlockId, BlockKind, Delta, FoldStep, MintKind,
-    StreamEvent, StreamFinal, SyntheticIds, ToolCallEnd, UnknownPayload,
+use crate::message::citation;
+use crate::message::{
+    Api, AssistantContent, CallId, Image, LocalCallId, Opaque, Origin, Reasoning, Text, ToolCall,
+    ToolFunction, ToolName,
 };
+use crate::streaming::{Item, Part, PartKind, StreamEvent};
 use crate::telemetry::{GenAiOperation, SpanBuilder, SpanCombinator};
-use crate::wire::{Fold, Operation, Reply, Sink};
+use crate::wire::{
+    Assembled, Call, Descriptor, Emit, Fold, Mode, Operation, Out, Reply, Shared, WireCitation,
+};
 
 /// Generating an assistant turn, unary or streamed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Completion;
 
-/// Debug-mode sequence laws over what a decoder actually emitted.
-type Laws = crate::providers::internal::sequence_law::SequenceLaws;
-
 impl Operation for Completion {
     type Request = CompletionRequest;
     type Event = StreamEvent;
+    type End = Finish;
     type Response = CompletionResponse;
-    type Capabilities = crate::completion::ProviderCapabilities;
-    type Output = AdapterOutput;
-    type Fold = CompletionFold;
-    type Telemetry = GenAiOperation;
+    type Fold = ReplyFold;
+    type Emit = Assembled;
 
-    const NAME: &'static str = "completion";
-
-    fn is_terminal(event: &Self::Event) -> bool {
-        matches!(event, StreamEvent::Final(_))
-    }
-
-    fn telemetry(streaming: bool) -> Self::Telemetry {
-        if streaming {
-            GenAiOperation::ChatStreaming
-        } else {
-            GenAiOperation::Chat
-        }
-    }
-
-    /// Forwards unmodeled payloads without adding them to aggregated content.
-    fn unknown(payload: crate::streaming::UnknownPayload) -> Option<Self::Event> {
-        Some(StreamEvent::Unknown(payload))
-    }
-
-    /// Known-only reasoning another wire issued is omitted; opaque parts reach
-    /// the encoder for explicit refusal. See
-    /// [`crate::message::retain_replayable_reasoning`].
-    fn scope_to_wire(request: &mut Self::Request, issuers: &[&str]) {
-        crate::message::retain_replayable_reasoning(&mut request.chat_history, issuers);
-    }
-
-    fn request_model(request: &Self::Request) -> Option<&str> {
-        request.model.as_deref()
-    }
-
-    fn stamp_request_id(event: &mut Self::Event, request_id: &Option<String>) {
-        // The terminal's own id wins: it saw the reply that carried it.
-        if let StreamEvent::Final(terminal) = event
-            && terminal.provider_request_id.is_none()
-        {
-            terminal.provider_request_id = request_id.clone();
-        }
-    }
-
-    fn stamp_response_headers(
-        event: &mut Self::Event,
-        headers: &crate::completion::ProviderResponseHeaders,
-    ) {
-        // As with the request id, the terminal's own headers win.
-        if let StreamEvent::Final(terminal) = event
-            && terminal.provider_response_headers.is_empty()
-        {
-            terminal.provider_response_headers = headers.clone();
-        }
-    }
-
-    fn span(
-        provider: &str,
-        model: Option<&str>,
-        telemetry: Self::Telemetry,
-        request: &Self::Request,
-    ) -> tracing::Span {
-        // The request's override is the model actually sent (every wire
-        // honours it on encode), so it is the one the span names.
-        let model = request.model.as_deref().or(model).unwrap_or_default();
+    /// The call's span names the model the request overrides to, when it
+    /// names one: every wire honours the override on encode.
+    fn fold(request: &Self::Request, call: &mut Call<'_>) -> Self::Fold {
+        let telemetry = call
+            .wire
+            .telemetry
+            .map_or(GenAiOperation::Chat, |telemetry| telemetry(call.mode));
         debug_assert!(telemetry.is_completion());
-        SpanBuilder::new(provider, model, telemetry)
+        // A wire that picks its API per request records the one it used.
+        let replay = call
+            .wire
+            .replay
+            .map(|target| target.route(request).unwrap_or(target));
+        let model = request
+            .model
+            .as_deref()
+            .or(call.wire.model)
+            .or_else(|| replay.map(|target| target.model()))
+            .unwrap_or_default();
+        let span = SpanBuilder::new(call.wire.name, model, telemetry)
+            .streaming(matches!(call.mode, Mode::Streaming))
             .system_instructions(
                 request.system_instructions(),
                 request.record_telemetry_content,
             )
-            .build()
-    }
-
-    // Both prefer the response identity, falling back to the message identity.
-    fn record(span: &tracing::Span, response: &Self::Response) {
-        span.record_response(
-            response
-                .response_id
-                .as_deref()
-                .or(response.message_id.as_deref()),
-            response.model.as_deref(),
-            &response.usage,
+            .build();
+        call.instrument(span.clone());
+        let api = replay.map_or_else(
+            || Api::from(call.wire.name.to_owned()),
+            |target| target.api(),
         );
+        let mut origin = Origin::new(api, call.wire.name, model);
+        // Only a wire that binds items to the context needs it recorded.
+        if replay.is_some_and(|target| target.binds_context(model)) {
+            origin.context =
+                replay.map(|target| crate::completion::history::context_of(request, target, model));
+        }
+        ReplyFold {
+            span,
+            facts: call.wire.facts.cloned().unwrap_or_default(),
+            wire: replay.is_some_and(|target| target.states_finish_reason()),
+            call_id_slot: replay.and_then(|target| target.call_id_slot()),
+            catalog_priced: replay.map(|target| target.catalog_priced()),
+            blob_slots: replay.map_or(&[], |target| target.blob_slots()),
+            accept_unknown_finish: request.accept_unknown_finish_reasons,
+            ..ReplyFold::new(origin)
+        }
     }
 
-    fn record_event(span: &tracing::Span, event: &Self::Event) {
-        if let StreamEvent::Final(terminal) = event {
-            span.record_response(
-                terminal
-                    .response_id
-                    .as_deref()
-                    .or(terminal.message_id.as_deref()),
-                terminal.model.as_deref(),
-                &terminal.usage,
+    /// The reply's normalized usage.
+    fn observed_usage(finish: &Finish) -> Option<&crate::completion::Usage> {
+        Some(&finish.usage)
+    }
+
+    /// Resolve the model the request addresses once, as the request's
+    /// `model`: the one it names, else the wire's. The history is checked
+    /// with [`CompletionRequest::validate_message_content`], then
+    /// [`adapt`](crate::completion::adapt)ed for that model on the wire's
+    /// replay target and checked again. Encoders, the fold and replay all
+    /// read the one resolved model. Each option the routed target refuses
+    /// is reported first, through
+    /// [`options::check`](crate::completion::options::check).
+    fn prepare(
+        mut request: Self::Request,
+        wire: &Descriptor<'_>,
+    ) -> Result<Self::Request, ProviderError> {
+        let Some(target) = wire.replay else {
+            return Err(ProviderError::request(format!(
+                "completion wire `{}` names no replay target",
+                wire.name
+            )));
+        };
+        // The caller's history is checked as written, so a rejection names
+        // its own messages; adapting never empties a message it keeps.
+        request.validate_message_content()?;
+        // A wire that addresses no model (an interaction read back) leaves
+        // it to the reply, which names the model the turn is from.
+        request.model = request
+            .model
+            .take()
+            .filter(|model| !model.is_empty())
+            .or_else(|| Some(target.model().to_owned()).filter(|model| !model.is_empty()));
+        let target = target.route(&request).unwrap_or(target);
+        // Every option the routed wire cannot honour is reported here, before
+        // any wire encodes, whatever its encoder does.
+        crate::completion::options::check(target, &mut request)?;
+        // Message cache points name the history as written; they are moved
+        // with it once it is adapted.
+        let written = request.cache_points.iter().any(|point| {
+            matches!(
+                point,
+                crate::completion::CachePoint::Messages(_)
+                    | crate::completion::CachePoint::Within { .. }
+            )
+        });
+        let written = written.then(|| {
+            let documents = (!target.takes_documents())
+                .then(|| request.normalized_documents())
+                .flatten();
+            (request.chat_history.clone(), documents)
+        });
+        let stored = target.continues_stored(&request);
+        let model = request.model.as_deref().unwrap_or(target.model());
+        // Only a target that binds items to the context reads it.
+        let binds = target.binds_context(model) && !target.drops_unbound_items(&request);
+        let shape = crate::completion::history::Request {
+            model: request.model.as_deref(),
+            stored,
+            foreign_reasoning: request.foreign_reasoning,
+            // A conversation the provider stores holds its own tools, so a
+            // continuation that declares none still calls them.
+            tools: stored || target.declares_tools(&request),
+            context: binds.then(|| crate::completion::history::context_of(&request, target, model)),
+        };
+        // The history moves into the adapter. Documents join it first, so
+        // the adapter's rules apply to them, unless the encoder sends them
+        // itself.
+        let mut history = std::mem::take(&mut request.chat_history);
+        if !target.takes_documents() {
+            if let Some(documents) = request.normalized_documents() {
+                crate::completion::request::insert_after_leading_system(&mut history, documents);
+            }
+            request.documents.clear();
+        }
+        // What the model's last request left; another request waits for it.
+        let mut kept = wire.prepared.and_then(|prepared| prepared.0.lock().ok());
+        let mut fresh = Default::default();
+        let memo = kept.as_deref_mut().unwrap_or(&mut fresh);
+        let adapted = crate::completion::history::adapt_for(history, target, &shape, memo);
+        drop(kept);
+        if let Some((written, documents)) = written {
+            request.cache_points = crate::completion::history::cache_points(
+                &request.cache_points,
+                &written,
+                documents.as_ref(),
+                &adapted,
+                target,
+                &shape,
             );
         }
+        request.chat_history = adapted;
+        request.validate_message_content()?;
+        Ok(request)
     }
 }
 
-impl Sink<Completion> for AdapterOutput {
-    type Laws = Laws;
-
-    fn push(&mut self, item: Result<StreamEvent, ProviderError>) {
-        AdapterOutput::push(self, item);
-    }
-
-    fn drain(&mut self) -> std::vec::Drain<'_, Result<StreamEvent, ProviderError>> {
-        AdapterOutput::drain(self)
-    }
-
-    fn items(&self) -> &[Result<StreamEvent, ProviderError>] {
-        AdapterOutput::items(self)
-    }
-
-    fn check_laws(&self, laws: &mut Self::Laws) {
-        #[cfg(any(test, debug_assertions))]
-        laws.check_batch(self);
-        #[cfg(not(any(test, debug_assertions)))]
-        let _ = laws;
+impl crate::wire::reply::Closing<Completion> for Assembled {
+    fn close(shared: &mut Shared<Completion>) {
+        let Shared { fold, items, .. } = shared;
+        fold.close_open(items);
     }
 }
 
-/// The fold from a completion reply's events to its response.
+impl Emit<Completion> for Assembled {}
+
+/// What the provider sends when it ends a completion reply.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Finish {
+    /// Token usage the provider reported. A counter it did not report is
+    /// `None`. A cost the provider reported goes in `usage.cost` and is
+    /// kept; without one the fold prices the counters at the catalog's
+    /// [`Pricing`](crate::catalog::Pricing) for the request's model, and
+    /// leaves the cost `None` when the catalog has no price for it.
+    pub usage: Usage,
+    /// Why the model stopped, when the provider said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<FinishReason>,
+    /// The response id.
+    pub response_id: Option<String>,
+    /// The model the provider reports.
+    pub model: Option<String>,
+    /// The provider's report that the turn failed, such as a refusal's
+    /// explanation. The turn is then never replayed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// What a provider item becomes when it opens.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Block {
+    /// Answer text.
+    Text,
+    /// Reasoning, possibly withheld by the provider.
+    Reasoning {
+        /// Whether the provider withheld the text.
+        redacted: bool,
+    },
+    /// An image, its canonical fields stated at open; fragments append
+    /// base64 data.
+    Image(Image),
+    /// A tool call with its id and name.
+    Call {
+        /// The call's id.
+        id: CallId,
+        /// The tool's name.
+        name: ToolName,
+    },
+    /// An item with no canonical meaning.
+    Opaque {
+        /// Whether the item goes back to the model that produced it.
+        replay: bool,
+    },
+}
+
+/// The completion fold. The driver and the handler writer build it; no other
+/// code can feed one.
 ///
-/// The same step [`StreamingCompletionResponse`](crate::streaming::StreamingCompletionResponse)
-/// runs while it yields events, so a unary reply and a streamed one agree by
-/// construction.
+/// It is both sides of one reply: the writer state a decoder writes through
+/// (the open items by wire index) and the blocks the consumer has taken, in
+/// their position.
+pub struct ReplyFold {
+    span: tracing::Span,
+    /// Who the reply is from; the end adds the provider's model and id.
+    origin: Origin,
+    /// The facts of the wire that answers, which price the reply.
+    facts: crate::catalog::ModelFacts,
+    // The writer.
+    open: BTreeMap<usize, Draft>,
+    /// The position of the block each wire index last closed, whose item
+    /// [`Out::edit`] may still amend until the reply ends.
+    ended: HashMap<usize, usize>,
+    next_part: u32,
+    call_ids: HashSet<CallId>,
+    /// Whether the reply's end must name a finish reason: a wire's fold
+    /// whose target states one (a relayed or written reply states its own).
+    wire: bool,
+    /// Where the wire's call items hold their id ([`ReplayTarget::call_id_slot`]).
+    ///
+    /// [`ReplayTarget::call_id_slot`]: crate::completion::ReplayTarget::call_id_slot
+    call_id_slot: Option<&'static str>,
+    /// Whether the catalog prices the reply, as its wire's target answers
+    /// ([`ReplayTarget::catalog_priced`]). `None` for a relayed or written
+    /// reply, which the registered dialect of its origin's provider answers.
+    ///
+    /// [`ReplayTarget::catalog_priced`]: crate::completion::ReplayTarget::catalog_priced
+    catalog_priced: Option<bool>,
+    /// Where the wire's items keep a reasoning blob ([`ReplayTarget::blob_slots`]).
+    ///
+    /// [`ReplayTarget::blob_slots`]: crate::completion::ReplayTarget::blob_slots
+    blob_slots: &'static [&'static str],
+    /// Whether the request accepts an unknown finish reason as a normal stop
+    /// ([`CompletionRequest::accept_unknown_finish_reasons`]).
+    ///
+    /// [`CompletionRequest::accept_unknown_finish_reasons`]: field@CompletionRequest::accept_unknown_finish_reasons
+    accept_unknown_finish: bool,
+    /// The first position whose item closed without the provider stating it
+    /// complete. An item there may be the partner a later one needs, so
+    /// blocks from it on replay from their canonical fields.
+    first_incomplete: Option<usize>,
+    /// The calls still open when the provider ended the reply, in the
+    /// order they opened ([`CompletionResponse::unfinished_calls`]).
+    unfinished: Vec<CallId>,
+    /// The call the last index-less fragment went to.
+    last_call: Option<usize>,
+    /// The index of the block a boundary-less wire is streaming.
+    run: Option<usize>,
+    next_auto: usize,
+    /// The wire index of each position, for a wire whose choice follows
+    /// its indices ([`Out::order_by_index`]).
+    by_index: Option<BTreeMap<usize, usize>>,
+    /// The position of the block the choice holds first ([`Out::lead`]).
+    lead: Option<usize>,
+    // The fold.
+    choice: Vec<Option<AssistantContent>>,
+    /// The text the consumer took of text and reasoning parts still open,
+    /// by position.
+    open_text: BTreeMap<usize, AssistantContent>,
+}
+
+/// One open provider item.
+struct Draft {
+    part: Part,
+    /// Whether its start was emitted.
+    started: bool,
+    /// The provider's item as assembled so far; `Null` for none.
+    item: serde_json::Value,
+    body: Body,
+    /// The citations of a text item, resolved when it closes.
+    citations: Vec<WireCitation>,
+}
+
+/// Whether a closing item keeps its provider item as the block's native.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Closing {
+    /// The provider stated the item complete: it becomes the native.
+    Complete,
+    /// The item never completed: the block has no native, and an opaque
+    /// item does not replay.
+    Incomplete,
+}
+
+enum Body {
+    Text(String),
+    Image(Image),
+    Reasoning {
+        text: String,
+        redacted: bool,
+    },
+    Call {
+        id: Option<CallId>,
+        name: String,
+        arguments: Arguments,
+    },
+    Opaque {
+        replay: bool,
+    },
+}
+
+impl Body {
+    fn kind(&self) -> PartKind {
+        match self {
+            Self::Text(_) => PartKind::Text,
+            Self::Reasoning { .. } => PartKind::Reasoning,
+            Self::Image(_) => PartKind::Image,
+            Self::Call { .. } => PartKind::ToolCall,
+            Self::Opaque { .. } => PartKind::Opaque,
+        }
+    }
+}
+
+/// A tool call's argument text as it arrives.
 #[derive(Default)]
-pub struct CompletionFold {
-    accumulator: BlockAccumulator,
-    terminal: Option<StreamFinal>,
-    message_id: Option<String>,
-    /// Only written by the fold step; the response's provider is the wire's.
-    provider: String,
+struct Arguments {
+    text: String,
+    /// How many bytes of `text` the stream has carried.
+    streamed: usize,
+    overflowed: bool,
+    /// Whether any fragment carried a non-blank byte.
+    substantive: bool,
+    /// Arguments the provider announced when the call opened, used only
+    /// when no fragment arrives.
+    announced: Option<serde_json::Value>,
 }
 
-impl Fold<Completion> for CompletionFold {
-    fn absorb(&mut self, event: StreamEvent) -> Result<(), ProviderError> {
-        let step = FoldStep {
-            accumulator: &mut self.accumulator,
-            response: &mut self.terminal,
-            message_id: &mut self.message_id,
-            provider: &mut self.provider,
-            provider_from_terminal: false,
-        };
-        match crate::streaming::absorb(step, event) {
-            Absorbed::Yield(_) | Absorbed::Skip => Ok(()),
-            // A buffered reply has no stream to carry an in-band defect, so
-            // a block the wire promised and then malformed fails the call.
-            Absorbed::Failed(report) => Err(ProviderError::Response(report.message)),
+/// The most argument bytes one call accumulates.
+const MAX_TOOL_INPUT_BYTES: usize = 32 * 1024 * 1024;
+
+impl Arguments {
+    fn push(&mut self, fragment: &str, name: &str) {
+        self.substantive |= !fragment.trim().is_empty();
+        // Some OpenAI-compatible gateways send a literal `null` before the
+        // real fragments; a non-blank fragment supersedes it.
+        if self.text.trim() == "null" && !fragment.trim().is_empty() {
+            self.text.clear();
+        }
+        if self.text.len().saturating_add(fragment.len()) > MAX_TOOL_INPUT_BYTES {
+            if !self.overflowed {
+                self.overflowed = true;
+                tracing::warn!(
+                    tool = name,
+                    "streamed tool-call input exceeded the accumulation bound; truncating"
+                );
+            }
+        } else {
+            self.text.push_str(fragment);
         }
     }
 
-    fn finish(self, reply: Reply) -> Result<CompletionResponse, ProviderError> {
-        // The buffered reply's document is the response's `raw`, not the
-        // terminal record's: the wire decoded the whole body at once.
-        let issuer = self
-            .terminal
-            .as_ref()
-            .map_or(reply.provider.clone(), |terminal| {
-                terminal.issuer().to_owned()
-            });
-        let response = crate::streaming::fold_finish(
-            self.accumulator,
-            self.terminal.as_ref(),
-            self.message_id,
-            reply.provider,
-            &issuer,
-            reply.raw,
-        );
-        // The terminal's own metadata wins; the reply headers only fill a gap.
-        let response = if response.provider_request_id.is_none() {
-            response.with_optional_provider_request_id(reply.provider_request_id)
-        } else {
-            response
-        };
-        if response.provider_response_headers.is_empty() {
-            Ok(response.with_provider_response_headers(reply.response_headers))
-        } else {
-            Ok(response)
-        }
-    }
-}
-
-/// Buffers completion events and in-band errors with block bookkeeping.
-/// Helpers open unseen tool and reasoning keys before deltas. Bare text uses
-/// an active key, minting a new one after non-text block events other than
-/// message starts. Frame-classification errors are handled by the driver.
-#[derive(Debug, Default)]
-pub struct AdapterOutput {
-    items: Vec<Result<StreamEvent, ProviderError>>,
-    /// Provider position copied onto starts emitted while this context is active.
-    source_order: Option<crate::streaming::SourceOrder>,
-    /// Minter for text blocks opened by a bare text delta.
-    text_ids: Option<SyntheticIds>,
-    /// The block receiving bare text deltas and metadata, until a boundary
-    /// or an explicit text start/end switches it.
-    active_text: Option<BlockId>,
-    /// Minter for reasoning blocks opened by a bare reasoning delta.
-    reasoning_ids: Option<SyntheticIds>,
-    /// The block receiving bare reasoning deltas, until a boundary or an
-    /// explicit reasoning end switches it.
-    active_reasoning: Option<BlockId>,
-    /// Automatically opened text block eligible for synthesized closure.
-    /// Explicitly opened blocks remain the provider's responsibility.
-    auto_text: Option<BlockId>,
-    auto_reasoning: Option<BlockId>,
-    /// Whether nonmatching block events close automatically opened blocks.
-    /// Disabled by default so provider adapters control explicit boundaries.
-    self_closing: bool,
-    /// Blocks a start was emitted for (or that a delta opened leniently),
-    /// so a delta never precedes its block's start on the wire we emit.
-    opened: std::collections::HashSet<BlockId>,
-    /// Coordinated starts already emitted. Their position is one provider
-    /// slot even after closure, so a repeated late end must not synthesize a
-    /// second start for the same identity and position.
-    positioned: std::collections::HashSet<(BlockId, crate::streaming::SourceOrder)>,
-    /// Explicitly indexed reasoning assemblies may interleave other content.
-    /// This decoder declaration is local bookkeeping, never an event field.
-    indexed_reasoning: std::collections::HashSet<BlockId>,
-}
-
-impl AdapterOutput {
-    /// Declare a bounded wire slot before its first reasoning start or delta.
-    /// The declaration survives batch drains for the lifetime of this stream.
-    pub(crate) fn declare_indexed_reasoning(&mut self, id: &BlockId) {
-        // A late declaration cannot excuse a boundary-less block already
-        // emitted in this batch (including raw deltas without a start).
-        if self.opened.contains(id)
-            || self.items.iter().any(|item| {
-                matches!(item, Ok(event)
-                if event.block_id() == Some(id) && Self::is_reasoning_event(event))
-            })
+    /// The call to `name` these arguments make: the announced ones when no
+    /// fragment arrived, else the text, read by [`ToolFunction::parse`].
+    fn function(&self, name: ToolName) -> ToolFunction {
+        if self.text.is_empty()
+            && let Some(announced) = &self.announced
         {
+            return ToolFunction::new(name, announced.clone());
+        }
+        let mut function = ToolFunction::parse(name, &self.text);
+        if self.overflowed {
+            function.invalid_arguments = Some(self.text.clone());
+        }
+        function
+    }
+
+    /// The text the stream has not carried yet, now marked carried. A text
+    /// that may still be a gateway's placeholder `null` waits, since the
+    /// first real fragment replaces it.
+    fn unstreamed(&mut self) -> Option<String> {
+        if "null".starts_with(self.text.trim()) {
+            return None;
+        }
+        let fragment = self.text.get(self.streamed..)?;
+        if fragment.is_empty() {
+            return None;
+        }
+        let fragment = fragment.to_owned();
+        self.streamed = self.text.len();
+        Some(fragment)
+    }
+
+    /// Whether the text is a complete JSON object.
+    fn complete(&self) -> bool {
+        !self.overflowed && crate::json_utils::is_whole_object(&self.text)
+    }
+}
+
+/// Whether `id` names a call: some providers send `""` or `"null"` for a
+/// call they gave no id.
+fn stated(id: &str) -> bool {
+    !id.is_empty() && id != "null"
+}
+
+/// What one fragment of a buffered tool call carries.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CallFragment<'a> {
+    /// The provider's id for the call.
+    pub id: Option<&'a str>,
+    /// The tool's name.
+    pub name: Option<&'a str>,
+    /// A fragment of the argument JSON.
+    pub arguments: Option<&'a str>,
+}
+
+/// The first index the writer hands out itself ([`Out::fresh_index`]); a
+/// provider's wire indices stay below it.
+pub const AUTO_INDEX: usize = 1 << 30;
+
+fn not_open(index: usize) -> ProviderError {
+    ProviderError::Response(format!(
+        "the reply wrote to item {index}, which is not open"
+    ))
+}
+
+/// Carry what the open call `draft` has not streamed yet: its start once it
+/// names a tool, then the argument text since the last fragment. A call
+/// that never names a tool stays unseen, as its close drops it.
+fn stream_call(items: &mut Items, draft: &mut Draft) {
+    let Body::Call {
+        name, arguments, ..
+    } = &mut draft.body
+    else {
+        return;
+    };
+    if !draft.started {
+        let Ok(name) = ToolName::new(name.clone()) else {
+            return;
+        };
+        draft.started = true;
+        emit(
+            items,
+            StreamEvent::Start {
+                part: draft.part,
+                kind: PartKind::ToolCall,
+                name: Some(name),
+            },
+        );
+    }
+    if let Some(json) = arguments.unstreamed() {
+        emit(
+            items,
+            StreamEvent::Arguments {
+                part: draft.part,
+                json,
+            },
+        );
+    }
+}
+
+impl ReplyFold {
+    /// The writer of a reply from `origin`.
+    pub(crate) fn new(origin: Origin) -> Self {
+        Self {
+            span: tracing::Span::none(),
+            origin,
+            facts: crate::catalog::ModelFacts::default(),
+            open: BTreeMap::new(),
+            ended: HashMap::new(),
+            next_part: 0,
+            call_ids: HashSet::new(),
+            wire: false,
+            call_id_slot: None,
+            catalog_priced: None,
+            blob_slots: &[],
+            accept_unknown_finish: false,
+            first_incomplete: None,
+            unfinished: Vec::new(),
+            last_call: None,
+            run: None,
+            next_auto: AUTO_INDEX,
+            by_index: None,
+            lead: None,
+            choice: Vec::new(),
+            open_text: BTreeMap::new(),
+        }
+    }
+
+    /// The fold of a stream relayed from another fold, which built its
+    /// events: it only collects them, and takes its origin from the relay
+    /// ([`Self::set_origin`]). Until then it names the relay `label`.
+    pub(crate) fn relayed(label: impl Into<String>) -> Self {
+        let label = label.into();
+        Self::new(Origin::new(label.clone(), label.clone(), label))
+    }
+
+    /// Who the reply is from, as the relay or the writer's owner states it.
+    pub(crate) fn set_origin(&mut self, origin: Origin) {
+        self.origin = origin;
+    }
+
+    /// The pricing `facts` give `origin`'s model (the spec the wire was
+    /// connected to, else its catalog's entry), or `None` when they list
+    /// none or the catalog does not price the wire.
+    fn pricing(&self, origin: &Origin) -> Option<crate::catalog::Pricing> {
+        let priced = self.catalog_priced.unwrap_or_else(|| {
+            crate::providers::registry::ProviderId::catalog(&origin.provider)
+                .is_none_or(|id| id.catalog_priced())
+        });
+        if !priced {
+            return None;
+        }
+        self.facts
+            .for_model(&origin.provider, &origin.model)?
+            .pricing
+    }
+
+    /// The next position in the choice.
+    fn next(&mut self) -> Part {
+        let part = Part::new(self.next_part);
+        self.next_part += 1;
+        part
+    }
+
+    fn fresh_index(&mut self) -> usize {
+        let index = self.next_auto;
+        self.next_auto += 1;
+        index
+    }
+
+    fn draft(&mut self, index: usize) -> Result<&mut Draft, ProviderError> {
+        self.open.get_mut(&index).ok_or_else(|| not_open(index))
+    }
+
+    pub(crate) fn open_item(
+        &mut self,
+        items: &mut Items,
+        index: usize,
+        block: Block,
+        item: serde_json::Value,
+    ) -> Result<(), ProviderError> {
+        if self.open.contains_key(&index) {
+            return Err(ProviderError::Response(format!(
+                "the reply opened item {index} twice"
+            )));
+        }
+        let body = match block {
+            Block::Text => Body::Text(String::new()),
+            Block::Image(image) => Body::Image(image),
+            Block::Reasoning { redacted } => Body::Reasoning {
+                text: String::new(),
+                redacted,
+            },
+            Block::Call { id, name } => Body::Call {
+                id: Some(id),
+                name: name.into(),
+                arguments: Arguments::default(),
+            },
+            Block::Opaque { replay } => Body::Opaque { replay },
+        };
+        self.insert(index, body, item);
+        stream_call(items, self.draft(index)?);
+        Ok(())
+    }
+
+    fn insert(&mut self, index: usize, body: Body, item: serde_json::Value) {
+        self.ended.remove(&index);
+        let part = self.next();
+        if let Some(by_index) = &mut self.by_index {
+            by_index.insert(part.index(), index);
+        }
+        let started = false;
+        self.open.insert(
+            index,
+            Draft {
+                part,
+                started,
+                item,
+                body,
+                citations: Vec::new(),
+            },
+        );
+    }
+
+    pub(crate) fn push_item(
+        &mut self,
+        items: &mut Items,
+        index: usize,
+        fragment: &str,
+    ) -> Result<(), ProviderError> {
+        if fragment.is_empty() {
+            return Ok(());
+        }
+        let draft = self.draft(index)?;
+        let event = match &mut draft.body {
+            Body::Text(text) => {
+                text.push_str(fragment);
+                StreamEvent::Text {
+                    part: draft.part,
+                    text: fragment.to_owned(),
+                }
+            }
+            Body::Reasoning { text, .. } => {
+                text.push_str(fragment);
+                StreamEvent::Reasoning {
+                    part: draft.part,
+                    text: fragment.to_owned(),
+                }
+            }
+            Body::Call {
+                name, arguments, ..
+            } => {
+                arguments.push(fragment, name);
+                stream_call(items, draft);
+                return Ok(());
+            }
+            Body::Image(image) => {
+                if let crate::message::DocumentSourceKind::Base64(data) = &mut image.data {
+                    data.push_str(fragment);
+                    return Ok(());
+                }
+                return Err(ProviderError::Response(format!(
+                    "the reply wrote data to the image item {index}, which holds no base64 data"
+                )));
+            }
+            Body::Opaque { .. } => {
+                return Err(ProviderError::Response(format!(
+                    "the reply wrote text to the opaque item {index}"
+                )));
+            }
+        };
+        if !draft.started {
+            draft.started = true;
+            emit(
+                items,
+                StreamEvent::Start {
+                    part: draft.part,
+                    kind: draft.body.kind(),
+                    name: None,
+                },
+            );
+        }
+        emit(items, event);
+        Ok(())
+    }
+
+    /// The id a call closing now takes, and the provider item it keeps:
+    /// `id`, or, when the provider sent none or one an earlier call of the
+    /// reply holds, a fresh rig-issued id. A renamed call
+    /// keeps no item, since the item names the id it lost; a call sent with
+    /// no id keeps its item only on a wire whose items have an id slot,
+    /// which replay then fills with the id its result gets.
+    fn distinct_call_id(
+        &mut self,
+        id: Option<CallId>,
+        item: serde_json::Value,
+    ) -> (CallId, serde_json::Value) {
+        let (id, item) = match id {
+            Some(id) if !self.call_ids.contains(&id) => (id, item),
+            Some(id) => {
+                tracing::warn!(%id, "the provider named two tool calls with one id; renaming the second");
+                (CallId::Local(LocalCallId::new()), serde_json::Value::Null)
+            }
+            None if self.call_id_slot.is_some() => (CallId::Local(LocalCallId::new()), item),
+            None => (CallId::Local(LocalCallId::new()), serde_json::Value::Null),
+        };
+        self.call_ids.insert(id.clone());
+        (id, item)
+    }
+
+    /// Close the item at `index`: its block becomes visible, holding the
+    /// provider's item as its native when `closing` says it is complete.
+    fn close_item(
+        &mut self,
+        items: &mut Items,
+        index: usize,
+        closing: Closing,
+    ) -> Result<(), ProviderError> {
+        self.close_block(items, index, closing).map(drop)
+    }
+
+    /// [`Self::close_item`], saying the id of the call it closed, if it
+    /// closed one.
+    fn close_block(
+        &mut self,
+        items: &mut Items,
+        index: usize,
+        closing: Closing,
+    ) -> Result<Option<CallId>, ProviderError> {
+        let mut draft = self.open.remove(&index).ok_or_else(|| not_open(index))?;
+        // A call streams what it has not yet: its start, if it names a tool,
+        // and the argument text since its last fragment.
+        stream_call(items, &mut draft);
+        if self.run == Some(index) {
+            self.run = None;
+        }
+        self.ended.insert(index, draft.part.index());
+        let Draft {
+            part,
+            started,
+            item,
+            body,
+            citations,
+        } = draft;
+        let item = match (closing, &body) {
+            (Closing::Complete, _) | (Closing::Incomplete, Body::Opaque { .. }) => item,
+            (Closing::Incomplete, _) => {
+                self.cut_at(part.index());
+                serde_json::Value::Null
+            }
+        };
+        let content = match body {
+            Body::Text(text) => {
+                if text.is_empty() && item.is_null() {
+                    return Ok(None);
+                }
+                // Resolved at close: a provider may cite a text before its
+                // last fragment arrives.
+                let mut text = Text::new(text);
+                citation::attach(
+                    &mut text,
+                    Vec::new(),
+                    citations,
+                    &self.origin.provider,
+                    index,
+                );
+                self.with_item(AssistantContent::Text(text), item)
+            }
+            Body::Reasoning { text, redacted } => {
+                if text.is_empty() && !redacted && item.is_null() {
+                    return Ok(None);
+                }
+                let reasoning = Reasoning {
+                    text,
+                    redacted,
+                    native: None,
+                };
+                self.with_item(AssistantContent::Reasoning(reasoning), item)
+            }
+            Body::Image(image) => self.with_item(AssistantContent::Image(image), item),
+            Body::Opaque { replay } => AssistantContent::Opaque(Opaque {
+                item,
+                replay: replay && closing == Closing::Complete,
+            }),
+            Body::Call {
+                id,
+                name,
+                arguments,
+            } => {
+                let Ok(name) = ToolName::new(name) else {
+                    tracing::warn!(
+                        index,
+                        "the provider closed a tool call without a name; nothing can answer it"
+                    );
+                    return Ok(None);
+                };
+                let function = arguments.function(name);
+                let (id, item) = self.distinct_call_id(id, item);
+                // A call that streamed no text (none arrived, or only a
+                // placeholder `null`) states the arguments it ends with.
+                if arguments.streamed == 0 {
+                    let json = serde_json::Value::Object(function.arguments.clone()).to_string();
+                    emit(items, StreamEvent::Arguments { part, json });
+                }
+                let call = ToolCall::new(id.clone(), function);
+                let content = self.with_item(AssistantContent::ToolCall(call), item);
+                emit(items, StreamEvent::End { part, content });
+                return Ok(Some(id));
+            }
+        };
+        if !started {
+            emit(
+                items,
+                StreamEvent::Start {
+                    part,
+                    kind: kind_of(&content),
+                    name: None,
+                },
+            );
+        }
+        emit(items, StreamEvent::End { part, content });
+        Ok(None)
+    }
+
+    /// `block` holding `item` as its native, with where it keeps its blob,
+    /// unless there is no item.
+    fn with_item(&self, block: AssistantContent, item: serde_json::Value) -> AssistantContent {
+        if item.is_null() {
+            return block;
+        }
+        let mut block = block.with_native(item);
+        if let Some(Some(native)) = block.native_slot() {
+            native.find_blob(self.blob_slots);
+        }
+        block
+    }
+
+    /// Edit the item of the block the wire index `index` last closed, while
+    /// its end event waits to be taken or once the fold holds it.
+    fn edit_ended(
+        &mut self,
+        items: &mut Items,
+        index: usize,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> Result<(), ProviderError> {
+        let position = *self.ended.get(&index).ok_or_else(|| not_open(index))?;
+        let slots = self.blob_slots;
+        let queued = items.iter_mut().find_map(|item| match item {
+            Ok(Item::Event(StreamEvent::End { part, content })) if part.index() == position => {
+                Some(content)
+            }
+            _ => None,
+        });
+        let content = match queued {
+            Some(content) => Some(content),
+            None => self.choice.get_mut(position).and_then(Option::as_mut),
+        };
+        if let Some(content) = content {
+            if let Some(item) = item_of(content) {
+                edit(item);
+            }
+            if let Some(Some(native)) = content.native_slot() {
+                native.find_blob(slots);
+            }
+        }
+        Ok(())
+    }
+
+    /// Add `citations` to the text item at `index`, or with `replace` put
+    /// them in place of its own. An open item resolves them when it closes;
+    /// a closed one, against its final text now, while its end event waits
+    /// to be taken or once the fold holds it. Citations for any other item
+    /// are dropped with a warning.
+    fn cite_item(
+        &mut self,
+        items: &mut Items,
+        index: usize,
+        citations: Vec<WireCitation>,
+        replace: bool,
+    ) {
+        let provider = self.origin.provider.as_str();
+        if let Some(draft) = self.open.get_mut(&index) {
+            if !matches!(draft.body, Body::Text(_)) {
+                tracing::warn!(
+                    provider,
+                    index,
+                    "dropped citations of an item that is not text"
+                );
+            } else if replace {
+                draft.citations = citations;
+            } else {
+                draft.citations.extend(citations);
+            }
             return;
         }
-        self.indexed_reasoning.insert(id.clone());
-    }
-
-    pub(crate) fn is_indexed_reasoning(&self, id: &BlockId) -> bool {
-        self.indexed_reasoning.contains(id)
-    }
-
-    /// An empty output buffer.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// An output that closes the blocks it opened itself at their boundary
-    /// and at [`close_active_blocks`](Self::close_active_blocks): what a
-    /// bus handler writes through, where nothing else will close them.
-    pub fn self_closing() -> Self {
-        Self {
-            self_closing: true,
-            ..Self::default()
+        let Some(position) = self.ended.get(&index).copied() else {
+            tracing::warn!(
+                provider,
+                index,
+                "dropped citations of an item the reply never opened"
+            );
+            return;
+        };
+        let queued = items.iter_mut().find_map(|item| match item {
+            Ok(Item::Event(StreamEvent::End { part, content })) if part.index() == position => {
+                Some(content)
+            }
+            _ => None,
+        });
+        let content = match queued {
+            Some(content) => Some(content),
+            None => self.choice.get_mut(position).and_then(Option::as_mut),
+        };
+        match content {
+            Some(AssistantContent::Text(text)) => {
+                let kept = if replace {
+                    Vec::new()
+                } else {
+                    text.citations().to_vec()
+                };
+                citation::attach(text, kept, citations, provider, index);
+            }
+            _ => tracing::warn!(
+                provider,
+                index,
+                "dropped citations of an item that is not text"
+            ),
         }
     }
 
-    /// Run one adapter action under a provider source-order coordinate.
-    ///
-    /// Helpers that open blocks copy the coordinate onto the start. Nested
-    /// calls restore the outer coordinate when they return.
-    pub(crate) fn in_source_order<R>(
+    pub(crate) fn run_item(
         &mut self,
-        source_order: crate::streaming::SourceOrder,
-        action: impl FnOnce(&mut Self) -> R,
-    ) -> R {
-        let previous = self.source_order.replace(source_order);
-        let result = action(self);
-        self.source_order = previous;
-        result
-    }
-
-    /// Push one event verbatim. A block this output opened itself for a
-    /// bare delta is closed first when `item` is its boundary.
-    pub fn push(&mut self, item: Result<StreamEvent, ProviderError>) {
-        if self.self_closing
-            && let Ok(event) = &item
-            && event.block_id().is_some()
-            && !Self::is_message_start(event)
-        {
-            if !Self::is_text_event(event)
-                && let Some(id) = self.auto_text.take()
-            {
-                self.active_text = None;
-                self.push_raw(Ok(StreamEvent::BlockEnd {
-                    id,
-                    end: BlockClose::Text,
-                    block: None,
-                }));
-            }
-            if !Self::is_reasoning_event(event)
-                && let Some(id) = self.auto_reasoning.take()
-            {
-                self.active_reasoning = None;
-                self.push_raw(Ok(StreamEvent::BlockEnd {
-                    id,
-                    end: BlockClose::Reasoning {
-                        reasoning: None,
-                        signature: None,
-                        wire_sent: false,
-                    },
-                    block: None,
-                }));
-            }
-        }
-        self.push_raw(item);
-    }
-
-    fn is_message_start(event: &StreamEvent) -> bool {
-        matches!(
-            event,
-            StreamEvent::BlockStart {
-                kind: BlockKind::Message,
-                ..
-            }
-        )
-    }
-
-    fn is_text_event(event: &StreamEvent) -> bool {
-        matches!(
-            event,
-            StreamEvent::BlockStart {
-                kind: BlockKind::Text { .. },
-                ..
-            } | StreamEvent::BlockDelta {
-                delta: Delta::Text { .. } | Delta::TextMeta { .. },
-                ..
-            } | StreamEvent::BlockEnd {
-                end: BlockClose::Text,
-                ..
-            }
-        )
-    }
-
-    fn is_reasoning_event(event: &StreamEvent) -> bool {
-        matches!(
-            event,
-            StreamEvent::BlockStart {
-                kind: BlockKind::Reasoning { .. },
-                ..
-            } | StreamEvent::BlockDelta {
-                delta: Delta::Reasoning { .. },
-                ..
-            } | StreamEvent::BlockEnd {
-                end: BlockClose::Reasoning { .. },
-                ..
-            }
-        )
-    }
-
-    fn push_raw(&mut self, item: Result<StreamEvent, ProviderError>) {
-        if let Ok(event) = &item
-            && let Some(id) = event.block_id()
-        {
-            match event {
-                StreamEvent::BlockStart { .. } => {
-                    self.opened.insert(id.clone());
-                    if let StreamEvent::BlockStart {
-                        source_order: Some(source_order),
-                        ..
-                    } = event
-                    {
-                        self.positioned.insert((id.clone(), *source_order));
-                    }
-                }
-                StreamEvent::BlockEnd { .. } => {
-                    self.opened.remove(id);
-                }
-                // A delta neither opens nor closes; `Final`/`Unknown` carry
-                // no block id and never reach this arm. Exhaustive on
-                // purpose: a future block-carrying variant must land here,
-                // not bypass the `opened` bookkeeping.
-                StreamEvent::BlockDelta { .. }
-                | StreamEvent::Final(_)
-                | StreamEvent::Unknown(_) => {}
-            }
-            // Any non-text block event is a boundary for anonymous text, any
-            // non-reasoning one for anonymous reasoning.
-            if !Self::is_text_event(event) && !Self::is_message_start(event) {
-                self.active_text = None;
-            }
-            if !Self::is_reasoning_event(event) && !Self::is_message_start(event) {
-                self.active_reasoning = None;
-            }
-        }
-        self.items.push(item);
-    }
-
-    /// Push an in-band error item.
-    pub fn error(&mut self, error: ProviderError) {
-        self.items.push(Err(error));
-    }
-
-    /// What this output holds, without taking it.
-    pub fn items(&self) -> &[Result<StreamEvent, ProviderError>] {
-        &self.items
-    }
-
-    /// Iterate the buffered items.
-    pub fn iter(&self) -> std::slice::Iter<'_, Result<StreamEvent, ProviderError>> {
-        self.items.iter()
-    }
-
-    /// Drain the buffered items, keeping the block bookkeeping.
-    pub fn drain(&mut self) -> std::vec::Drain<'_, Result<StreamEvent, ProviderError>> {
-        self.items.drain(..)
-    }
-
-    /// Whether nothing is buffered.
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
-    }
-
-    /// Number of buffered items.
-    pub fn len(&self) -> usize {
-        self.items.len()
-    }
-
-    /// Take the buffered items.
-    pub fn into_items(self) -> Vec<Result<StreamEvent, ProviderError>> {
-        self.items
-    }
-
-    fn open_if_unseen(&mut self, id: &BlockId, kind: BlockKind) {
-        if !self.opened.contains(id) {
-            self.push(Ok(StreamEvent::BlockStart {
-                id: id.clone(),
-                source_order: self.source_order,
-                kind,
-            }));
-        }
-    }
-
-    /// Open a whole-block completion unless this exact coordinated entity was
-    /// already announced. Deltas use `open_if_unseen` so they can explicitly
-    /// reopen a completed identity; a repeated late end cannot do that alone.
-    fn open_completion_if_unseen(&mut self, id: &BlockId, kind: BlockKind) {
-        let positioned = self
-            .source_order
-            .is_some_and(|source_order| self.positioned.contains(&(id.clone(), source_order)));
-        if !self.opened.contains(id) && !positioned {
-            self.push(Ok(StreamEvent::BlockStart {
-                id: id.clone(),
-                source_order: self.source_order,
-                kind,
-            }));
-        }
-    }
-
-    /// A bare text delta: lands in the active text block, opening a minted
-    /// one if none is active.
-    pub fn text(&mut self, text: impl Into<String>) {
-        let id = self.active_text_id();
-        self.push(Ok(StreamEvent::BlockDelta {
-            id,
-            delta: Delta::Text { text: text.into() },
-        }));
-    }
-
-    /// Appends to active reasoning, minting a block when needed.
-    /// Automatic boundary closure requires [`Self::self_closing`].
-    pub fn reasoning(&mut self, text: impl Into<String>) {
-        let id = match &self.active_reasoning {
-            Some(id) => id.clone(),
+        items: &mut Items,
+        block: Block,
+        fragment: &str,
+    ) -> Result<usize, ProviderError> {
+        let current = self.run.filter(|index| {
+            self.open.get(index).is_some_and(|draft| {
+                matches!(
+                    (&draft.body, &block),
+                    (Body::Text(_), Block::Text)
+                        | (
+                            Body::Reasoning {
+                                redacted: false,
+                                ..
+                            },
+                            Block::Reasoning { redacted: false }
+                        )
+                )
+            })
+        });
+        let index = match current {
+            Some(index) => index,
             None => {
-                let id = self
-                    .reasoning_ids
-                    .get_or_insert_with(|| SyntheticIds::new(MintKind::Reasoning))
-                    .mint();
-                self.push(Ok(StreamEvent::BlockStart {
-                    id: id.clone(),
-                    source_order: self.source_order,
-                    kind: BlockKind::Reasoning { provider_id: None },
-                }));
-                self.active_reasoning = Some(id.clone());
-                self.auto_reasoning = Some(id.clone());
-                id
+                self.end_run(items)?;
+                let index = self.fresh_index();
+                self.open_item(items, index, block, serde_json::Value::Null)?;
+                self.run = Some(index);
+                index
             }
         };
-        self.push(Ok(StreamEvent::BlockDelta {
-            id,
-            delta: Delta::Reasoning { text: text.into() },
-        }));
+        self.push_item(items, index, fragment)?;
+        Ok(index)
     }
 
-    /// Close the blocks bare deltas opened (text, reasoning), so a terminal
-    /// record never follows a block this output opened.
-    pub fn close_active_blocks(&mut self) {
-        if let Some(id) = self.auto_reasoning.take() {
-            self.active_reasoning = None;
-            self.push_raw(Ok(StreamEvent::BlockEnd {
-                id,
-                end: BlockClose::Reasoning {
-                    reasoning: None,
-                    signature: None,
-                    wire_sent: false,
-                },
-                block: None,
-            }));
-        }
-        if let Some(id) = self.auto_text.take() {
-            self.active_text = None;
-            self.push_raw(Ok(StreamEvent::BlockEnd {
-                id,
-                end: BlockClose::Text,
-                block: None,
-            }));
+    pub(crate) fn end_run(&mut self, items: &mut Items) -> Result<(), ProviderError> {
+        match self.run.take() {
+            Some(index) => self.close_item(items, index, Closing::Complete),
+            None => Ok(()),
         }
     }
 
-    /// Provider metadata for the active text block (opening a minted one if
-    /// none is active).
-    pub fn text_meta(&mut self, additional_params: crate::message::AdditionalParams) {
-        let id = self.active_text_id();
-        self.push(Ok(StreamEvent::BlockDelta {
-            id,
-            delta: Delta::TextMeta { additional_params },
-        }));
-    }
-
-    /// Open (or reactivate) the text block identified by `id`; later bare
-    /// text deltas extend it.
-    pub fn text_start(
+    /// One whole block at the next position, its native kept as given.
+    pub(crate) fn write_content(
         &mut self,
-        id: BlockId,
-        additional_params: Option<crate::message::AdditionalParams>,
-    ) {
-        self.push(Ok(StreamEvent::BlockStart {
-            id: id.clone(),
-            source_order: self.source_order,
-            kind: BlockKind::Text { additional_params },
-        }));
-        self.active_text = Some(id);
-    }
-
-    /// Close the text block identified by `id`: later bare text deltas open
-    /// a fresh block instead of extending it.
-    pub fn text_end(&mut self, id: BlockId) {
-        if self.active_text.as_ref() == Some(&id) {
-            self.active_text = None;
-        }
-        if self.auto_text.as_ref() == Some(&id) {
-            self.auto_text = None;
-        }
-        self.push(Ok(StreamEvent::BlockEnd {
-            id,
-            end: BlockClose::Text,
-            block: None,
-        }));
-    }
-
-    /// Close the active text block, if any: the next text opens a new one.
-    /// For wires whose part boundaries matter, such as a signed part that
-    /// must return on its own.
-    pub fn end_active_text(&mut self) {
-        if let Some(id) = self.active_text.clone() {
-            self.text_end(id);
-        }
-    }
-
-    fn active_text_id(&mut self) -> BlockId {
-        if let Some(id) = &self.active_text {
-            return id.clone();
-        }
-        let id = self.text_ids.get_or_insert_with(SyntheticIds::text).mint();
-        self.push(Ok(StreamEvent::BlockStart {
-            id: id.clone(),
-            source_order: self.source_order,
-            kind: BlockKind::Text {
-                additional_params: None,
-            },
-        }));
-        self.active_text = Some(id.clone());
-        self.auto_text = Some(id.clone());
-        id
-    }
-
-    /// Open the tool-call block `id` (a no-op when already open).
-    pub fn tool_start(&mut self, id: &BlockId) {
-        self.open_if_unseen(id, BlockKind::ToolCall);
-    }
-
-    /// A streamed tool-name fragment for the call `id`.
-    pub fn tool_name(&mut self, id: &BlockId, name: impl Into<String>) {
-        self.open_if_unseen(id, BlockKind::ToolCall);
-        self.push(Ok(StreamEvent::BlockDelta {
-            id: id.clone(),
-            delta: Delta::ToolName { name: name.into() },
-        }));
-    }
-
-    /// A streamed argument fragment for the call `id`.
-    pub fn tool_arguments(&mut self, id: &BlockId, arguments: impl Into<String>) {
-        self.open_if_unseen(id, BlockKind::ToolCall);
-        self.push(Ok(StreamEvent::BlockDelta {
-            id: id.clone(),
-            delta: Delta::ToolArguments {
-                arguments: arguments.into(),
-            },
-        }));
-    }
-
-    /// End the call `id`: the accumulator finalizes the assembled fragments
-    /// (or `end`'s authoritative payload) into a completed call.
-    pub fn tool_end(&mut self, id: BlockId, end: ToolCallEnd) {
-        self.open_completion_if_unseen(&id, BlockKind::ToolCall);
-        self.push(Ok(StreamEvent::BlockEnd {
-            id,
-            end: BlockClose::ToolCall(end),
-            block: None,
-        }));
-    }
-
-    /// A tool call the wire delivered whole: its start and its authoritative
-    /// end in one step.
-    pub fn tool_call(&mut self, id: BlockId, end: ToolCallEnd) {
-        self.tool_end(id, end);
-    }
-
-    /// A custom tool call the wire delivered whole (OpenAI Responses
-    /// `custom_tool_call`): a tool-call start, if the block is unseen, and its
-    /// [`BlockClose::CustomToolCall`] end. The accumulator yields
-    /// [`crate::message::AssistantContent::CustomToolCall`] for it.
-    pub fn custom_tool_call(&mut self, id: BlockId, end: crate::streaming::CustomToolCallEnd) {
-        self.open_completion_if_unseen(&id, BlockKind::ToolCall);
-        self.push(Ok(StreamEvent::BlockEnd {
-            id,
-            end: BlockClose::CustomToolCall(end),
-            block: None,
-        }));
-    }
-
-    /// An opaque provider output item, whole: opens its block and closes it
-    /// with the item, which the fold records in stream order.
-    pub fn provider_item(&mut self, id: BlockId, item: crate::message::ProviderItem) {
-        self.open_completion_if_unseen(&id, BlockKind::ProviderItem);
-        self.push(Ok(StreamEvent::BlockEnd {
-            id,
-            end: BlockClose::ProviderItem(item),
-            block: None,
-        }));
-    }
-
-    /// Open the reasoning block `id` (a no-op when already open).
-    pub fn reasoning_start(&mut self, id: &BlockId, provider_id: Option<String>) {
-        self.open_if_unseen(id, BlockKind::Reasoning { provider_id });
-    }
-
-    /// A reasoning text fragment for the block `id`, opening it (with
-    /// `provider_id`) if unseen.
-    pub fn reasoning_delta(
-        &mut self,
-        id: &BlockId,
-        provider_id: Option<String>,
-        text: impl Into<String>,
-    ) {
-        self.open_if_unseen(id, BlockKind::Reasoning { provider_id });
-        self.push(Ok(StreamEvent::BlockDelta {
-            id: id.clone(),
-            delta: Delta::Reasoning { text: text.into() },
-        }));
-    }
-
-    /// Close the reasoning block `id`. `reasoning` is the wire's
-    /// authoritative restatement, `signature` a provider signature closing
-    /// the block, `wire_sent` whether the wire itself sent the end.
-    pub fn reasoning_end(
-        &mut self,
-        id: BlockId,
-        reasoning: Option<crate::message::Reasoning>,
-        signature: Option<String>,
-        wire_sent: bool,
-    ) {
-        // Restatements need a start; bare or signature-only ends must not
-        // introduce a separate empty reasoning part.
-        if let Some(reasoning) = &reasoning {
-            self.open_if_unseen(
-                &id,
-                BlockKind::Reasoning {
-                    provider_id: reasoning.id.clone(),
-                },
-            );
-        }
-        self.push(Ok(StreamEvent::BlockEnd {
-            id,
-            end: BlockClose::Reasoning {
-                reasoning,
-                signature,
-                wire_sent,
-            },
-            block: None,
-        }));
-    }
-
-    /// A whole reasoning block: open + authoritative restatement + close.
-    pub fn reasoning_block(
-        &mut self,
-        id: BlockId,
-        provider_id: Option<String>,
-        content: crate::message::ReasoningContent,
-    ) {
-        self.open_if_unseen(
-            &id,
-            BlockKind::Reasoning {
-                provider_id: provider_id.clone(),
+        items: &mut Items,
+        content: AssistantContent,
+    ) -> Result<(), ProviderError> {
+        let content = match content {
+            AssistantContent::ToolCall(mut call) => {
+                let (id, _) = self.distinct_call_id(Some(call.id.clone()), serde_json::Value::Null);
+                if id != call.id {
+                    call.native = None;
+                }
+                call.id = id;
+                AssistantContent::ToolCall(call)
+            }
+            content => content,
+        };
+        let part = self.next();
+        let name = match &content {
+            AssistantContent::ToolCall(call) => Some(call.function.name.clone()),
+            _ => None,
+        };
+        emit(
+            items,
+            StreamEvent::Start {
+                part,
+                kind: kind_of(&content),
+                name,
             },
         );
-        self.push(Ok(StreamEvent::BlockEnd {
+        match &content {
+            AssistantContent::Text(text) if !text.text.is_empty() => emit(
+                items,
+                StreamEvent::Text {
+                    part,
+                    text: text.text.clone(),
+                },
+            ),
+            AssistantContent::Reasoning(reasoning) if !reasoning.text.is_empty() => emit(
+                items,
+                StreamEvent::Reasoning {
+                    part,
+                    text: reasoning.text.clone(),
+                },
+            ),
+            AssistantContent::ToolCall(call) => emit(
+                items,
+                StreamEvent::Arguments {
+                    part,
+                    json: call.function.arguments_json(),
+                },
+            ),
+            _ => {}
+        }
+        emit(items, StreamEvent::End { part, content });
+        Ok(())
+    }
+
+    /// Close every item still open when the provider ends the reply, in the
+    /// order they opened. The block a boundary-less wire was streaming is
+    /// complete; any other item was never stated complete, so its block has
+    /// no native. Calls keep what their arguments state.
+    pub(crate) fn close_open(&mut self, items: &mut Items) {
+        let mut open: Vec<(Part, usize)> = self
+            .open
+            .iter()
+            .map(|(index, draft)| (draft.part, *index))
+            .collect();
+        open.sort();
+        for (_, index) in open {
+            let closing = if self.run == Some(index) {
+                Closing::Complete
+            } else {
+                Closing::Incomplete
+            };
+            match self.close_block(items, index, closing) {
+                Ok(Some(call)) if closing == Closing::Incomplete => self.unfinished.push(call),
+                Ok(_) => {}
+                Err(error) => items.push_back(Err(error)),
+            }
+        }
+    }
+
+    /// Record that the item at `position` never completed.
+    fn cut_at(&mut self, position: usize) {
+        self.first_incomplete = Some(
+            self.first_incomplete
+                .map_or(position, |first| first.min(position)),
+        );
+    }
+
+    /// Who the reply is from.
+    pub fn origin(&self) -> &Origin {
+        &self.origin
+    }
+
+    /// What arrived so far as a response: every part that ended, the text
+    /// the consumer already took of a text or reasoning part still open,
+    /// and the provider's end when it arrived. A reply the provider did not
+    /// end is a failed turn: `failure` is the error that ended it, and
+    /// without one the caller stopped reading. Unless the provider ended the
+    /// reply and the consumer took every part, no block keeps its provider
+    /// item.
+    pub(crate) fn partial(
+        &self,
+        end: Option<&Finish>,
+        reply: &Reply,
+        failure: Option<&ProviderError>,
+    ) -> CompletionResponse {
+        let mut response =
+            self.response(end.cloned().unwrap_or_default(), reply.clone(), Vec::new());
+        if end.is_none() {
+            match failure {
+                Some(error) => {
+                    response.error.get_or_insert_with(|| error.to_string());
+                }
+                None => {
+                    response.aborted = Some(
+                        "the caller stopped reading before the provider ended the reply".to_owned(),
+                    );
+                }
+            }
+        }
+        // A turn the consumer has not wholly taken replays only its canonical
+        // fields, as pi drops an unfinished turn's provider data: no item of
+        // it can then need a partner that never arrived.
+        let unfinished =
+            end.is_none() || !self.open.is_empty() || self.choice.iter().any(Option::is_none);
+        let canonical_from = if unfinished {
+            Some(0)
+        } else {
+            self.first_incomplete
+        };
+        let parts = self
+            .choice
+            .iter()
+            .enumerate()
+            .map(|(index, part)| {
+                let part = part.clone().or_else(|| self.open_text.get(&index).cloned());
+                (index, part)
+            })
+            .collect();
+        response.choice = self.ordered(parts, canonical_from);
+        response
+    }
+
+    /// `parts` by position, in wire-index order on a wire that asked for
+    /// it and after the lead block, each from position `canonical_from` on
+    /// with no provider item.
+    fn ordered(
+        &self,
+        parts: Vec<(usize, Option<AssistantContent>)>,
+        canonical_from: Option<usize>,
+    ) -> Vec<AssistantContent> {
+        let mut parts: Vec<(usize, AssistantContent)> = parts
+            .into_iter()
+            .filter_map(|(position, part)| {
+                let part = part?;
+                Some(match canonical_from {
+                    Some(first) if position >= first => (position, canonical(part)),
+                    _ => (position, part),
+                })
+            })
+            .collect();
+        if let Some(by_index) = &self.by_index {
+            parts.sort_by_key(|(position, _)| {
+                (
+                    by_index.get(position).copied().unwrap_or(usize::MAX),
+                    *position,
+                )
+            });
+        }
+        if let Some(lead) = self.lead {
+            parts.sort_by_key(|(position, _)| *position != lead);
+        }
+        parts.into_iter().map(|(_, part)| part).collect()
+    }
+
+    /// The response of `choice`, the reply's parts, ended by `end`.
+    fn response(
+        &self,
+        end: Finish,
+        reply: Reply,
+        choice: Vec<AssistantContent>,
+    ) -> CompletionResponse {
+        let Finish {
+            usage,
+            reason,
+            response_id,
+            model,
+            error,
+        } = end;
+        use crate::provider_response::reported;
+        let mut origin = self.origin.clone();
+        let response_model = reported(model);
+        named_by_reply(&mut origin, response_model.as_deref());
+        origin.response_model = response_model;
+        origin.response_id = reported(response_id);
+        let usage = match usage.cost {
+            Some(_) => usage,
+            None => usage.cost(
+                self.pricing(&origin)
+                    .and_then(|pricing| pricing.cost(&usage)),
+            ),
+        };
+        let error = error.or_else(|| {
+            if !self.wire {
+                return None;
+            }
+            match &reason {
+                None => Some("the provider ended the reply without a finish reason".to_owned()),
+                Some(FinishReason::Length) => None,
+                Some(_) if !self.unfinished.is_empty() => Some(
+                    "the provider ended the reply with a tool call it never finished".to_owned(),
+                ),
+                Some(_) => None,
+            }
+        });
+        let mut response = CompletionResponse::new(choice, usage, origin, reply.raw)
+            .with_optional_finish_reason(reason)
+            .accept_unknown_finish_reasons(self.accept_unknown_finish)
+            .with_unfinished_calls(self.unfinished.clone());
+        response.error = error;
+        response.provider_request_id = reported(reply.provider_request_id);
+        response
+    }
+}
+
+/// `origin` with the model the reply names, `reported`, when the request
+/// named none.
+fn named_by_reply(origin: &mut Origin, reported: Option<&str>) {
+    if origin.model.is_empty()
+        && let Some(model) = reported
+    {
+        model.clone_into(&mut origin.model);
+    }
+}
+
+/// `block` with no provider item: an opaque item no longer replays.
+pub(crate) fn canonical(block: AssistantContent) -> AssistantContent {
+    match block {
+        AssistantContent::Opaque(opaque) => AssistantContent::Opaque(Opaque {
+            replay: false,
+            ..opaque
+        }),
+        block => block.into_canonical(),
+    }
+}
+
+/// The provider item `content` holds, if any.
+fn item_of(content: &mut AssistantContent) -> Option<&mut serde_json::Value> {
+    let native = match content {
+        AssistantContent::Text(text) => text.native.as_mut(),
+        AssistantContent::ToolCall(call) => call.native.as_mut(),
+        AssistantContent::Reasoning(reasoning) => reasoning.native.as_mut(),
+        AssistantContent::Image(image) => image.native.as_mut(),
+        AssistantContent::Opaque(opaque) => return Some(&mut opaque.item),
+    };
+    native.map(|native| &mut native.item)
+}
+
+fn kind_of(content: &AssistantContent) -> PartKind {
+    match content {
+        AssistantContent::Text(_) => PartKind::Text,
+        AssistantContent::Reasoning(_) => PartKind::Reasoning,
+        AssistantContent::ToolCall(_) => PartKind::ToolCall,
+        AssistantContent::Image(_) => PartKind::Image,
+        AssistantContent::Opaque(_) => PartKind::Opaque,
+    }
+}
+
+pub(crate) type Items = std::collections::VecDeque<Result<Item<StreamEvent>, ProviderError>>;
+
+fn emit(items: &mut Items, event: StreamEvent) {
+    items.push_back(Ok(Item::Event(event)));
+}
+
+/// Merge `delta` into `item`: each string field but `type` appends to the
+/// item's string of that key, an array extends the item's array, and any
+/// other value replaces the key. A delta kind rig has never seen still
+/// lands in the item.
+pub fn merge(item: &mut serde_json::Value, delta: &serde_json::Map<String, serde_json::Value>) {
+    use serde_json::Value;
+    if !item.is_object() {
+        *item = Value::Object(serde_json::Map::new());
+    }
+    let Value::Object(item) = item else {
+        return;
+    };
+    for (key, value) in delta {
+        if key == "type" {
+            continue;
+        }
+        match (item.get_mut(key), value) {
+            (Some(Value::String(existing)), Value::String(fragment)) => {
+                existing.push_str(fragment);
+            }
+            (Some(Value::Array(existing)), Value::Array(more)) => {
+                existing.extend(more.iter().cloned());
+            }
+            _ => {
+                item.insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
+
+impl Fold<Completion> for ReplyFold {
+    fn absorb(&mut self, event: &StreamEvent) -> Result<(), ProviderError> {
+        match event {
+            StreamEvent::Start { part, .. } => {
+                if self.choice.len() <= part.index() {
+                    self.choice.resize(part.index() + 1, None);
+                }
+            }
+            StreamEvent::End { part, content } => {
+                if self.choice.len() <= part.index() {
+                    self.choice.resize(part.index() + 1, None);
+                }
+                if let Some(slot) = self.choice.get_mut(part.index()) {
+                    *slot = Some(content.clone());
+                }
+                self.open_text.remove(&part.index());
+            }
+            StreamEvent::Text { part, text } => {
+                if let AssistantContent::Text(open) = self
+                    .open_text
+                    .entry(part.index())
+                    .or_insert_with(|| AssistantContent::text(""))
+                {
+                    open.text.push_str(text);
+                }
+            }
+            StreamEvent::Reasoning { part, text } => {
+                if let AssistantContent::Reasoning(open) = self
+                    .open_text
+                    .entry(part.index())
+                    .or_insert_with(|| AssistantContent::reasoning(""))
+                {
+                    open.text.push_str(text);
+                }
+            }
+            StreamEvent::Arguments { .. } => {}
+        }
+        Ok(())
+    }
+
+    fn finish(mut self, end: Finish, reply: Reply) -> Result<CompletionResponse, ProviderError> {
+        if let Some(FinishReason::Other(reason)) = &end.reason {
+            tracing::warn!(
+                provider = %self.origin.provider,
+                reason = %reason,
+                accepted = self.accept_unknown_finish,
+                "the provider ended the reply with an unknown finish reason"
+            );
+        }
+        // The parts taken, in their position (in wire-index order on a wire
+        // that asked for it, after the lead block); parts from the first
+        // incomplete one on keep no provider item.
+        let parts = std::mem::take(&mut self.choice).into_iter().enumerate();
+        let choice = self.ordered(parts.collect(), self.first_incomplete);
+        let response = self.response(end, reply, choice);
+        self.span
+            .record_response(response.response_id(), response.model(), &response.usage);
+        Ok(response)
+    }
+}
+
+impl<'id> Out<'id, Completion> {
+    /// The pricing in the wire's facts for the requested model, else for
+    /// `reported`, the model the reply names, for a decoder that prices its
+    /// reply itself: its provider bills other counters than the ones it
+    /// reports as usage, or splits a price the catalog lists once.
+    pub(crate) fn catalog_pricing(
+        &self,
+        reported: Option<&str>,
+    ) -> Option<crate::catalog::Pricing> {
+        let shared = self.lock();
+        let mut origin = shared.fold.origin.clone();
+        named_by_reply(&mut origin, reported);
+        shared.fold.pricing(&origin)
+    }
+
+    /// Open the provider item at wire `index` as `block`: it takes the next
+    /// position in the reply. `item` is the item as its first event states
+    /// it, the base its deltas merge into; `Null` when the block keeps no
+    /// provider item. An index already open is an error.
+    pub fn open(
+        &mut self,
+        index: usize,
+        block: Block,
+        item: serde_json::Value,
+    ) -> Result<(), ProviderError> {
+        let mut shared = self.lock();
+        let Shared { fold, items, .. } = &mut *shared;
+        fold.open_item(items, index, block, item)
+    }
+
+    /// Append a fragment to the open item at `index`: text, reasoning, or a
+    /// call's argument JSON, by the item's block.
+    pub fn push(&mut self, index: usize, fragment: &str) -> Result<(), ProviderError> {
+        let mut shared = self.lock();
+        let Shared { fold, items, .. } = &mut *shared;
+        fold.push_item(items, index, fragment)
+    }
+
+    /// Edit the item at `index` in place: apply a delta with [`merge`], or
+    /// replace the whole item a provider restates when it finishes.
+    /// Until the reply ends, an index whose block already closed edits that
+    /// block's item: the terminal backfill of a field the provider states
+    /// only at its end.
+    pub fn edit(
+        &mut self,
+        index: usize,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> Result<(), ProviderError> {
+        let mut shared = self.lock();
+        let Shared { fold, items, .. } = &mut *shared;
+        match fold.open.get_mut(&index) {
+            Some(draft) => {
+                edit(&mut draft.item);
+                Ok(())
+            }
+            None => fold.edit_ended(items, index, edit),
+        }
+    }
+
+    /// Close the item at `index` the provider never stated complete: its
+    /// block becomes visible with no native, and an opaque item is kept but
+    /// does not replay. Empty text and reasoning are dropped, and so is a
+    /// call with no name. A call's arguments are read by
+    /// [`ToolFunction::parse`], so malformed ones never fail the reply; a
+    /// call that never got an id, or reuses one an earlier call took, gets
+    /// one rig issues.
+    pub fn close(&mut self, index: usize) -> Result<(), ProviderError> {
+        let mut shared = self.lock();
+        let Shared { fold, items, .. } = &mut *shared;
+        fold.close_item(items, index, Closing::Incomplete)
+    }
+
+    /// Close the item at `index` the provider stated complete: [`Self::close`],
+    /// with the item as assembled becoming the block's native.
+    pub fn finish(&mut self, index: usize) -> Result<(), ProviderError> {
+        let mut shared = self.lock();
+        let Shared { fold, items, .. } = &mut *shared;
+        fold.close_item(items, index, Closing::Complete)
+    }
+
+    /// End every item still open as stated complete, for a wire whose end
+    /// of reply is the provider's statement that its items are done.
+    pub fn finish_open(&mut self) -> Result<(), ProviderError> {
+        let mut shared = self.lock();
+        let Shared { fold, items, .. } = &mut *shared;
+        let mut open: Vec<(Part, usize)> = fold
+            .open
+            .iter()
+            .map(|(index, draft)| (draft.part, *index))
+            .collect();
+        open.sort();
+        for (_, index) in open {
+            fold.close_item(items, index, Closing::Complete)?;
+        }
+        Ok(())
+    }
+
+    /// Open and finish the item at `index` in one step: a whole block a
+    /// provider states in one piece, `item` its provider item and `text`
+    /// its text, reasoning, argument JSON or base64 image data.
+    pub fn whole(
+        &mut self,
+        index: usize,
+        block: Block,
+        item: serde_json::Value,
+        text: &str,
+    ) -> Result<(), ProviderError> {
+        self.open(index, block, item)?;
+        self.push(index, text)?;
+        self.finish(index)
+    }
+
+    /// Order the response's blocks by wire index rather than by when they
+    /// opened, for a wire whose indices are the provider's item order and
+    /// whose end may state items it never streamed. Call it before the
+    /// first item opens; blocks with no wire index go last.
+    pub fn order_by_index(&mut self) {
+        let mut shared = self.lock();
+        if shared.fold.by_index.is_none() {
+            shared.fold.by_index = Some(BTreeMap::new());
+        }
+    }
+
+    /// Hold the open item at `index` first in the response whenever it
+    /// opened, for a wire that states one block of the turn apart from its
+    /// order. Its events keep their arrival order. A turn leads with the
+    /// first item named.
+    pub fn lead(&mut self, index: usize) -> Result<(), ProviderError> {
+        let mut shared = self.lock();
+        let position = shared.fold.draft(index)?.part.index();
+        shared.fold.lead.get_or_insert(position);
+        Ok(())
+    }
+
+    /// Replace the text, reasoning or argument JSON of the open item at
+    /// `index` with `text`, the whole of it as the provider restates it at
+    /// its end. The fragments already streamed stand and nothing more
+    /// streams for them; the block ends holding `text`.
+    pub fn restate(&mut self, index: usize, text: &str) -> Result<(), ProviderError> {
+        let mut shared = self.lock();
+        let draft = shared.fold.draft(index)?;
+        match &mut draft.body {
+            Body::Text(body) | Body::Reasoning { text: body, .. } => text.clone_into(body),
+            Body::Call { arguments, .. } => {
+                text.clone_into(&mut arguments.text);
+                // A call not yet started streams the restated text whole.
+                arguments.streamed = if draft.started { text.len() } else { 0 };
+            }
+            Body::Image(_) | Body::Opaque { .. } => {}
+        }
+        Ok(())
+    }
+
+    /// Write one fragment of a tool call the provider streams, opening the
+    /// call at its first fragment. Its id and name may arrive in any
+    /// fragment, and the first name it is given stays: the call starts
+    /// streaming once it names a tool, carrying
+    /// the argument text held until then, and its end states its id. Calls
+    /// are told apart by `index` when the wire gives one. A new id under an
+    /// index starts a new call once the held call's arguments are a complete
+    /// object or when it names a tool: some providers send a fresh id, and
+    /// no name, with every chunk of one call. Without an index (`None`, or
+    /// the wire's `null`), a fragment with an unseen id opens a call, and one
+    /// with no id continues the latest call while its arguments are
+    /// incomplete.
+    pub fn fragment(
+        &mut self,
+        index: Option<usize>,
+        fragment: CallFragment<'_>,
+    ) -> Result<(), ProviderError> {
+        let mut shared = self.lock();
+        let Shared {
+            fold: turn, items, ..
+        } = &mut *shared;
+        let new_id = fragment.id.filter(|id| stated(id));
+        let index = match index {
+            Some(index) => {
+                let names = fragment.name.is_some_and(|name| !name.is_empty());
+                let held = turn.open.get(&index).and_then(|draft| match &draft.body {
+                    Body::Call {
+                        id: Some(id),
+                        arguments,
+                        ..
+                    } if new_id.is_some_and(|new| id.wire() != new) => Some(arguments.complete()),
+                    _ => None,
+                });
+                if let Some(complete) = held.filter(|complete| *complete || names) {
+                    // Another call took over the index: the one it held ends.
+                    let moved = turn.fresh_index();
+                    if let Some(draft) = turn.open.remove(&index) {
+                        turn.open.insert(moved, draft);
+                    }
+                    let closing = if complete {
+                        Closing::Complete
+                    } else {
+                        Closing::Incomplete
+                    };
+                    turn.close_item(items, moved, closing)?;
+                }
+                index
+            }
+            None => {
+                let owner = new_id.and_then(|new| {
+                    turn.open
+                        .iter()
+                        .find_map(|(index, draft)| match &draft.body {
+                            Body::Call { id: Some(id), .. } if id.wire() == new => Some(*index),
+                            _ => None,
+                        })
+                });
+                let continues = |last: &usize| {
+                    turn.open.get(last).is_some_and(|draft| {
+                        matches!(&draft.body, Body::Call { arguments, .. } if !arguments.complete())
+                    })
+                };
+                match (owner, new_id, turn.last_call) {
+                    (Some(index), _, _) => index,
+                    (None, None, Some(last)) if continues(&last) => last,
+                    _ => turn.fresh_index(),
+                }
+            }
+        };
+        turn.last_call = Some(index);
+        if !turn.open.contains_key(&index) {
+            let body = Body::Call {
+                id: None,
+                name: String::new(),
+                arguments: Arguments::default(),
+            };
+            turn.insert(index, body, serde_json::Value::Null);
+        }
+        let Body::Call {
             id,
-            end: BlockClose::Reasoning {
-                reasoning: Some(crate::message::Reasoning {
-                    provider: None,
-                    id: provider_id,
-                    content: vec![content],
-                }),
-                signature: None,
-                wire_sent: true,
-            },
-            block: None,
-        }));
+            name,
+            arguments,
+        } = &mut turn.draft(index)?.body
+        else {
+            return Err(ProviderError::Response(format!(
+                "the reply sent a call fragment for item {index}, which is not a call"
+            )));
+        };
+        if let Some(call_id) = fragment.id.filter(|id| stated(id)) {
+            *id = Some(CallId::from_wire(call_id));
+        }
+        // A call keeps the first name it is given, so the tool its start
+        // names is the tool its end names.
+        if name.is_empty()
+            && let Some(fragment) = fragment.name.filter(|name| !name.is_empty())
+        {
+            fragment.clone_into(name);
+        }
+        if let Some(fragment) = fragment.arguments {
+            arguments.push(fragment, name);
+        }
+        stream_call(items, turn.draft(index)?);
+        Ok(())
     }
 
-    /// The provider-assigned message id (a `Message` block start).
-    pub fn message_id(&mut self, id: impl Into<String>) {
-        self.push(Ok(StreamEvent::BlockStart {
-            id: BlockId::wire(id),
-            source_order: self.source_order,
-            kind: BlockKind::Message,
-        }));
+    /// Arguments the provider announced for the call at `index`, used only
+    /// if no fragment arrives.
+    pub fn announce(
+        &mut self,
+        index: usize,
+        announced: serde_json::Value,
+    ) -> Result<(), ProviderError> {
+        if let Body::Call { arguments, .. } = &mut self.lock().fold.draft(index)?.body {
+            arguments.announced = Some(announced);
+        }
+        Ok(())
     }
 
-    /// The provider's terminal record; the driver stops consuming after it.
-    pub fn final_record(&mut self, record: StreamFinal) {
-        self.push(Ok(StreamEvent::Final(record)));
+    /// An index no provider item uses, for a wire that indexes nothing.
+    pub fn fresh_index(&mut self) -> usize {
+        self.lock().fold.fresh_index()
     }
 
-    /// An unmodeled provider item on the passthrough channel.
-    pub fn unknown(&mut self, payload: UnknownPayload) {
-        self.push(Ok(StreamEvent::Unknown(payload)));
+    /// A fragment on a wire that marks no item boundaries: it continues the
+    /// block the last fragment went to while `block` is the same kind, and
+    /// otherwise closes that block and opens a new one. Returns the block's
+    /// index, for merging its provider item.
+    pub fn run(&mut self, block: Block, fragment: &str) -> Result<usize, ProviderError> {
+        let mut shared = self.lock();
+        let Shared { fold, items, .. } = &mut *shared;
+        fold.run_item(items, block, fragment)
     }
+
+    /// Close the block [`Self::run`] is extending, if any: output of
+    /// another kind interleaved it.
+    pub fn end_run(&mut self) -> Result<(), ProviderError> {
+        let mut shared = self.lock();
+        let Shared { fold, items, .. } = &mut *shared;
+        fold.end_run(items)
+    }
+
+    /// Add `citation` to the text item at wire `index`, open or ended. Its
+    /// span is resolved to bytes of the text when the item closes, or at
+    /// once for an item already closed. A span that does not resolve, or
+    /// covers other text than its `quoted`, drops the citation with a
+    /// warning, as do citations of an item that is not text: a citation
+    /// never fails a reply.
+    pub fn cite(&mut self, index: usize, citation: WireCitation) {
+        let mut shared = self.lock();
+        let Shared { fold, items, .. } = &mut *shared;
+        fold.cite_item(items, index, vec![citation], false);
+    }
+
+    /// Put `citations` in place of the text item's own, for a provider that
+    /// restates them; [`Self::cite`] otherwise.
+    pub fn set_citations(&mut self, index: usize, citations: Vec<WireCitation>) {
+        let mut shared = self.lock();
+        let Shared { fold, items, .. } = &mut *shared;
+        fold.cite_item(items, index, citations, true);
+    }
+
+    /// A whole block of an already assembled response, at the next
+    /// position, its native kept as given.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn content(&mut self, content: AssistantContent) -> Result<(), ProviderError> {
+        let mut shared = self.lock();
+        let Shared { fold, items, .. } = &mut *shared;
+        fold.write_content(items, content)
+    }
+}
+
+/// The events a stream of `response` would have carried: each part whole,
+/// in order.
+pub(crate) fn events_of(
+    response: &CompletionResponse,
+) -> Result<Vec<Item<StreamEvent>>, ProviderError> {
+    let mut turn = ReplyFold::new(response.origin.clone());
+    let mut items = Items::new();
+    for content in &response.choice {
+        turn.write_content(&mut items, content.clone())?;
+    }
+    items.into_iter().collect()
 }
 
 #[cfg(test)]

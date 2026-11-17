@@ -1,11 +1,15 @@
 //! Mistral's transcription model identifiers.
 //!
-//! Diarization and audio-second metadata remain in
-//! [`crate::transcription::TranscriptionResponse::raw`].
+//! `timestamp_granularities` (`["segment"]` or `["word"]`) in
+//! `additional_params` fills
+//! [`TranscriptionResponse::segments`](crate::transcription::TranscriptionResponse::segments),
+//! one per word at word granularity. `diarize: true` with `["segment"]` adds
+//! speaker labels such as `"speaker_1"`. Audio-second usage remains in
+//! [`TranscriptionResponse::raw`](crate::transcription::TranscriptionResponse::raw).
 //!
 //! ```no_run
-//! use rig_core::providers::{mistral, openai::wire::{MISTRAL, OpenAI}};
-//! let wire = OpenAI::from_env_with(&MISTRAL)?.transcriptions(mistral::VOXTRAL_MINI);
+//! use rig_core::providers::mistral;
+//! let model = mistral::from_env()?.transcription(mistral::VOXTRAL_MINI);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 

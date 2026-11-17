@@ -1,5 +1,5 @@
 //! Serializable effect requests, handler descriptions, outcomes, and recording data.
-//! [`HandlerKey`] identifies a destination; [`EffectKind`] and [`Outcome`] describe
+//! [`HandlerKey`] identifies a destination; [`EffectKind`] and [`Answered`] describe
 //! the exchange. Host-defined operations use [`CustomEffect`].
 //!
 //! ```
@@ -10,17 +10,17 @@
 //! assert_eq!(row.len(), 1);
 //! ```
 
-use std::{fmt, sync::Arc};
+use std::{borrow::Cow, fmt, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    completion::{CompletionRequest, CompletionResponse, Message, ModelRef, ProviderCapabilities},
-    embeddings::{EmbeddingResponse, ImageEmbeddingResponse},
+    completion::{CompletionRequest, CompletionResponse, ModelRef, ProviderCapabilities},
+    embeddings::EmbeddingResponse,
     error::ErrorReport,
-    id::ConversationId,
+    operation::RerankRequest,
     rerank::RerankResponse,
-    streaming::StreamEvent,
+    streaming::StreamRecord,
     tool::ToolResult,
     vector_store::request::{Filter, VectorSearchRequest},
     wasm_compat::WasmCompatSend,
@@ -28,9 +28,8 @@ use crate::{
 
 /// The identity of one dispatch, minted by the dispatcher.
 ///
-/// It is the correlation key between a bus-tap [`EffectRecord`], a hook
-/// observation, and a host's own bookkeeping (a Bevy driver maps it to an
-/// `Entity`). Ids are unique per dispatcher and strictly increasing.
+/// It links an [`EffectRecord`] to a host's own bookkeeping (a host driver
+/// maps it to its own handle). Ids are unique per dispatcher and strictly increasing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct EffectId(u64);
@@ -54,7 +53,8 @@ impl fmt::Display for EffectId {
 }
 
 /// String identifier for a registered handler, serializable without a live handle.
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct HandlerKey(Arc<str>);
 
 impl HandlerKey {
@@ -96,7 +96,7 @@ pub struct KeyParts {
     pub owner: Option<Arc<str>>,
     /// The family-shaped prefix of the name (`model`, `tool`, `retrieve`).
     pub kind: Option<Arc<str>>,
-    /// The name proper: a model label, a tool name, `memory`, `note`.
+    /// The name proper: a model label, a tool name, `retrieve`, `note`.
     pub label: Arc<str>,
     /// The disambiguating generation (`#2`): the same tool registered
     /// again under a fresh key. Only canonical `u64` decimal suffixes are
@@ -138,11 +138,6 @@ impl KeyParts {
             label: Arc::from(label),
             generation,
         }
-    }
-
-    /// The parts as the key they came from (`Display` writes the same).
-    pub fn to_key(&self) -> HandlerKey {
-        HandlerKey::from(self.to_string())
     }
 }
 
@@ -192,65 +187,6 @@ impl AsRef<str> for HandlerKey {
     }
 }
 
-// Serialize as a string without requiring serde's rc feature.
-impl Serialize for HandlerKey {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for HandlerKey {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let key = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
-        Ok(Self(Arc::from(&*key)))
-    }
-}
-
-/// Serde for a bare `Arc<str>` field (the `Custom` kind label).
-mod arc_str {
-    use std::sync::Arc;
-
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub(super) fn serialize<S: Serializer>(
-        value: &Arc<str>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(value)
-    }
-
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Arc<str>, D::Error> {
-        let value = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
-        Ok(Arc::from(&*value))
-    }
-}
-
-/// `Option<Arc<str>>` as an optional string on the wire.
-mod opt_arc_str {
-    use std::sync::Arc;
-
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub(super) fn serialize<S: Serializer>(
-        value: &Option<Arc<str>>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        match value {
-            Some(value) => serializer.serialize_some(&**value),
-            None => serializer.serialize_none(),
-        }
-    }
-
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Option<Arc<str>>, D::Error> {
-        let value = <Option<std::borrow::Cow<'de, str>>>::deserialize(deserializer)?;
-        Ok(value.map(|value| Arc::from(&*value)))
-    }
-}
-
 /// Effect classification used by typed binding and recording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -263,8 +199,6 @@ pub enum EffectFamily {
     Embed,
     /// A reranking request.
     Rerank,
-    /// A conversation-memory operation.
-    Memory,
     /// A vector-store retrieval.
     Retrieve,
     /// An out-of-tree kind.
@@ -279,7 +213,6 @@ impl EffectFamily {
             Self::Tool => "tool_call",
             Self::Embed => "embed",
             Self::Rerank => "rerank",
-            Self::Memory => "memory",
             Self::Retrieve => "retrieve",
             Self::Custom => "custom",
         }
@@ -293,7 +226,7 @@ impl fmt::Display for EffectFamily {
 }
 
 /// Sealed mapping between typed requests and answers and the wire's
-/// [`EffectKind`] and [`Outcome`]. Hosts extend the protocol through
+/// [`EffectKind`] and [`Answered`]. Hosts extend the protocol through
 /// [`CustomEffect`] and [`family::Custom`], not new family implementations.
 pub trait Family: sealed::Sealed + Clone + Copy + Send + Sync + 'static {
     /// The family this marker names.
@@ -305,12 +238,12 @@ pub trait Family: sealed::Sealed + Clone + Copy + Send + Sync + 'static {
     /// The wire form of a request, or the report for a request that has
     /// none (a [`CustomEffect`] whose `Serialize` fails). The in-tree
     /// families always have one; a typed dispatch of a request without one
-    /// is pre-failed by the bus and never reaches a handler or a log.
+    /// is pre-failed and never reaches a handler or a log.
     fn wrap(request: Self::Request) -> Result<EffectKind, ErrorReport>;
     /// The typed answer, or the report for an outcome of another family.
-    fn unwrap(outcome: Outcome) -> Result<Self::Answer, ErrorReport>;
+    fn unwrap(outcome: Answered) -> Result<Self::Answer, ErrorReport>;
     /// The report [`Family::unwrap`] gives for an outcome of another family.
-    fn mismatch(outcome: &Outcome) -> ErrorReport {
+    fn mismatch(outcome: &Answered) -> ErrorReport {
         ErrorReport::new(
             crate::error::ErrorKind::Internal,
             format!(
@@ -355,7 +288,7 @@ pub struct ToolCallRequest {
 
 /// A host's own effect, typed the way a [`ToolContext`](crate::tool::ToolContext) value is: a
 /// declared kind label and a declared answer type, both serde. The wire
-/// form is [`EffectKind::Custom`] / [`Outcome::Custom`]; the type never
+/// form is [`EffectKind::Custom`] / [`Answered::Custom`]; the type never
 /// crosses it.
 pub trait CustomEffect: Serialize + serde::de::DeserializeOwned + WasmCompatSend + 'static {
     /// The kind label this effect dispatches under; a handler's
@@ -389,12 +322,6 @@ pub fn rerank_key(label: &str) -> HandlerKey {
     HandlerKey::from(format!("rerank:{label}"))
 }
 
-/// A key for a labelled memory handler: `memory:<label>`. An agent's own
-/// memory is registered under the bare `memory` key.
-pub fn memory_key(label: &str) -> HandlerKey {
-    HandlerKey::from(format!("memory:{label}"))
-}
-
 /// A key for a labelled retrieval handler: `retrieve:<label>`. An agent's
 /// own index is registered under the bare `retrieve` key.
 pub fn retrieve_key(label: &str) -> HandlerKey {
@@ -411,13 +338,13 @@ pub mod family {
     use std::marker::PhantomData;
 
     use super::{
-        CustomEffect, EffectFamily, EffectKind, EmbedInputs, EmbedOutputs, Family, MemoryOp,
-        MemoryOutcome, Outcome, RerankRequest, RetrieveQuery, RetrievedDocuments, ToolCallRequest,
-        sealed::Sealed,
+        Answered, CustomEffect, EffectFamily, EffectKind, EmbedInputs, EmbedOutputs, Family,
+        RetrieveQuery, RetrievedDocuments, ToolCallRequest, sealed::Sealed,
     };
     use crate::{
         completion::{CompletionRequest, CompletionResponse},
         error::{ErrorKind, ErrorReport},
+        operation::RerankRequest,
         rerank::RerankResponse,
         tool::ToolResult,
     };
@@ -440,8 +367,8 @@ pub mod family {
                     Ok(wrap(request))
                 }
 
-                fn unwrap(outcome: Outcome) -> Result<Self::Answer, ErrorReport> {
-                    let unwrap: fn(Outcome) -> Result<Self::Answer, ErrorReport> = $unwrap;
+                fn unwrap(outcome: Answered) -> Result<Self::Answer, ErrorReport> {
+                    let unwrap: fn(Answered) -> Result<Self::Answer, ErrorReport> = $unwrap;
                     unwrap(outcome)
                 }
             }
@@ -452,44 +379,37 @@ pub mod family {
         /// The completion family: a unary completion (a streaming dispatch is
         /// `ModelHandle::stream`, not a typed request).
         Completion => Completion, CompletionRequest, CompletionResponse,
-            |request| EffectKind::Completion { request, stream: false },
+            |request| EffectKind::Completion { request: std::sync::Arc::new(request), stream: false },
             |outcome| match outcome {
-                Outcome::Completion(response) => Ok(response),
+                Answered::Completion(response) => Ok(std::sync::Arc::unwrap_or_clone(response)),
                 other => Err(Completion::mismatch(&other)),
             };
         /// The tool family.
         Tool => Tool, ToolCallRequest, ToolResult,
             |request| EffectKind::ToolCall { name: request.name, args: request.args },
             |outcome| match outcome {
-                Outcome::ToolResult { result } => Ok(result),
+                Answered::ToolResult { result } => Ok(result),
                 other => Err(Tool::mismatch(&other)),
             };
         /// The embedding family.
         Embed => Embed, EmbedInputs, EmbedOutputs,
             |inputs| EffectKind::Embed { inputs },
             |outcome| match outcome {
-                Outcome::Embeddings(outputs) => Ok(outputs),
+                Answered::Embeddings(outputs) => Ok(outputs),
                 other => Err(Embed::mismatch(&other)),
             };
         /// The reranking family.
         Rerank => Rerank, RerankRequest, RerankResponse,
             |request| EffectKind::Rerank { request },
             |outcome| match outcome {
-                Outcome::Reranked(response) => Ok(response),
+                Answered::Reranked(response) => Ok(response),
                 other => Err(Rerank::mismatch(&other)),
-            };
-        /// The conversation-memory family.
-        Memory => Memory, MemoryOp, MemoryOutcome,
-            |op| EffectKind::Memory { op },
-            |outcome| match outcome {
-                Outcome::Memory(answer) => Ok(answer),
-                other => Err(Memory::mismatch(&other)),
             };
         /// The retrieval family.
         Retrieve => Retrieve, RetrieveQuery, RetrievedDocuments,
             |query| EffectKind::Retrieve { query },
             |outcome| match outcome {
-                Outcome::Documents(documents) => Ok(documents),
+                Answered::Documents(documents) => Ok(documents),
                 other => Err(Retrieve::mismatch(&other)),
             };
     }
@@ -569,9 +489,9 @@ pub mod family {
                 })
         }
 
-        fn unwrap(outcome: Outcome) -> Result<E::Answer, ErrorReport> {
+        fn unwrap(outcome: Answered) -> Result<E::Answer, ErrorReport> {
             match outcome {
-                Outcome::Custom { payload: value } => {
+                Answered::Custom { payload: value } => {
                     serde_json::from_value(value).map_err(|error| {
                         ErrorReport::new(
                             ErrorKind::Internal,
@@ -599,6 +519,23 @@ pub struct HandlerDescriptor {
     /// stack during replay. Empty for a handler without layers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layers: Vec<String>,
+}
+
+impl HandlerDescriptor {
+    /// A tool's handler, under [`tool_key`] of its `name`, with no layers
+    /// and no embedding.
+    pub fn tool(name: &str, description: impl Into<String>, parameters: serde_json::Value) -> Self {
+        Self {
+            key: tool_key(name),
+            family: FamilyDescriptor::Tool {
+                name: name.to_owned(),
+                description: description.into(),
+                parameters,
+                embedding: None,
+            },
+            layers: Vec::new(),
+        }
+    }
 }
 
 /// The family-keyed description of a handler. The variant *is* the family:
@@ -645,8 +582,6 @@ pub enum FamilyDescriptor {
         /// The largest batch the model accepts.
         max_documents: usize,
     },
-    /// A conversation-memory backend.
-    Memory {},
     /// A vector-store index.
     Retrieve {},
     /// A handler for an out-of-tree kind: the label it serves.
@@ -664,7 +599,6 @@ impl FamilyDescriptor {
             Self::Tool { .. } => EffectFamily::Tool,
             Self::Embed { .. } => EffectFamily::Embed,
             Self::Rerank { .. } => EffectFamily::Rerank,
-            Self::Memory {} => EffectFamily::Memory,
             Self::Retrieve {} => EffectFamily::Retrieve,
             Self::Custom { .. } => EffectFamily::Custom,
         }
@@ -697,8 +631,8 @@ pub enum EmbedModality {
 pub enum EffectKind {
     /// A completion request.
     Completion {
-        /// The prepared request.
-        request: CompletionRequest,
+        /// The prepared request, shared with the recorder and the log.
+        request: Arc<CompletionRequest>,
         /// Whether the response streams (`dispatch_stream`) or is unary.
         stream: bool,
     },
@@ -720,11 +654,6 @@ pub enum EffectKind {
         /// The query and the documents.
         request: RerankRequest,
     },
-    /// A conversation-memory operation.
-    Memory {
-        /// The operation.
-        op: MemoryOp,
-    },
     /// A retrieval.
     Retrieve {
         /// The query.
@@ -733,11 +662,31 @@ pub enum EffectKind {
     /// An out-of-tree effect.
     Custom {
         /// The host-defined kind label.
-        #[serde(with = "arc_str")]
         kind: Arc<str>,
         /// The host-defined payload.
         payload: serde_json::Value,
     },
+}
+
+/// The effect a model's tool call is: the tool's name and the call's raw
+/// arguments, as a tool handler is dispatched it.
+///
+/// ```
+/// use rig_core::effect::EffectKind;
+/// use rig_core::message::{ToolCall, ToolFunction, ToolName};
+///
+/// let read = ToolFunction::new(ToolName::new("read")?, serde_json::json!({ "path": "a.rs" }));
+/// let kind = EffectKind::from(&ToolCall::from_wire("call-1", read));
+/// assert!(matches!(kind, EffectKind::ToolCall { ref name, .. } if name == "read"));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+impl From<&crate::message::ToolCall> for EffectKind {
+    fn from(call: &crate::message::ToolCall) -> Self {
+        Self::ToolCall {
+            name: call.function.name.as_str().to_owned(),
+            args: call.function.raw_arguments(),
+        }
+    }
 }
 
 impl EffectKind {
@@ -748,7 +697,6 @@ impl EffectKind {
             Self::ToolCall { .. } => EffectFamily::Tool,
             Self::Embed { .. } => EffectFamily::Embed,
             Self::Rerank { .. } => EffectFamily::Rerank,
-            Self::Memory { .. } => EffectFamily::Memory,
             Self::Retrieve { .. } => EffectFamily::Retrieve,
             Self::Custom { .. } => EffectFamily::Custom,
         }
@@ -763,7 +711,6 @@ impl EffectKind {
             | Self::ToolCall { .. }
             | Self::Embed { .. }
             | Self::Rerank { .. }
-            | Self::Memory { .. }
             | Self::Retrieve { .. } => self.family().name(),
         }
     }
@@ -776,15 +723,14 @@ impl EffectKind {
             Self::ToolCall { .. }
             | Self::Embed { .. }
             | Self::Rerank { .. }
-            | Self::Memory { .. }
             | Self::Retrieve { .. }
             | Self::Custom { .. } => false,
         }
     }
 }
 
-/// The inputs of an embedding request: the transcription of
-/// `EmbeddingModel::embed_texts` and `ImageEmbeddingModel::embed_images`.
+/// The inputs of an embedding request: the texts or images an embedding
+/// model's call embeds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "modality", content = "inputs", rename_all = "snake_case")]
 pub enum EmbedInputs {
@@ -792,40 +738,6 @@ pub enum EmbedInputs {
     Texts(Vec<String>),
     /// Image bytes.
     Images(Vec<Vec<u8>>),
-}
-
-/// A reranking request: the transcription of
-/// [`RerankModel::rerank`](crate::rerank::RerankModel::rerank).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RerankRequest {
-    /// The query the documents are ranked against.
-    pub query: String,
-    /// The documents, in input order.
-    pub documents: Vec<String>,
-}
-
-/// A conversation-memory operation: the transcription of
-/// [`ConversationMemory`](crate::memory::ConversationMemory).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub enum MemoryOp {
-    /// Load a conversation's history.
-    Load {
-        /// The conversation.
-        conversation: ConversationId,
-    },
-    /// Append messages to a conversation.
-    Append {
-        /// The conversation.
-        conversation: ConversationId,
-        /// The messages, in order.
-        messages: Vec<Message>,
-    },
-    /// Clear a conversation.
-    Clear {
-        /// The conversation.
-        conversation: ConversationId,
-    },
 }
 
 /// A retrieval: the transcription of
@@ -850,9 +762,9 @@ pub enum RetrieveQuery {
 /// What a handler answered.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum Outcome {
-    /// A unary completion.
-    Completion(CompletionResponse),
+pub enum Answered {
+    /// A unary completion, shared with the records and layers that read it.
+    Completion(Arc<CompletionResponse>),
     /// A tool call's result. The values the tool published into its
     /// context are not on the wire: they come back beside the sink
     /// ([`crate::tool::PublishedContext`]).
@@ -864,8 +776,6 @@ pub enum Outcome {
     Embeddings(EmbedOutputs),
     /// A reranking.
     Reranked(RerankResponse),
-    /// A memory operation's answer.
-    Memory(MemoryOutcome),
     /// Retrieved documents.
     Documents(RetrievedDocuments),
     /// An out-of-tree answer.
@@ -875,7 +785,7 @@ pub enum Outcome {
     },
 }
 
-impl Outcome {
+impl Answered {
     /// The family this outcome answers.
     pub const fn family(&self) -> EffectFamily {
         match self {
@@ -883,7 +793,6 @@ impl Outcome {
             Self::ToolResult { .. } => EffectFamily::Tool,
             Self::Embeddings(_) => EffectFamily::Embed,
             Self::Reranked(_) => EffectFamily::Rerank,
-            Self::Memory(_) => EffectFamily::Memory,
             Self::Documents(_) => EffectFamily::Retrieve,
             Self::Custom { .. } => EffectFamily::Custom,
         }
@@ -897,22 +806,7 @@ pub enum EmbedOutputs {
     /// Text embeddings.
     Texts(EmbeddingResponse),
     /// Image embeddings.
-    Images(ImageEmbeddingResponse),
-}
-
-/// The answer to a [`MemoryOp`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "memory", rename_all = "snake_case")]
-pub enum MemoryOutcome {
-    /// The loaded history.
-    Loaded {
-        /// The messages.
-        messages: Vec<Message>,
-    },
-    /// The append succeeded.
-    Appended,
-    /// The clear succeeded.
-    Cleared,
+    Images(EmbeddingResponse),
 }
 
 /// The answer to a [`RetrieveQuery`].
@@ -925,46 +819,17 @@ pub enum RetrievedDocuments {
     Ids(Vec<(f64, String)>),
 }
 
-/// One delivery observed by a scheduled consumer. Entries are ordered by
-/// visibility, independently of dispatch ids and handler completion order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Delivery {
-    /// The schedule pass in which the consumer observed this delivery.
-    /// Pass numbers group deliveries; they are not wall-clock timestamps.
-    pub batch: u64,
-    /// The effect whose state became visible.
-    pub id: EffectId,
-    /// The visible transition.
-    pub kind: DeliveryKind,
-}
-
-/// What a scheduled consumer collected at one observation boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "delivery", rename_all = "snake_case")]
-pub enum DeliveryKind {
-    /// The effect's outcome became visible.
-    Outcome,
-    /// The effect was cancelled after its original handler answer was recorded,
-    /// without delivering an outcome. Kept events may include undelivered items.
-    Cancelled,
-    /// A batch of stream items became visible together. Includes error items;
-    /// successful event bytes remain in the effect record's event sequence.
-    Stream {
-        /// Items collected since the preceding delivery for this effect.
-        items: usize,
-    },
-}
-
 /// One recorded exchange: the effect, who served it, and the answer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffectRecord {
-    /// Explicitly published tool-result metadata, including on errors. Never
-    /// inbound authentication values or runtime scopes. `None` means the tool
-    /// did not publish a context before resolving. The wire field is required:
-    /// `null` explicitly records no publication; omission cannot establish
-    /// whether an older recorder lost output and is rejected when decoding.
-    #[serde(deserialize_with = "Option::deserialize")]
-    pub tool_output: Option<crate::tool::ToolResultContext>,
+    /// Explicitly published result metadata, including on errors: a
+    /// tool's, or the facts any layer of the dispatch published
+    /// ([`PublishedContext`](crate::tool::PublishedContext)). Never
+    /// inbound authentication values or runtime scopes. `None` means nothing
+    /// was published before resolving; the wire field is required, and
+    /// `null` records that nothing was published.
+    #[serde(rename = "tool_output", deserialize_with = "Option::deserialize")]
+    pub published: Option<crate::tool::ToolResultContext>,
     /// The dispatch's id.
     pub id: EffectId,
     /// The handler the effect was routed to.
@@ -972,21 +837,147 @@ pub struct EffectRecord {
     /// The effect.
     pub kind: EffectKind,
     /// The answer.
-    pub outcome: Result<Outcome, ErrorReport>,
-    /// A streamed dispatch's events, verbatim, when the recorder was asked
+    pub outcome: Result<Answered, ErrorReport>,
+    /// A streamed dispatch's items, verbatim, when the recorder was asked
     /// to keep them (`EffectLogRecorder::keeping_stream_events`); `None`
     /// otherwise, and the answer is the fold. A replayer re-emits these
-    /// when present, so a replayed consumer sees the original delta
-    /// boundaries.
+    /// when present, so a replayed consumer sees the original fragment
+    /// boundaries. They read back through [`StreamRecord::parse_prefix`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub events: Option<Vec<StreamEvent>>,
+    pub events: Option<StreamRecord>,
+    /// Who a streamed dispatch's reply was from, as its relay stated it
+    /// before the first item, when the items are kept. A replayer sends it
+    /// first, so a replayed stream cut short knows its origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_origin: Option<crate::message::Origin>,
     /// Parent dispatch for a nested handler call, or `None` for a root dispatch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<EffectId>,
     /// Stable identifier of the dispatching program or run, not a runtime handle.
     /// `None` when the dispatcher supplied no scope.
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "opt_arc_str")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<std::sync::Arc<str>>,
+    /// What the dispatcher made the effect for, such as `"turn"` or
+    /// `"compaction"`, from its [`DispatchContext`](crate::serve::DispatchContext). `None` when
+    /// it named no purpose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<std::borrow::Cow<'static, str>>,
+    /// The turn of its dispatcher's conversation it was made in, as the
+    /// host numbers turns (the first is `0`). `None` when the host keeps no
+    /// turns or it belongs to none, such as a call made between turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<u64>,
+    /// When a handler started serving it, in milliseconds since the Unix
+    /// epoch. `None` when no handler started it (it was answered before it
+    /// started), or when the recorder keeps no times.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_ms: Option<u64>,
+    /// When a streamed dispatch's first item came, in milliseconds since
+    /// the Unix epoch: the time to the first token beside
+    /// [`Self::started_ms`]. A part's end counts as an item; the stream's
+    /// own end does not. `None` when no item streamed, or when the
+    /// recorder keeps no times.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_item_ms: Option<u64>,
+    /// When its outcome was known, in milliseconds since the Unix epoch.
+    /// `None` when the recorder keeps no times.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_ms: Option<u64>,
+    /// The outcome a reviewer put in place of [`Self::outcome`], which stays
+    /// the handler's (or the early answer's) own. `None` when nothing
+    /// replaced it. A replayer answers with [`Self::outcome`] and lets the
+    /// reviewers run again, as it reruns layers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed: Option<Result<Answered, ErrorReport>>,
+    /// How the outcome came about.
+    #[serde(default, skip_serializing_if = "Disposition::is_ran")]
+    pub disposition: Disposition,
+    /// Who decided the answer before it ran, when a decision answered it.
+    /// `None` when its handler or its owner answered it: an effect no gate
+    /// decided ran, and an allow is not a decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_by: Option<Decider>,
+}
+
+/// Who decided an effect's answer before it ran ([`EffectRecord::decided_by`]).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Decider {
+    /// A person, through a front: an answer to a question, a line they typed.
+    Person,
+    /// A plugin, by its name, such as `print` or `protected-paths`.
+    Plugin(Cow<'static, str>),
+}
+
+impl Decider {
+    /// The plugin called `name`.
+    pub fn plugin(name: impl Into<Cow<'static, str>>) -> Self {
+        Self::Plugin(name.into())
+    }
+}
+
+/// How an [`EffectRecord`]'s outcome came about. A recorder of handler
+/// dispatches records [`Ran`](Self::Ran); a host that answers, replaces or
+/// cancels effects itself records the others.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Disposition {
+    /// A handler served it, and the outcome is its answer.
+    #[default]
+    Ran,
+    /// Answered before any handler started it, such as by a policy that
+    /// refused it or a replayer.
+    AnsweredBeforeStart,
+    /// Answered from outside while its handler ran; the handler was
+    /// cancelled.
+    AnsweredWhileRunning,
+    /// Another effect replaced it, and its outcome was never applied.
+    Superseded,
+    /// Cancelled before it had an outcome.
+    Cancelled,
+}
+
+impl EffectRecord {
+    /// The record of effect `id`, `kind`, routed to `key` and answered with
+    /// `outcome`, and nothing else known: no parent, scope, purpose, turn, times,
+    /// tool output, kept items, review or decider, and [`Disposition::Ran`]. A host
+    /// that answers or cancels an effect itself builds its record from this
+    /// and sets what it knows.
+    pub fn new(
+        id: EffectId,
+        key: HandlerKey,
+        kind: EffectKind,
+        outcome: Result<Answered, ErrorReport>,
+    ) -> Self {
+        Self {
+            published: None,
+            id,
+            key,
+            kind,
+            outcome,
+            events: None,
+            stream_origin: None,
+            parent: None,
+            scope: None,
+            purpose: None,
+            turn: None,
+            started_ms: None,
+            first_item_ms: None,
+            finished_ms: None,
+            reviewed: None,
+            disposition: Disposition::Ran,
+            decided_by: None,
+        }
+    }
+}
+
+impl Disposition {
+    /// Whether this is [`Self::Ran`], the default a record leaves out.
+    fn is_ran(&self) -> bool {
+        *self == Self::Ran
+    }
 }
 
 /// Required handler keys and their effect families, ordered by key.
@@ -1199,15 +1190,14 @@ const _: fn() = || {
     assert_wire::<EffectKind>();
     assert_wire::<EmbedInputs>();
     assert_wire::<RerankRequest>();
-    assert_wire::<MemoryOp>();
     assert_wire::<RetrieveQuery>();
-    assert_wire::<Outcome>();
+    assert_wire::<Answered>();
     assert_wire::<EmbedOutputs>();
-    assert_wire::<MemoryOutcome>();
     assert_wire::<RetrievedDocuments>();
     assert_wire::<EffectRecord>();
+    assert_wire::<Decider>();
     assert_wire::<EffectRow>();
-    assert_wire::<StreamEvent>();
+    assert_wire::<StreamRecord>();
 };
 
 #[cfg(test)]

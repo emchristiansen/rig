@@ -1,7 +1,5 @@
 //! ChatGPT streaming tools coverage.
 
-use rig::prelude::*;
-
 use crate::chatgpt::{LIVE_MODEL, live_client};
 use crate::support::{
     Adder, STREAMING_TOOLS_PREAMBLE, STREAMING_TOOLS_PROMPT, Subtract,
@@ -11,9 +9,7 @@ use crate::support::{
 #[tokio::test]
 #[ignore = "requires ChatGPT credentials or existing OAuth cache"]
 async fn streaming_tools_smoke() {
-    let agent = live_client()
-        .await
-        .agent(LIVE_MODEL)
+    let agent = rig::AgentBuilder::new(live_client().await.completion(LIVE_MODEL))
         .preamble(STREAMING_TOOLS_PREAMBLE)
         .tool(Adder)
         .tool(Subtract)
@@ -30,15 +26,12 @@ async fn streaming_tools_smoke() {
 #[tokio::test]
 #[ignore = "requires ChatGPT credentials or existing OAuth cache"]
 async fn example_streaming_with_tools() {
-    let agent = live_client()
-        .await
-        .agent(LIVE_MODEL)
+    let agent = rig::AgentBuilder::new(live_client().await.completion(LIVE_MODEL))
         .preamble(
             "You are a calculator here to help the user perform arithmetic operations. \
              Use the tools provided to answer the user's question and answer in a full sentence.",
         )
-        // No output-token cap: the Codex contract refuses a caller-set
-        // `max_output_tokens` by name.
+        .max_tokens(1024)
         .tool(Adder)
         .tool(Subtract)
         .build();

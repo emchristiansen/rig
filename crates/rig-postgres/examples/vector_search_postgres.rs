@@ -1,4 +1,4 @@
-use rig_core::providers::openai::{self, wire::OpenAI};
+use rig_core::providers::openai::{self, OpenAI};
 use rig_core::vector_store::request::VectorSearchRequest;
 use rig_core::{
     Embed,
@@ -6,7 +6,6 @@ use rig_core::{
     vector_store::{InsertDocuments, VectorStoreIndex},
 };
 use rig_postgres::PostgresVectorStore;
-use rig_reqwest::prelude::*;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 
@@ -33,9 +32,11 @@ async fn main() -> Result<(), anyhow::Error> {
     // load environment variables from .env file
     dotenvy::dotenv().ok();
 
-    // Bind the OpenAI embeddings endpoint
-    let openai_client = OpenAI::from_env()?.bound()?;
-    let model = openai_client.embedding(openai::TEXT_EMBEDDING_3_SMALL, None);
+    // The OpenAI client, from `OPENAI_API_KEY`.
+    let openai_client = OpenAI::from_env()?;
+    let model = openai_client
+        .embedding(openai::TEXT_EMBEDDING_3_SMALL, None)
+        .erase();
 
     // setup Postgres
     let database_url = std::env::var("DATABASE_URL")?;
@@ -97,8 +98,11 @@ async fn main() -> Result<(), anyhow::Error> {
     let results = vector_store.top_n::<WordDefinition>(req).await?;
 
     println!("#{} results for query: {}", results.len(), query);
-    for (distance, _id, doc) in results.iter() {
-        println!("Result distance {distance} for word: {doc}");
+    for result in &results {
+        println!(
+            "Result distance {} for word: {}",
+            result.score, result.document
+        );
 
         // expected output (even if we have 2 entries on glarb-glarb the index only gives closest match)
         // Result distance 0.2988549857990437 for word: glarb-glarb

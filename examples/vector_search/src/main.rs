@@ -1,16 +1,17 @@
-//! Demonstrates embedding documents and querying an in-memory vector index with OpenAI.
-//! Requires `OPENAI_API_KEY` and the `derive` feature.
+//! Demonstrates embedding documents and querying an in-memory vector index.
+//! Uses OpenAI (`OPENAI_API_KEY`), or with the argument `ollama` a local
+//! Ollama server and its `nomic-embed-text` model.
 //! Run it to compare `top_n` results with `top_n_ids`.
 
 use rig::prelude::*;
-use rig::providers::openai::{self, wire::OpenAI};
+use rig::providers::ollama::Ollama;
+use rig::providers::openai::{self, OpenAI};
+use rig::vector_store::{VectorSearchIdResult, VectorSearchResult};
 use serde::{Deserialize, Serialize};
-
-type SearchMatch = (f64, String, String);
 
 // Shape of data that needs to be RAG'ed.
 // The definition field will be used to generate embeddings.
-#[derive(Embed, Clone, Deserialize, Debug, Serialize, Eq, PartialEq, Default)]
+#[derive(Embed, Deserialize, Debug, Serialize)]
 struct WordDefinition {
     id: String,
     word: String,
@@ -47,31 +48,41 @@ fn sample_documents() -> Vec<WordDefinition> {
     ]
 }
 
-fn print_matches(label: &str, matches: &[SearchMatch]) {
+fn print_matches(label: &str, matches: &[VectorSearchResult<WordDefinition>]) {
     println!("{label}:");
-    for (score, id, word) in matches {
-        println!("  score={score:.4} id={id} word={word}");
+    for result in matches {
+        println!(
+            "  score={:.4} id={} word={}",
+            result.score, result.id, result.document.word
+        );
     }
 }
 
-fn print_id_matches(label: &str, matches: &[(f64, String)]) {
+fn print_id_matches(label: &str, matches: &[VectorSearchIdResult]) {
     println!("{label}:");
-    for (score, id) in matches {
-        println!("  score={score:.4} id={id}");
+    for result in matches {
+        println!("  score={:.4} id={}", result.score, result.id);
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    let openai_client = OpenAI::from_env()?.bound()?;
-    let embedding_model = openai_client.embedding(openai::TEXT_EMBEDDING_ADA_002, None);
+    let embedding_model = if std::env::args().nth(1).as_deref() == Some("ollama") {
+        Ollama::new().embedding("nomic-embed-text", None).erase()
+    } else {
+        OpenAI::from_env()?
+            .embedding(openai::TEXT_EMBEDDING_ADA_002, None)
+            .erase()
+    };
     let embeddings = EmbeddingsBuilder::new(embedding_model.clone())
         .documents(sample_documents())?
         .build()
         .await?;
 
-    let vector_store =
-        InMemoryVectorStore::from_documents_with_id_f(embeddings, |doc| doc.id.clone());
+    let namespace = String::from("dictionary");
+    let vector_store = InMemoryVectorStore::from_documents_with_id_f(embeddings, |doc| {
+        format!("{namespace}:{}", doc.id)
+    });
 
     let query =
         "I need to buy something in a fictional universe. What type of money can I use for this?";
@@ -81,14 +92,9 @@ async fn main() -> Result<(), anyhow::Error> {
         .build();
 
     let index = vector_store.index(embedding_model);
-    let results = index
-        .top_n::<WordDefinition>(req.clone())
-        .await?
-        .into_iter()
-        .map(|(score, id, doc)| (score, id, doc.word))
-        .collect::<Vec<SearchMatch>>();
+    let results = index.top_n::<WordDefinition>(req.clone()).await?;
 
-    let id_results = index.top_n_ids(req).await?.into_iter().collect::<Vec<_>>();
+    let id_results = index.top_n_ids(req).await?;
 
     print_matches("Top document matches", &results);
     print_id_matches("Top document ids", &id_results);

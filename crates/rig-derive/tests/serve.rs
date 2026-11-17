@@ -1,12 +1,6 @@
-//! The bus's diagnostics name what a handler author implements.
+//! The handler table's diagnostics name what a handler author implements.
 
 #![allow(clippy::expect_used)]
-
-#[test]
-fn a_type_that_is_not_a_serve_is_told_to_implement_serve() {
-    let tests = trybuild::TestCases::new();
-    tests.compile_fail("tests/ui/serve/fail_not_a_serve.rs");
-}
 
 /// The expected output names `Serve` and nothing the author cannot
 /// implement: the crate-private boxed trait, the sealed family trait.

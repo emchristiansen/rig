@@ -9,7 +9,7 @@
 #[macro_export]
 macro_rules! session_agent {
     ($client:expr) => {{
-        let agent = $client.agent(SESSION_MODEL);
+        let agent = rig::AgentBuilder::new($client.completion(SESSION_MODEL));
         match SESSION_MAX_TOKENS {
             Some(max_tokens) => agent.max_tokens(max_tokens),
             None => agent,
@@ -32,13 +32,13 @@ macro_rules! agent_tool_sessions_case {
                     .tool(manifest)
                     .tool(labels)
                     .tool(echo)
-                    .additional_params(json ! ({ "parallel_tool_calls" : false }))
+                    .parallel_tool_calls(false)
                     .default_max_turns(10)
                     .build();
                 let mut history = Vec::<Message>::new();
                 let response = agent.chat(COMPLEX_SESSION_PROMPT, &mut history).await?;
                 assert_contains_all_case_insensitive(
-                    &response.output,
+                    &response.output(),
                     &["EMPTY-OK", "MANIFEST-OK", "LABELS-OK", "ESCAPE-OK"],
                 );
                 assert_complex_invocations(&log);
@@ -69,13 +69,13 @@ macro_rules! agent_tool_sessions_case {
                     .tool(labels)
                     .tool(optional)
                     .tool(echo)
-                    .additional_params(json ! ({ "parallel_tool_calls" : false }))
+                    .parallel_tool_calls(false)
                     .default_max_turns(10)
                     .build();
                 let mut history = Vec::<Message>::new();
                 let response = agent.chat(COMPLEX_SESSION_PROMPT, &mut history).await?;
                 assert_contains_all_case_insensitive(
-                    &response.output,
+                    &response.output(),
                     &[
                         "EMPTY-OK",
                         "MANIFEST-OK",
@@ -113,7 +113,7 @@ macro_rules! agent_tool_sessions_case {
                     .tool(labels)
                     .tool(optional)
                     .tool(echo)
-                    .additional_params(json ! ({ "parallel_tool_calls" : false }))
+                    .parallel_tool_calls(false)
                     .build();
                 let mut stream = agent
                     .prompt(COMPLEX_SESSION_PROMPT)
@@ -170,13 +170,13 @@ macro_rules! agent_tool_sessions_case {
                     .preamble(TWO_TOOL_STREAM_PREAMBLE)
                     .tool(AlphaSignal)
                     .tool(BetaSignal)
-                    .additional_params(json ! ({ "parallel_tool_calls" : true }))
+                    .parallel_tool_calls(true)
                     .default_max_turns(5)
                     .build();
                 let mut history = Vec::<Message>::new();
                 let response = agent.chat(TWO_TOOL_STREAM_PROMPT, &mut history).await?;
                 assert_contains_all_case_insensitive(
-                    &response.output,
+                    &response.output(),
                     &[ALPHA_SIGNAL_OUTPUT, BETA_SIGNAL_OUTPUT],
                 );
                 let calls = history_tool_calls(&history);
@@ -211,7 +211,7 @@ macro_rules! agent_tool_sessions_case {
                     .preamble(TWO_TOOL_STREAM_PREAMBLE)
                     .tool(AlphaSignal)
                     .tool(BetaSignal)
-                    .additional_params(json ! ({ "parallel_tool_calls" : true }))
+                    .parallel_tool_calls(true)
                     .build();
                 let mut stream = agent.prompt(TWO_TOOL_STREAM_PROMPT).max_turns(5).stream();
                 let observation = collect_stream_observation(&mut stream).await;
@@ -228,7 +228,7 @@ macro_rules! agent_tool_sessions_case {
     ($(#[$attribute:meta])* $name:ident, $wrapper:path, $scenario:literal, long_history_replay_with_tool_result_continuation_5) => {
         $(#[$attribute])*
         async fn $name() -> Result<()> {
-            $wrapper ($scenario , | client | async move { let model = client . completion (SESSION_MODEL) ; let tool_call_id = "call_REDACTED_1" ; let request = model . completion_request ("Answer in one short sentence: what is my favorite color, which label came from the tool, and which release lane did I choose? Do not call any tools." ,) . preamble ("You are concise and should rely on the provided chat history." . to_string ()) . message (Message :: user ("My favorite color is teal. Please remember it.")) . message (Message :: assistant ("Noted: your favorite color is teal.")) . message (Message :: user ("For this release, use the canary lane.")) . message (Message :: assistant ("Understood: the release lane is canary.")) . message (Message :: user ("Look up the harbor label with the tool.")) . message (Message :: Assistant { id : None , content : vec ! [AssistantContent :: tool_call (tool_call_id , AlphaSignal :: NAME , json ! ({ }) ,)] , }) . message (Message :: tool_result (tool_call_id , AlphaSignal :: NAME , ALPHA_SIGNAL_OUTPUT ,)) . message (Message :: assistant ("The harbor label is crimson-harbor.")) . tool (rig :: tool :: tool_definition (& AlphaSignal)) . tool_choice (ToolChoice :: None) . max_tokens (SESSION_MAX_TOKENS) . build () ; let (raw , response) = raw_and_normalized_completion (& model , request) . await ? ; let text = assistant_text_response (& response . choice) . ok_or_else (| | anyhow :: anyhow ! ("response should include assistant text")) ? ; assert_contains_all_case_insensitive (& text , & ["teal" , ALPHA_SIGNAL_OUTPUT , "canary"]) ; assert_response_metadata (& response , & raw) ; Ok (()) } ,) . await
+            $wrapper ($scenario , | client | async move { let model = client . completion (SESSION_MODEL) ; let tool_call_id = "call_REDACTED_1" ; let request = rig::completion::CompletionRequest::new ("Answer in one short sentence: what is my favorite color, which label came from the tool, and which release lane did I choose? Do not call any tools." ,) . preamble ("You are concise and should rely on the provided chat history." . to_string ()) . message (Message :: user ("My favorite color is teal. Please remember it.")) . message (Message :: assistant ("Noted: your favorite color is teal.")) . message (Message :: user ("For this release, use the canary lane.")) . message (Message :: assistant ("Understood: the release lane is canary.")) . message (Message :: user ("Look up the harbor label with the tool.")) . message (Message :: Assistant (rig_core::message::AssistantMessage::new (vec ! [AssistantContent :: tool_call (tool_call_id , rig_core::message::ToolName::new(AlphaSignal :: NAME).expect("tool name") , json ! ({ }) ,)]))) . message (Message::tool_result(rig_core::message::CallId::from_wire(tool_call_id), rig_core::message::ToolName::new(AlphaSignal::NAME).expect("tool name"), ALPHA_SIGNAL_OUTPUT)) . message (Message :: assistant ("The harbor label is crimson-harbor.")) . tool (rig :: tool :: tool_definition (& AlphaSignal)) . tool_choice (ToolChoice :: None) . max_tokens (SESSION_MAX_TOKENS) ; let (raw , response) = raw_and_normalized_completion (& model , request) . await ? ; let text = assistant_text_response (& response . choice) . ok_or_else (| | anyhow :: anyhow ! ("response should include assistant text")) ? ; assert_contains_all_case_insensitive (& text , & ["teal" , ALPHA_SIGNAL_OUTPUT , "canary"]) ; assert_response_metadata (& response , & raw) ; Ok (()) } ,) . await
         }
     };
 }

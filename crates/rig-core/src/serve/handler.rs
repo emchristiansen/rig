@@ -8,17 +8,21 @@
 //! ```
 
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     task::Poll,
 };
 
-use futures::{StreamExt, channel::oneshot};
+use futures::StreamExt;
 
 use crate::{
-    completion::CompletionResponse,
-    effect::{EffectId, EffectKind, HandlerDescriptor, Outcome},
+    completion::UnsupportedOption,
+    effect::{Answered, EffectId, EffectKind, HandlerDescriptor, HandlerKey},
     error::{ErrorKind, ErrorReport},
-    streaming::{BlockAccumulator, StreamEvent, StreamEvents, StreamFinal},
+    streaming::{Item, Relayed, StreamEvent, StreamEvents},
+    tool::Touches,
     wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync},
 };
 
@@ -31,8 +35,8 @@ pub type HandlerFuture<'a> = WasmBoxedFuture<'a, Reply>;
 /// A registered effect handler returning an outcome or an owned stream.
 ///
 /// Provider and tool authors do not implement this directly: the adapters
-/// in [`crate::serve::adapters`] wrap the impl-side traits (`CompletionModel`,
-/// `Tool`, `EmbeddingModel`, `ConversationMemory`, `VectorStoreIndex`). A
+/// in [`crate::serve::adapters`] wrap models, tools and indexes
+/// (`Model`, `Tool`, `VectorStoreIndex`). A
 /// host implements it for out-of-tree kinds ([`EffectKind::Custom`], typed
 /// through [`crate::effect::CustomEffect`]) or for a replayer.
 ///
@@ -43,8 +47,34 @@ pub type HandlerFuture<'a> = WasmBoxedFuture<'a, Reply>;
 /// The returned future must be `Send` natively (it runs inside the driver's
 /// task; the bound is the crate's `WasmCompatSend` marker, a no-op on
 /// browser wasm). `Self::Family` is what a typed key can be proven against
-/// (a typed registration on the bus); a handler with no one
+/// (a typed registration); a handler with no one
 /// family names [`crate::effect::family::Dynamic`].
+///
+/// A handler holding an `Rc` or a `Cell` is refused natively:
+///
+/// ```compile_fail
+/// use std::rc::Rc;
+/// use rig_core::{serve::{Dispatch, Reply, Serve}, effect::{EffectKind, HandlerDescriptor, family}};
+///
+/// struct Local(Rc<u8>);
+/// impl Serve for Local {
+///     type Family = family::Dynamic;
+///     fn descriptor(&self) -> HandlerDescriptor { unimplemented!() }
+///     async fn serve(&self, _kind: EffectKind, _dispatch: Dispatch) -> Reply { unimplemented!() }
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use std::cell::Cell;
+/// use rig_core::{serve::{Dispatch, Reply, Serve}, effect::{EffectKind, HandlerDescriptor, family}};
+///
+/// struct Local(Cell<u8>);
+/// impl Serve for Local {
+///     type Family = family::Dynamic;
+///     fn descriptor(&self) -> HandlerDescriptor { unimplemented!() }
+///     async fn serve(&self, _kind: EffectKind, _dispatch: Dispatch) -> Reply { unimplemented!() }
+/// }
+/// ```
 pub trait Serve: WasmCompatSend + WasmCompatSync {
     /// The family this handler serves, or `Dynamic`.
     type Family: crate::effect::Served;
@@ -53,18 +83,44 @@ pub trait Serve: WasmCompatSend + WasmCompatSync {
     /// checks at bind time and a scene serializes.
     fn descriptor(&self) -> HandlerDescriptor;
 
+    /// The [descriptor](Self::descriptor)'s key. A handler whose
+    /// descriptor is costly to build, such as a tool's argument schema,
+    /// says it without building one.
+    fn key(&self) -> HandlerKey {
+        self.descriptor().key
+    }
+
     /// Prepare an outcome or an owned stream for the driver to consume.
     fn serve(
         &self,
         kind: EffectKind,
         dispatch: Dispatch,
     ) -> impl Future<Output = Reply> + WasmCompatSend + use<'_, Self>;
+
+    /// What dispatching `kind` may read and change, for a tool's handler
+    /// ([`Tool::footprint`](crate::tool::Tool::footprint)); `None` when it
+    /// cannot say, such as for arguments that do not parse.
+    fn footprint(&self, kind: &EffectKind) -> Option<Touches> {
+        let _ = kind;
+        None
+    }
+
+    /// The options of `kind` this handler would leave out when it serves
+    /// it, with nothing sent: for a model's handler, what its wire or model
+    /// cannot honour ([`DynModel::check`](crate::driver::DynModel::check)).
+    /// Empty when it leaves nothing out or cannot say, as by default.
+    fn check(&self, kind: &EffectKind) -> Vec<UnsupportedOption> {
+        let _ = kind;
+        Vec::new()
+    }
 }
 
 /// Object-safe handler interface implemented for every [`Serve`].
 pub(crate) trait Handler: WasmCompatSend + WasmCompatSync {
     fn descriptor(&self) -> HandlerDescriptor;
     fn handle(&self, kind: EffectKind, dispatch: Dispatch) -> HandlerFuture<'_>;
+    fn footprint(&self, kind: &EffectKind) -> Option<Touches>;
+    fn check(&self, kind: &EffectKind) -> Vec<UnsupportedOption>;
 }
 
 // A type that is not a `Serve` should be told to implement `Serve`, never
@@ -79,11 +135,27 @@ impl<T: Serve> Handler for T {
         let observer = dispatch.observer.clone();
         let folded = dispatch.folded.clone();
         let streaming = dispatch.is_stream();
+        let level = Level::enter(&dispatch.serving);
         Box::pin(async move {
             let reply = self.serve(kind, dispatch).await;
+            // A handler that serves the dispatch inside another one, such
+            // as a wrapper's inner handler, leaves the observer to the
+            // outermost: what the wrapper publishes once its inner handler
+            // answered is part of the record.
+            if !level.outermost() {
+                return reply.observed(streaming, None, None);
+            }
             let seen = observer.and_then(|slot| lock(&slot).take());
             reply.observed(streaming, seen, folded)
         })
+    }
+
+    fn footprint(&self, kind: &EffectKind) -> Option<Touches> {
+        Serve::footprint(self, kind)
+    }
+
+    fn check(&self, kind: &EffectKind) -> Vec<UnsupportedOption> {
+        Serve::check(self, kind)
     }
 }
 
@@ -99,12 +171,47 @@ impl<H: Serve + ?Sized> Serve for Arc<H> {
     async fn serve(&self, kind: EffectKind, dispatch: Dispatch) -> Reply {
         (**self).serve(kind, dispatch).await
     }
+
+    fn footprint(&self, kind: &EffectKind) -> Option<Touches> {
+        (**self).footprint(kind)
+    }
+
+    fn check(&self, kind: &EffectKind) -> Vec<UnsupportedOption> {
+        (**self).check(kind)
+    }
+}
+
+/// One handler serving a dispatch, counted in the dispatch's handlers that
+/// serve it one inside another until it answers or is dropped.
+struct Level(Arc<AtomicUsize>);
+
+impl Level {
+    fn enter(serving: &Arc<AtomicUsize>) -> Self {
+        serving.fetch_add(1, Ordering::AcqRel);
+        Self(serving.clone())
+    }
+
+    /// Whether no handler serves the dispatch around this one: the inner
+    /// ones answered or were dropped by now.
+    fn outermost(&self) -> bool {
+        self.0.load(Ordering::Acquire) == 1
+    }
+}
+
+impl Drop for Level {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Shared, type-erased handler. Clones retain the same handler allocation.
 /// Implements `Send + Sync` on native targets, but not on WASM.
 #[derive(Clone)]
-pub struct ErasedHandler(ErasedInner);
+pub struct ErasedHandler {
+    inner: ErasedInner,
+    /// The handler's [key](Serve::key), read once.
+    key: HandlerKey,
+}
 
 #[cfg(not(target_family = "wasm"))]
 type ErasedInner = Arc<dyn Handler + Send + Sync>;
@@ -114,7 +221,39 @@ type ErasedInner = Arc<dyn Handler>;
 impl ErasedHandler {
     /// Erase `handler`.
     pub fn new(handler: impl Serve + 'static) -> Self {
-        Self(Arc::new(handler))
+        Self {
+            key: handler.key(),
+            inner: Arc::new(handler),
+        }
+    }
+
+    /// A handler that serves nothing: it is `descriptor`, and every effect
+    /// it gets is answered [`ErrorKind::HandlerUnavailable`] with `why`. For
+    /// a model whose calls a plugin answers itself, such as from a batch,
+    /// so a call that reaches the handler by mistake fails plainly while
+    /// records still name the model.
+    ///
+    /// ```
+    /// use rig_core::completion::ModelRef;
+    /// use rig_core::effect::{FamilyDescriptor, HandlerDescriptor, model_key};
+    /// use rig_core::serve::ErasedHandler;
+    ///
+    /// let descriptor = HandlerDescriptor {
+    ///     key: model_key("batch/claude"),
+    ///     family: FamilyDescriptor::Completion {
+    ///         model: ModelRef::from("batch/claude"),
+    ///         capabilities: Default::default(),
+    ///     },
+    ///     layers: Vec::new(),
+    /// };
+    /// let handler = ErasedHandler::unavailable(descriptor, "answered from the batch API");
+    /// assert_eq!(handler.key(), &model_key("batch/claude"));
+    /// ```
+    pub fn unavailable(descriptor: HandlerDescriptor, why: impl Into<String>) -> Self {
+        Self::new(Unavailable {
+            descriptor,
+            why: why.into(),
+        })
     }
 
     /// Wrap this handler in a [`Layer`](super::Layer): `intercept` sees
@@ -124,27 +263,90 @@ impl ErasedHandler {
         Self::new(super::Layer::new(self, intercept))
     }
 
+    /// Rewrite this handler's completion streams: every item of each reply
+    /// passes through a fresh `make(published)` in order, and the items it
+    /// returns go on in its place. It sees the [`Relayed::Done`](crate::streaming::Relayed::Done)
+    /// too, so a rewrite of the events also rewrites the response the reply
+    /// ends with. A unary completion is rewritten as its events, so both
+    /// delivery modes answer alike; other outcomes and errors pass as they
+    /// are. `name` joins the descriptor's layers.
+    ///
+    /// `published` is the dispatch's
+    /// [`PublishedContext`](crate::tool::PublishedContext): a fact the
+    /// rewrite inserts there before it passes the `Done` on, such as that
+    /// it split reasoning out of this reply, comes back to the driver beside
+    /// the reply and is recorded with it.
+    ///
+    /// Unlike a [`Layer`](super::Layer), the rewrite is recorded: the
+    /// record of a dispatch is the reply the consumer receives, so a replay
+    /// of it does not rewrite twice.
+    pub fn map_stream<M, F>(self, name: impl Into<String>, make: M) -> Self
+    where
+        M: Fn(Arc<crate::tool::PublishedContext>) -> F + WasmCompatSend + WasmCompatSync + 'static,
+        F: FnMut(Relayed) -> Vec<Relayed> + WasmCompatSend + 'static,
+    {
+        Self::new(super::map::MapStream::new(self, name.into(), make))
+    }
+
     /// What the erased handler is.
     pub fn descriptor(&self) -> HandlerDescriptor {
-        self.0.descriptor()
+        self.inner.descriptor()
+    }
+
+    /// The key of its [descriptor](Self::descriptor), without building one.
+    pub fn key(&self) -> &HandlerKey {
+        &self.key
     }
 
     /// Serve one effect: the driver's call, straight to the boxed handler.
     pub fn handle(&self, kind: EffectKind, dispatch: Dispatch) -> HandlerFuture<'_> {
-        self.0.handle(kind, dispatch)
+        self.inner.handle(kind, dispatch)
+    }
+
+    /// What dispatching `kind` to this handler may read and change
+    /// ([`Serve::footprint`]).
+    pub fn footprint(&self, kind: &EffectKind) -> Option<Touches> {
+        self.inner.footprint(kind)
+    }
+
+    /// The options of `kind` this handler would leave out ([`Serve::check`]).
+    pub fn check(&self, kind: &EffectKind) -> Vec<UnsupportedOption> {
+        self.inner.check(kind)
     }
 
     /// Whether two erased handlers are the same allocation.
     pub fn ptr_eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 }
 
 impl std::fmt::Debug for ErasedHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ErasedHandler")
-            .field("key", &self.0.descriptor().key)
+            .field("key", &self.key)
             .finish_non_exhaustive()
+    }
+}
+
+/// What [`ErasedHandler::unavailable`] erases: it answers every effect
+/// `HandlerUnavailable` with `why`.
+struct Unavailable {
+    descriptor: HandlerDescriptor,
+    why: String,
+}
+
+impl Serve for Unavailable {
+    type Family = crate::effect::family::Dynamic;
+
+    fn descriptor(&self) -> HandlerDescriptor {
+        self.descriptor.clone()
+    }
+
+    async fn serve(&self, _kind: EffectKind, _dispatch: Dispatch) -> Reply {
+        Reply::Outcome(Err(ErrorReport::new(
+            ErrorKind::HandlerUnavailable,
+            self.why.clone(),
+        )))
     }
 }
 
@@ -153,14 +355,23 @@ impl Serve for ErasedHandler {
     type Family = crate::effect::family::Dynamic;
 
     fn descriptor(&self) -> HandlerDescriptor {
-        self.0.descriptor()
+        self.inner.descriptor()
     }
 
     async fn serve(&self, kind: EffectKind, dispatch: Dispatch) -> Reply {
         self.handle(kind, dispatch).await
     }
+
+    fn footprint(&self, kind: &EffectKind) -> Option<Touches> {
+        self.inner.footprint(kind)
+    }
+
+    fn check(&self, kind: &EffectKind) -> Vec<UnsupportedOption> {
+        self.inner.check(kind)
+    }
 }
 
+/// What an observer of one dispatch sees: its outcome and each streamed item.
 pub trait Observe: Send + Sync {
     /// Provider witness associated with this dispatch, independently of recording.
     fn adapter_context(&self) -> Option<crate::observe::AdapterContext> {
@@ -170,27 +381,33 @@ pub trait Observe: Send + Sync {
     /// The completed handler response, or the fold of a streaming handler's
     /// events. A resolved response retains content that has no stream block,
     /// such as images emitted as unknown events.
-    fn outcome(&mut self, outcome: &Result<Outcome, ErrorReport>);
-    /// Whether streamed events are wanted verbatim ([`Self::event`]).
+    fn outcome(&mut self, outcome: Result<Answered, ErrorReport>);
+    /// Whether streamed items are wanted verbatim, with the origin and
+    /// error items, beside each [`Self::event`].
     fn keep_events(&self) -> bool;
-    /// One event pulled from the original handler stream. This is recording
-    /// evidence, not acknowledgement that a consumer received the item.
-    fn event(&mut self, event: &StreamEvent);
-    /// An error item in a kept stream, including errors after `Final`.
+    /// One item pulled from the original handler stream, kept or not. This
+    /// is recording evidence, not acknowledgement that a consumer received
+    /// the item.
+    fn event(&mut self, item: &Item<StreamEvent>);
+    /// An error item in a kept stream.
     fn stream_error(&mut self, _error: &ErrorReport) {}
+    /// Who a streamed reply is from, before its first item. Required, so a
+    /// recording observer cannot drop it: a replayed stream cut short needs
+    /// it to know its origin.
+    fn origin(&mut self, origin: &crate::message::Origin);
     /// Observe one stream item together with its first folded outcome, if any.
     /// Drivers that snapshot recording concurrently with cancellation can override
     /// this operation to make the item and its answer one observation boundary.
     fn stream_item(
         &mut self,
-        item: &Result<StreamEvent, ErrorReport>,
-        outcome: Option<&Result<Outcome, ErrorReport>>,
+        item: &Result<Relayed, ErrorReport>,
+        outcome: Option<Result<Answered, ErrorReport>>,
     ) {
-        if self.keep_events() {
-            match item {
-                Ok(event) => self.event(event),
-                Err(error) => self.stream_error(error),
-            }
+        match item {
+            Ok(Relayed::Item(item)) => self.event(item),
+            Ok(Relayed::Origin(origin)) if self.keep_events() => self.origin(origin),
+            Err(error) if self.keep_events() => self.stream_error(error),
+            _ => {}
         }
         if let Some(outcome) = outcome {
             self.outcome(outcome);
@@ -205,206 +422,65 @@ pub trait Observe: Send + Sync {
     fn patch(&mut self, kind: &EffectKind);
 }
 
-fn finish_unary(
-    accumulator: &mut BlockAccumulator,
-    message_id: Option<String>,
-    terminal: StreamFinal,
-) -> Result<Outcome, ErrorReport> {
-    let choice = crate::streaming::stamp_reasoning(
-        std::mem::replace(accumulator, BlockAccumulator::new()).finish(),
-        terminal.issuer(),
-    );
-    let mut response = CompletionResponse::new(
-        choice,
-        terminal.usage,
-        terminal.provider.clone(),
-        terminal.raw,
-    )
-    .with_optional_finish_reason(terminal.finish_reason.clone());
-    response.message_id = message_id.or(terminal.message_id.clone());
-    response.response_id = terminal.response_id.clone();
-    response.provider_request_id = terminal.provider_request_id.clone();
-    response.provider_response_headers = terminal.provider_response_headers.clone();
-    response.model = terminal.model.clone();
-    Ok(Outcome::Completion(response))
-}
-
-/// Re-emits completion content as stream events followed by `Final`. Images
-/// become unknown payloads; serialization failures become error items.
-pub(crate) fn events_from_response(
-    response: &CompletionResponse,
-) -> Vec<Result<StreamEvent, ErrorReport>> {
-    use crate::{
-        message::AssistantContent,
-        operation::AdapterOutput,
-        streaming::{BlockId, CustomToolCallEnd, MintKind, ToolCallEnd},
-    };
-
-    let mut out = AdapterOutput::new();
-    if let Some(message_id) = &response.message_id {
-        out.message_id(message_id.clone());
-    }
-    for (index, content) in response.choice.iter().enumerate() {
-        let index = index as u64;
-        match content {
-            AssistantContent::Text(text) => {
-                let id = BlockId::minted(MintKind::Text, index);
-                out.text_start(id.clone(), text.additional_params.clone());
-                out.text(text.text.clone());
-                out.text_end(id);
-            }
-            AssistantContent::Reasoning(reasoning) => {
-                let id = reasoning
-                    .id
-                    .as_deref()
-                    .map(BlockId::wire)
-                    .unwrap_or_else(|| BlockId::minted(MintKind::Reasoning, index));
-                out.reasoning_end(id, Some(reasoning.clone()), None, true);
-            }
-            // Images never stream (no adapter emits one, the accumulator has
-            // no block for one); a unary answer carrying an image reaches a
-            // stream consumer as an unmodeled item, verbatim.
-            AssistantContent::Image(image) => match serde_json::to_value(image) {
-                Ok(value) => out.unknown(crate::streaming::UnknownPayload::new(value)),
-                Err(error) => out.error(crate::error::ProviderError::Json(error)),
-            },
-            AssistantContent::ToolCall(call) => {
-                // The durable handle is separate from the assembly key and
-                // provider metadata. Local names are never inferred to be
-                // wire IDs merely because they do not look minted.
-                let mut end =
-                    ToolCallEnd::whole(call.function.name.clone(), call.function.arguments.clone())
-                        .with_namespace(call.function.namespace.clone())
-                        .with_durable_id(call.id.clone())
-                        .with_signature(call.signature.clone())
-                        .with_additional_params(call.additional_params.clone());
-                if let Some(provider) = &call.provider {
-                    end = match &provider.item_id {
-                        Some(item_id) => end
-                            .with_call_id(provider.call_id.clone())
-                            .with_tool_id(item_id.clone()),
-                        None => end.with_tool_id(provider.call_id.clone()),
-                    };
-                }
-                // Re-emission creates a fresh assembly occurrence; durable
-                // identity and provider handles are preserved on `end`.
-                out.tool_call(BlockId::minted(MintKind::Tool, index), end);
-            }
-            AssistantContent::CustomToolCall(call) => {
-                let mut end = CustomToolCallEnd::new(call.name.clone(), call.input.clone())
-                    .with_durable_id(call.id.clone())
-                    .with_namespace(call.namespace.clone());
-                if let Some(provider) = &call.provider {
-                    end = match &provider.item_id {
-                        Some(item_id) => end
-                            .with_call_id(provider.call_id.clone())
-                            .with_tool_id(item_id.clone()),
-                        None => end.with_tool_id(provider.call_id.clone()),
-                    };
-                }
-                out.custom_tool_call(BlockId::minted(MintKind::Tool, index), end);
-            }
-            // Re-emitted whole, keyed by its position like the other parts.
-            AssistantContent::ProviderItem(item) => {
-                out.provider_item(BlockId::minted(MintKind::Output, index), item.clone());
-            }
-        }
-    }
-    let mut terminal = StreamFinal::new(
-        response.provider.clone(),
-        response.usage,
-        response.raw.clone(),
-    )
-    .with_optional_finish_reason(response.finish_reason());
-    terminal.message_id = response.message_id.clone();
-    terminal.response_id = response.response_id.clone();
-    terminal.provider_request_id = response.provider_request_id.clone();
-    terminal.provider_response_headers = response.provider_response_headers.clone();
-    terminal.model = response.model.clone();
-    out.final_record(terminal);
-    // An item that failed to re-emit (an image that did not serialize) is
-    // delivered as the error it is, not dropped.
-    out.drain()
-        .map(|item| item.map_err(|error| ErrorReport::from(&error)))
-        .collect()
-}
-
-/// The one fold of a stream into the completion a unary consumer, or the
-/// record, holds: what a unary consumer runs over a streaming handler's
-/// events, what the driver's observer runs over a streaming dispatch, what
-/// a layer runs for its verdict.
+/// What a unary consumer, the record, or a layer's verdict takes from a
+/// stream: its outcome, the response the stream ends with or the first
+/// error item. The origin folded the response; the tap only watches for it.
 #[derive(Default)]
 pub struct StreamTap {
-    accumulator: BlockAccumulator,
-    message_id: Option<String>,
+    /// The tap yielded its outcome.
+    finished: bool,
 }
 
 impl StreamTap {
-    /// An empty fold.
+    /// A new stream tap.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Folds an event, returning an outcome on `Final`, an error item, or an
-    /// accumulation failure. Callers decide whether to stop after an outcome.
+    /// Returns the stream's outcome once: the response it ends with, or the
+    /// first error item. Every later call returns `None`.
     pub fn observe(
         &mut self,
-        item: &Result<StreamEvent, ErrorReport>,
-    ) -> Option<Result<Outcome, ErrorReport>> {
-        match item {
-            Err(report) => Some(Err(report.clone())),
-            Ok(StreamEvent::Final(terminal)) => Some(finish_unary(
-                &mut self.accumulator,
-                self.message_id.take(),
-                terminal.clone(),
-            )),
-            Ok(event) => {
-                if let StreamEvent::BlockStart {
-                    id,
-                    kind: crate::streaming::BlockKind::Message,
-                    ..
-                } = event
-                    && let Some(wire) = id.wire_str()
-                {
-                    self.message_id = Some(wire.to_owned());
-                }
-                if let Err(report) = self.accumulator.apply(event) {
-                    return Some(Err(report));
-                }
-                None
-            }
+        item: &Result<Relayed, ErrorReport>,
+    ) -> Option<Result<Answered, ErrorReport>> {
+        if self.finished {
+            return None;
         }
+        let outcome = match item {
+            Ok(Relayed::Origin(_) | Relayed::Item(_)) => None,
+            Ok(Relayed::Done(response)) => Some(Ok(Answered::Completion(Arc::clone(response)))),
+            Err(report) => Some(Err(report.clone())),
+        };
+        self.finished = outcome.is_some();
+        outcome
     }
 }
 
-/// Returns a retryable response error for a stream that ended before its terminal
-/// record. Retryability does not guarantee a subsequent attempt will succeed.
+/// The retryable report of a reply that ended before the provider ended it
+/// ([`ProviderError::Truncated`](crate::error::ProviderError::Truncated)).
+/// Retryability does not guarantee a subsequent attempt will succeed.
 pub fn stream_truncated() -> ErrorReport {
-    ErrorReport::new(
-        ErrorKind::Response,
-        "the stream ended before its terminal record",
-    )
-    .with_retryable(true)
+    ErrorReport::from(&crate::error::ProviderError::Truncated)
 }
 
 /// An answer, or an owned stream whose execution belongs to the driver.
 pub enum Reply {
     /// The completed unary answer or a setup error.
-    Outcome(Result<Outcome, ErrorReport>),
+    Outcome(Result<Answered, ErrorReport>),
     /// Events, including any frames after the first terminal record.
     Stream(StreamEvents),
 }
 
 impl Reply {
     /// Fold a stream to its first outcome, or return the unary answer.
-    pub async fn into_outcome(self) -> Result<Outcome, ErrorReport> {
+    pub async fn into_outcome(self) -> Result<Answered, ErrorReport> {
         self.folded_outcome(None).await
     }
 
     pub(crate) async fn folded_outcome(
         self,
         folded: Option<Folded>,
-    ) -> Result<Outcome, ErrorReport> {
+    ) -> Result<Answered, ErrorReport> {
         match self {
             Self::Outcome(outcome) => outcome,
             Self::Stream(mut stream) => {
@@ -423,12 +499,21 @@ impl Reply {
         }
     }
 
-    /// Convert a completion into events; incompatible outcomes become errors.
+    /// Convert a completion into its events, then the response;
+    /// incompatible outcomes become errors.
     pub fn into_stream(self) -> StreamEvents {
         match self {
             Self::Stream(stream) => stream,
             Self::Outcome(outcome) => Box::pin(futures::stream::iter(match outcome {
-                Ok(Outcome::Completion(response)) => events_from_response(&response),
+                Ok(Answered::Completion(response)) => {
+                    match crate::operation::completion::events_of(&response) {
+                        Ok(items) => std::iter::once(Ok(Relayed::Origin(response.origin.clone())))
+                            .chain(items.into_iter().map(|item| Ok(Relayed::Item(item))))
+                            .chain(std::iter::once(Ok(Relayed::Done(response))))
+                            .collect(),
+                        Err(error) => vec![Err(ErrorReport::from(&error))],
+                    }
+                }
                 Ok(other) => vec![Err(wrong_stream_answer(&other))],
                 Err(report) => vec![Err(report)],
             })),
@@ -438,7 +523,7 @@ impl Reply {
     fn observed(self, streaming: bool, mut seen: Option<Observed>, folded: Option<Folded>) -> Self {
         if !streaming && let Self::Outcome(outcome) = self {
             if let Some(seen) = &mut seen {
-                seen.outcome(&outcome);
+                seen.outcome(outcome.clone());
             }
             return Self::Outcome(outcome);
         }
@@ -449,9 +534,9 @@ impl Reply {
                 self
             };
         }
-        let original = match &self {
-            Self::Outcome(Ok(Outcome::Completion(response))) => {
-                Some(Ok(Outcome::Completion(response.clone())))
+        let mut original = match &self {
+            Self::Outcome(Ok(Answered::Completion(response))) => {
+                Some(Ok(Answered::Completion(response.clone())))
             }
             _ => None,
         };
@@ -464,32 +549,33 @@ impl Reply {
                 Poll::Ready(item) => item,
             };
             if let Some(item) = &item {
-                let outcome = if finished { None } else { fold.observe(item) };
+                let mut outcome = if finished { None } else { fold.observe(item) };
+                finished |= outcome.is_some();
                 if let Some(seen) = &mut seen {
-                    let recorded = outcome.as_ref().map(|outcome| {
-                        if matches!(item, Ok(StreamEvent::Final(_))) {
-                            original.as_ref().unwrap_or(outcome)
-                        } else {
-                            outcome
+                    // A unary answer made a stream is recorded as answered;
+                    // the fold's slot, when there is one, keeps the outcome.
+                    let recorded = match &outcome {
+                        None => None,
+                        Some(_) if matches!(item, Ok(Relayed::Done(_))) && original.is_some() => {
+                            original.take()
                         }
-                    });
+                        Some(_) if folded.is_none() => outcome.take(),
+                        Some(outcome) => Some(outcome.clone()),
+                    };
                     if streaming {
                         seen.item(item, recorded);
                     } else if let Some(recorded) = recorded {
                         seen.outcome(recorded);
                     }
                 }
-                if let Some(outcome) = outcome {
-                    finished = true;
-                    if let Some(folded) = &folded {
-                        *lock(folded) = Some(outcome);
-                    }
+                if let (Some(outcome), Some(folded)) = (outcome, &folded) {
+                    *lock(folded) = Some(outcome);
                 }
             } else if !finished {
                 finished = true;
                 let outcome = Err(stream_truncated());
                 if let Some(seen) = &mut seen {
-                    seen.outcome(&outcome);
+                    seen.outcome(outcome.clone());
                 }
                 if let Some(folded) = &folded {
                     *lock(folded) = Some(outcome);
@@ -502,7 +588,7 @@ impl Reply {
 
 // A layer and the recorder at its immediate inner boundary use the same fold.
 // Each outer boundary gets its own slot: a verdict can change that view.
-pub(crate) type Folded = Arc<Mutex<Option<Result<Outcome, ErrorReport>>>>;
+pub(crate) type Folded = Arc<Mutex<Option<Result<Answered, ErrorReport>>>>;
 
 fn lock<T>(value: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     value
@@ -519,6 +605,9 @@ pub struct Dispatch {
     streaming: bool,
     scopes: Vec<Arc<dyn std::any::Any + Send + Sync>>,
     observer: Option<Arc<Mutex<Option<Observed>>>>,
+    /// How many handlers serve it now, one inside another: only the
+    /// outermost tells the observer and the fold, once it answered.
+    serving: Arc<AtomicUsize>,
     /// The layer whose verdict replaced the answer the consumer receives,
     /// once one did. Shared down the layer chain; a driver reads it after
     /// the reply ([`Dispatch::replaced_by`]).
@@ -549,6 +638,7 @@ impl Dispatch {
             adapter_context_explicit: false,
             scopes: Vec::new(),
             observer: None,
+            serving: Arc::default(),
             replaced_by: Arc::new(Mutex::new(None)),
             folded: None,
         }
@@ -592,6 +682,9 @@ impl Dispatch {
     }
 
     /// Observe the original handler answer independently of layer verdicts.
+    /// A handler that serves the dispatch through an inner one, passing it
+    /// on, is observed once it answered, with what it published by then;
+    /// a [`Layer`](super::Layer) hands the observer to the handler it wraps.
     pub fn with_observer(mut self, observer: Box<dyn Observe>) -> Self {
         if !self.adapter_context_explicit {
             self.adapter_context = observer.adapter_context();
@@ -601,6 +694,21 @@ impl Dispatch {
             told: false,
         }))));
         self
+    }
+
+    /// This dispatch observed by `recorder` under its id, as a recording
+    /// driver installs it after [`begin`](super::Recorder::begin): its
+    /// outcome, stream, origin and layer decisions, and the tool output its
+    /// handler publishes into a [`PublishedContext`](crate::tool::PublishedContext)
+    /// scope. Add the scopes first.
+    pub fn recorded_by(self, recorder: Arc<dyn super::Recorder + Send + Sync>) -> Self {
+        let observer = super::recorder::RecordingObserver {
+            recorder,
+            id: self.id,
+            published: self.scope::<crate::tool::PublishedContext>(),
+            streamed: false,
+        };
+        self.with_observer(Box::new(observer))
     }
 
     /// Supply provider context for this invocation independently of request data.
@@ -652,6 +760,7 @@ impl Dispatch {
             adapter_context_explicit: self.adapter_context_explicit,
             scopes: self.scopes.clone(),
             observer: observer.map(|seen| Arc::new(Mutex::new(Some(seen)))),
+            serving: Arc::default(),
             replaced_by: self.replaced_by.clone(),
             folded,
         }
@@ -664,7 +773,7 @@ struct Observed {
 }
 
 impl Observed {
-    fn outcome(&mut self, outcome: &Result<Outcome, ErrorReport>) {
+    fn outcome(&mut self, outcome: Result<Answered, ErrorReport>) {
         if !self.told {
             self.told = true;
             self.observer.outcome(outcome);
@@ -673,8 +782,8 @@ impl Observed {
 
     fn item(
         &mut self,
-        item: &Result<StreamEvent, ErrorReport>,
-        outcome: Option<&Result<Outcome, ErrorReport>>,
+        item: &Result<Relayed, ErrorReport>,
+        outcome: Option<Result<Answered, ErrorReport>>,
     ) {
         let outcome = outcome.filter(|_| !self.told);
         self.told |= outcome.is_some();
@@ -684,11 +793,11 @@ impl Observed {
 
 impl Drop for Observed {
     fn drop(&mut self) {
-        self.outcome(&Err(cancelled()));
+        self.outcome(Err(cancelled()));
     }
 }
 
-fn wrong_stream_answer(other: &Outcome) -> ErrorReport {
+fn wrong_stream_answer(other: &Answered) -> ErrorReport {
     ErrorReport::new(
         ErrorKind::Internal,
         format!(
@@ -712,44 +821,11 @@ pub fn cancelled() -> ErrorReport {
 #[error("the dispatch's consumer is gone")]
 pub struct SinkClosed;
 
-/// A single-use answer owned by an external responder.
-pub struct Resolver(oneshot::Sender<Result<Outcome, ErrorReport>>);
-
-/// Return a resolver and the answer future a handler must await.
-/// Dropping the resolver without answering reports the established
-/// unanswered-handler error; dropping the future closes the resolver.
-pub fn deferred() -> (
-    Resolver,
-    impl Future<Output = Result<Outcome, ErrorReport>> + Send + 'static,
-) {
-    let (sender, receiver) = oneshot::channel();
-    (Resolver(sender), async move {
-        receiver.await.unwrap_or_else(|_| {
-            Err(ErrorReport::new(
-                ErrorKind::Internal,
-                "the handler dropped its outcome sink without answering",
-            ))
-        })
-    })
-}
-
-impl Resolver {
-    /// Answer once. A late answer is discarded and reports closure.
-    pub fn resolve(self, outcome: Result<Outcome, ErrorReport>) -> Result<(), SinkClosed> {
-        self.0.send(outcome).map_err(|_| SinkClosed)
-    }
-
-    /// Whether the handler stopped waiting for this answer.
-    pub fn is_closed(&self) -> bool {
-        self.0.is_canceled()
-    }
-}
-
 /// Serve an effect inline, using the same reply conversions as a driver.
 pub async fn serve_inline(
     handler: &ErasedHandler,
     kind: EffectKind,
-) -> Result<Outcome, ErrorReport> {
+) -> Result<Answered, ErrorReport> {
     serve_inline_with(handler, kind, Vec::new()).await
 }
 
@@ -758,7 +834,7 @@ pub async fn serve_inline_with(
     handler: &ErasedHandler,
     kind: EffectKind,
     scopes: Vec<Arc<dyn std::any::Any + Send + Sync>>,
-) -> Result<Outcome, ErrorReport> {
+) -> Result<Answered, ErrorReport> {
     let mut dispatch = Dispatch::new(EffectId::from_raw(0), false);
     for scope in scopes {
         dispatch = dispatch.with_scope(scope);

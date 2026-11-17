@@ -7,9 +7,8 @@
 use futures::StreamExt;
 use rig::agent::MultiTurnStreamItem;
 use rig::effect::EffectFamily;
-use rig::prelude::*;
 use rig::providers::openai;
-use rig::streaming::{Delta, StreamEvent};
+use rig::streaming::StreamEvent;
 use rig_cassette::agent::AgentReplayExt;
 
 use super::super::support::with_openai_corpus_delta_cassette;
@@ -22,9 +21,7 @@ const ADD_PROMPT: &str = "Use the add tool to add 17 and 25, then reply with jus
 async fn chat_baseline_effect_log_is_the_golden_fixture() {
     with_openai_corpus_delta_cassette("corpus_delta/chat_baseline", |client| async move {
         let recorder = rig_cassette::effect_log::EffectLogRecorder::keeping_stream_events();
-        let agent = client
-            .chat
-            .agent(openai::GPT_4O)
+        let agent = rig::AgentBuilder::new(client.chat.completion(openai::GPT_4O))
             .name("golden")
             .preamble(TOOLS_PREAMBLE)
             .temperature(0.0)
@@ -35,7 +32,7 @@ async fn chat_baseline_effect_log_is_the_golden_fixture() {
         let mut output = None;
         while let Some(item) = stream.next().await {
             if let MultiTurnStreamItem::FinalResponse(response) = item.expect("the stream yields") {
-                output = Some(response.output);
+                output = Some(response.output());
             }
         }
         drop(stream);
@@ -52,13 +49,9 @@ async fn chat_baseline_effect_log_is_the_golden_fixture() {
         );
         let events = log.records[0].events.as_ref().expect("events are kept");
         assert!(
-            events.iter().any(|event| matches!(
-                event,
-                StreamEvent::BlockDelta {
-                    delta: Delta::ToolName { .. },
-                    ..
-                }
-            )),
+            events
+                .events()
+                .any(|event| matches!(event, StreamEvent::Arguments { .. })),
             "the wire streams the tool's name as a delta"
         );
         crate::goldens::golden_effects("openai_delta_chat_baseline", &log);

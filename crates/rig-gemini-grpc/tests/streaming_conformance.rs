@@ -1,42 +1,70 @@
 //! Wire-conformance suite for the Gemini gRPC typed-event wire.
 //!
 //! Events-first (`WireInput::Event`): fixture frames are already-typed
-//! protobuf responses driven through
-//! [`rig_gemini_grpc::streaming::stream_from_events`] — the shared driver,
-//! canonical grammar, and terminal normalization — with no gRPC transport.
+//! protobuf responses, transcoded as the transport transcodes them and
+//! replayed by a scripted transport through the `GenerateContent` wire (the
+//! shared driver, canonical grammar, and terminal normalization) with no
+//! gRPC channel.
 //! Frame-level malformed/unknown scenarios self-report as skipped: prost
 //! surfaces decode failures as transport `Status` errors, and its
 //! unknown-variant signal is the sub-frame `part.data` oneof decoding to
 //! `None`.
 
-use rig_core::completion::FinishReason;
+use rig_core::completion::{CompletionRequest, FinishReason};
+use rig_core::driver::{Exchange, Model, Opened, Opening, Transport};
 use rig_core::error::ProviderError;
+use rig_core::providers::gemini::streaming::GenerateContentChunk;
 use rig_core::test_utils::streaming_conformance::{
     InterleavedReasoningFixture, ProviderWireFixture, WireDriver, WireInput, event_frame,
     fixtures::drain,
 };
+use rig_gemini_grpc::completion::{GenerateContent, rest_chunk};
 use rig_gemini_grpc::proto;
+
+/// Replays scripted reply chunks as a streamed reply.
+#[derive(Clone)]
+struct Scripted(std::sync::Arc<std::sync::Mutex<Vec<Result<GenerateContentChunk, ProviderError>>>>);
+
+impl Transport<GenerateContent> for Scripted {
+    fn send(
+        &self,
+        _request: proto::GenerateContentRequest,
+        _exchange: Exchange,
+    ) -> Opening<GenerateContentChunk> {
+        let chunks = match self.0.lock() {
+            Ok(mut chunks) => std::mem::take(&mut *chunks),
+            Err(_) => {
+                return Opening::failed(ProviderError::Provider("script lock poisoned".to_owned()));
+            }
+        };
+        Opening::ready(Opened::new(futures::stream::iter(chunks)))
+    }
+}
 
 fn driver() -> WireDriver {
     WireDriver::new("gemini-grpc", |chunks| {
         Box::pin(async move {
-            let events: Vec<Result<proto::GenerateContentResponse, ProviderError>> = chunks
+            let events: Vec<Result<GenerateContentChunk, ProviderError>> = chunks
                 .into_iter()
                 .map(|chunk| match chunk {
                     Ok(frame) => frame
                         .downcast_event::<proto::GenerateContentResponse>()
-                        .cloned()
                         .ok_or_else(|| {
                             ProviderError::Provider(
                                 "gemini-grpc conformance frames must be protobuf responses"
                                     .to_string(),
                             )
-                        }),
-                    Err(error) => Err(ProviderError::Http(error)),
+                        })
+                        .and_then(rest_chunk),
+                    Err(error) => Err(ProviderError::Http(error.into())),
                 })
                 .collect();
-            let stream =
-                rig_gemini_grpc::streaming::stream_from_events(futures::stream::iter(events));
+            let request: CompletionRequest = CompletionRequest::new("hello");
+            let stream = Model::new(
+                GenerateContent::new("gemini-2.5-pro"),
+                Scripted(std::sync::Arc::new(std::sync::Mutex::new(events))),
+            )
+            .stream(request)?;
             Ok(drain(stream).await)
         })
     })
@@ -52,6 +80,7 @@ fn response(parts: Vec<proto::Part>, finish_reason: i32) -> proto::GenerateConte
             finish_reason,
             index: None,
             finish_message: None,
+            ..Default::default()
         }],
         prompt_feedback: None,
         usage_metadata: None,
@@ -65,16 +94,17 @@ fn text_part(text: &str) -> proto::Part {
         thought: false,
         thought_signature: Vec::new(),
         part_metadata: None,
+        metadata: None,
         data: Some(proto::part::Data::Text(text.to_string())),
     }
 }
 
 fn function_call_part(name: &str) -> proto::Part {
-    let args = proto::Struct {
+    let args = prost_types::Struct {
         fields: [(
             "city".to_string(),
-            proto::Value {
-                kind: Some(proto::value::Kind::StringValue("Tokyo".to_string())),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::StringValue("Tokyo".to_string())),
             },
         )]
         .into_iter()
@@ -84,6 +114,7 @@ fn function_call_part(name: &str) -> proto::Part {
         thought: false,
         thought_signature: Vec::new(),
         part_metadata: None,
+        metadata: None,
         data: Some(proto::part::Data::FunctionCall(proto::FunctionCall {
             name: name.to_string(),
             args: Some(args),
@@ -97,6 +128,7 @@ fn thought_part(text: &str) -> proto::Part {
         thought: true,
         thought_signature: Vec::new(),
         part_metadata: None,
+        metadata: None,
         data: Some(proto::part::Data::Text(text.to_string())),
     }
 }
@@ -115,7 +147,7 @@ fn usage(prompt: i32, candidates: i32, total: i32) -> proto::UsageMetadata {
         prompt_token_count: prompt,
         candidates_token_count: candidates,
         total_token_count: total,
-        cached_content_token_count: 0,
+        ..Default::default()
     }
 }
 
@@ -139,15 +171,14 @@ fn fixture() -> ProviderWireFixture {
         // prost owns wire decoding: a corrupt frame surfaces as a transport
         // `Status` error, so no frame-level malformed input can be spelled.
         malformed_frame: None,
-        // The unknown-variant signal is a sub-frame oneof (`part.data` =
-        // `None`), warn-skipped by the adapter; the classify triage is pinned
-        // by `classify_typed_event`'s unit tests in `wire.rs`.
+        // An unknown part kind is a sub-frame oneof (`part.data` = `None`),
+        // which transcodes to a part with no data the decoder skips.
         unknown_event_frame: None,
         defective_known_frame: None,
         delta_less_prelude_frame: None,
         refusal: None,
         // Thought → interleaved function call → thought: the constant-id
-        // boundary the adapter owns by synthesizing reasoning ends.
+        // boundary the decoder owns by ending the first reasoning block.
         interleaved_reasoning: Some(InterleavedReasoningFixture {
             frames: vec![
                 event_frame(response(vec![thought_part("before tool")], 0)),

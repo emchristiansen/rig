@@ -22,8 +22,8 @@
 //! The invariant is ported from `inspirations/pydantic-ai`
 //! (`tests/cassette_utils.py` `check_cache_prefix_stability`); the plumbing is
 //! rig's.
-#![allow(dead_code)]
 
+use rig_core::json_utils::remove_preserving_order;
 use serde_json::Value;
 
 /// One cache-ordered block of a request, tagged with the field it came from so a
@@ -77,16 +77,15 @@ pub fn canonical_prefix_blocks(path: &str, body: &Value) -> Option<Vec<PrefixBlo
     } else if path.ends_with("/chat/completions") {
         add("tools", body.get("tools"));
         add("messages", body.get("messages"));
+    } else if path.ends_with("/api/chat") {
+        // Ollama. Carries its system prompt as a `system`-role entry inside
+        // `messages`, like the OpenAI-compatible wires.
+        add("tools", body.get("tools"));
+        add("messages", body.get("messages"));
     } else if path.ends_with("/responses") {
         add("tools", body.get("tools"));
         add("instructions", body.get("instructions"));
         add("input", body.get("input"));
-    } else if path.ends_with("/v2/chat") {
-        // Cohere Chat v2. Tools render ahead of the message list; Cohere carries
-        // its system prompt as a `system`-role entry inside `messages`, so there
-        // is no separate instruction field to model.
-        add("tools", body.get("tools"));
-        add("messages", body.get("messages"));
     } else if path.contains("/converse") {
         // Bedrock Converse (`/model/<id>/converse`, `/converse-stream`).
         //
@@ -101,16 +100,53 @@ pub fn canonical_prefix_blocks(path: &str, body: &Value) -> Option<Vec<PrefixBlo
         );
         add("system", body.get("system"));
         add("messages", body.get("messages"));
-    } else if path.ends_with("/api/chat") {
-        // Ollama. Carries its system prompt as a `system`-role entry inside
-        // `messages`, like the OpenAI-compatible wires.
-        add("tools", body.get("tools"));
-        add("messages", body.get("messages"));
     } else {
         return None;
     }
 
     Some(blocks)
+}
+
+/// The request a Gemini `generateContent` body stands for when it reads an
+/// explicit cache: the cache's system instruction, tools, tool config and
+/// contents, followed by the body's own contents.
+///
+/// A request that reads a cache sends only what came after it, so compared
+/// raw with the request before it, it looks like a different, shorter
+/// conversation. Spliced with the body that created the cache, it is compared
+/// as the whole conversation it is: a roll to a new cache is then clean, and
+/// a cache that dropped or rewrote an earlier turn is still a violation.
+///
+/// `cache` is the `cachedContents` create body. Returns `None` when `body`
+/// names no cache.
+pub fn splice_cached_content(body: &Value, cache: &Value) -> Option<Value> {
+    body.get("cachedContent")?.as_str()?;
+    let mut spliced = body.clone();
+    let object = spliced.as_object_mut()?;
+    remove_preserving_order(object, "cachedContent");
+    for key in ["systemInstruction", "tools", "toolConfig"] {
+        match cache.get(key) {
+            Some(value) => {
+                object.insert(key.to_owned(), value.clone());
+            }
+            None => {
+                remove_preserving_order(object, key);
+            }
+        }
+    }
+    let mut contents = cache
+        .get("contents")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    contents.extend(
+        body.get("contents")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+    );
+    object.insert("contents".to_owned(), Value::Array(contents));
+    Some(spliced)
 }
 
 /// Strip cache *metadata* so the rule compares cached *content*.
@@ -131,12 +167,34 @@ pub fn canonical_prefix_blocks(path: &str, body: &Value) -> Option<Vec<PrefixBlo
 ///
 /// Stripping the marker restores both: the pairs are compared, and they compare
 /// equal unless the actual content moved.
+///
+/// OpenAI's `prompt_cache_breakpoint` is the same kind of marker. Placing one
+/// on a tool output given as one text turns it into that text's
+/// `input_text` part, which OpenAI caches as the same prefix (measured: a
+/// cache written with the part was read by the string form), so that part
+/// compares as its text.
 fn strip_cache_metadata(value: &Value) -> Value {
     match value {
         Value::Object(map) => Value::Object(
             map.iter()
-                .filter(|(key, _)| key.as_str() != "cache_control")
-                .map(|(key, nested)| (key.clone(), strip_cache_metadata(nested)))
+                .filter(|(key, _)| {
+                    !matches!(key.as_str(), "cache_control" | "prompt_cache_breakpoint")
+                })
+                .map(|(key, nested)| {
+                    let nested = match (key.as_str(), nested.as_array().map(Vec::as_slice)) {
+                        ("output", Some([part]))
+                            if matches!(
+                                map.get("type").and_then(Value::as_str),
+                                Some("function_call_output" | "custom_tool_call_output")
+                            ) && part.get("type").and_then(Value::as_str)
+                                == Some("input_text") =>
+                        {
+                            part.get("text").unwrap_or(nested)
+                        }
+                        _ => nested,
+                    };
+                    (key.clone(), strip_cache_metadata(nested))
+                })
                 .collect(),
         ),
         Value::Array(items) => Value::Array(items.iter().map(strip_cache_metadata).collect()),
@@ -353,7 +411,10 @@ pub fn compare(
                 later: "<dropped: the later request is shorter>".to_owned(),
             });
         };
-        if earlier_level != later_level || earlier_block != later_block {
+        if earlier_level != later_level
+            || (earlier_block != later_block
+                && !finished_turn_lost_its_signatures(earlier_block, later_block, later, index))
+        {
             return Some(Violation {
                 scenario: scenario.to_owned(),
                 pair,
@@ -365,6 +426,55 @@ pub fn compare(
         }
     }
     None
+}
+
+/// Whether a Gemini content changed only because Gemini's current-turn thought
+/// replay (`ThoughtReplay::CurrentTurn`) stopped re-sending the signatures of
+/// a turn the model has finished.
+///
+/// That is the only change the rule accepts: `later` is `earlier` with every
+/// `thoughtSignature` removed from its parts, and the later request carries a
+/// new user message after it, so the turn it belongs to is over. Any other
+/// difference, or a signature dropped from the current turn, is still a moved
+/// prefix. The explicit caches that mode rolls are cut at user-turn
+/// boundaries and hold the stripped form, so no cache is busted by it.
+fn finished_turn_lost_its_signatures(
+    earlier: &str,
+    later: &str,
+    later_blocks: &[PrefixBlock],
+    index: usize,
+) -> bool {
+    let (Ok(mut earlier), Ok(later)) = (
+        serde_json::from_str::<Value>(earlier),
+        serde_json::from_str::<Value>(later),
+    ) else {
+        return false;
+    };
+    let Some(parts) = earlier.get_mut("parts").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let mut removed = false;
+    for part in parts {
+        if let Some(part) = part.as_object_mut() {
+            removed |= remove_preserving_order(part, "thoughtSignature").is_some();
+        }
+    }
+    let user_text_follows = later_blocks
+        .iter()
+        .skip(index + 1)
+        .filter(|(level, _)| *level == "contents")
+        .filter_map(|(_, block)| serde_json::from_str::<Value>(block).ok())
+        .any(|content| {
+            let parts = content.get("parts").and_then(Value::as_array);
+            content.get("role").and_then(Value::as_str) == Some("user")
+                && parts.is_some_and(|parts| parts.iter().any(|part| part.get("text").is_some()))
+                && !parts.is_some_and(|parts| {
+                    parts
+                        .iter()
+                        .any(|part| part.get("functionResponse").is_some())
+                })
+        });
+    removed && earlier == later && user_text_follows
 }
 
 /// Limit a diagnostic block to 220 Unicode characters followed by an ellipsis.

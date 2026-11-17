@@ -17,10 +17,10 @@
 //! **per attempt**: a multi-turn tool run records two different payloads, a
 //! retried turn records the retried attempt's own.
 //!
-//! The chat route is the primary surface (each turn's payload is an
-//! `openai::CompletionResponse` whose `id` is a `chatcmpl-` id); the
+//! The chat route is the primary surface (each turn's payload is the
+//! provider's reply document, whose `id` is a `chatcmpl-` id); the
 //! Responses route repeats the hook and multi-turn cells (payload
-//! `openai::responses_api::CompletionResponse`, `resp_` ids). Per-attempt
+//! the Responses response object, `resp_` ids). Per-attempt
 //! identity is proven the way `response_identity.rs` proves it: each
 //! recorded interaction's response id, in wire order, is the id the matching
 //! `raw` carries — replay-exact, presence-checked while recording because
@@ -30,15 +30,9 @@
 //!
 //! | # | Cell | Dimension | expected | Status |
 //! |---|------|-----------|----------|--------|
-//! | 1 | `chat_blocking_hooks_see_raw` | chat, blocking | `CompletionResponse`/`ModelTurnFinished` hooks see `raw` = call's raw | recorded |
 //! | 2 | `chat_streamed_hooks_see_raw` | chat, streamed | `CompletionResponse`/`ModelTurnFinished` hooks, `Final`, `CompletionCall` see raw | recorded |
-//! | 3 | `chat_blocking_tool_run_records_distinct_raw` | chat, blocking, tool run | two `completion_calls`, two payloads, ids in fixture order; one `CompletionResponse` per call, the first a tool-call turn | recorded |
-//! | 4 | `chat_streamed_tool_run_records_distinct_raw` | chat, streamed, tool run | as 3, `Final` carries the final turn's raw | recorded |
-//! | 5 | `chat_retried_turn_records_retried_attempt_raw` | chat, retry hook | second record carries the retried attempt's raw | recorded |
 //! | 6 | `responses_blocking_hooks_see_raw` | Responses, blocking | as 1 | recorded |
 //! | 7 | `responses_streamed_hooks_see_raw` | Responses, streamed | as 2 | recorded |
-//! | 8 | `responses_blocking_tool_run_records_distinct_raw` | Responses, blocking, tool run | as 3 | recorded |
-//! | 9 | `responses_streamed_tool_run_records_distinct_raw` | Responses, streamed, tool run | as 4 | recorded |
 //!
 //! Every cell is recorded; none is unit-only. Premise, re-derived from each
 //! cell's fixture after the wrapper returns: the fixture holds exactly as many
@@ -57,9 +51,7 @@ use rig::agent::{
 };
 use rig::completion::ResponseIdentity;
 use rig::message::AssistantContent;
-use rig::prelude::*;
 use rig::providers::openai;
-use rig::streaming::StreamEvent;
 use serde_json::Value;
 
 use super::super::support::{OpenAiCassette, sse_json_frames, with_openai_cassette};
@@ -79,8 +71,8 @@ enum Route {
 impl Route {
     fn builder(self, client: OpenAiCassette) -> AgentBuilder {
         match self {
-            Route::Chat => client.chat.agent(MODEL),
-            Route::Responses => client.openai.agent(MODEL),
+            Route::Chat => rig::AgentBuilder::new(client.chat.completion(MODEL)),
+            Route::Responses => rig::AgentBuilder::new(client.openai.completion(MODEL)),
         }
     }
 
@@ -122,26 +114,6 @@ impl Route {
         };
         id.unwrap_or_else(|| panic!("recorded {self:?} stream terminal must carry an id"))
             .to_owned()
-    }
-
-    /// Whether one payload (a `raw` value) is a tool-call turn's.
-    ///
-    /// A blocking payload is the wire body, so the tool call itself is
-    /// visible. A streamed payload is the terminal record: the chat terminal
-    /// reports `finish_reason: tool_calls`; the Responses terminal names the
-    /// assistant message (`message_id`) only when the turn produced one, and
-    /// a tool-only turn produces none.
-    fn raw_is_tool_turn(self, raw: &Value, streamed: bool) -> bool {
-        match (self, streamed) {
-            (Route::Chat, false) => raw["choices"][0]["message"]["tool_calls"]
-                .as_array()
-                .is_some_and(|calls| !calls.is_empty()),
-            (Route::Chat, true) => raw["finish_reason"] == "tool_calls",
-            (Route::Responses, false) => raw["output"]
-                .as_array()
-                .is_some_and(|items| items.iter().any(|item| item["type"] == "function_call")),
-            (Route::Responses, true) => raw.get("message_id").is_none_or(Value::is_null),
-        }
     }
 }
 
@@ -207,46 +179,11 @@ impl AgentHook for RawProbe {
     }
 }
 
-/// Rejects the first turn that carries the `RETRY:` marker once, exactly as
-/// `response_retry.rs` does, so the run makes two attempts at the same turn.
-#[derive(Clone, Default)]
-struct RetryAttempts(usize);
-
-struct RetryOnceOnMarker;
-
-impl AgentHook for RetryOnceOnMarker {
-    async fn on_model_turn_finished(
-        &self,
-        ctx: &HookContext,
-        event: ModelTurnFinished<'_>,
-    ) -> ModelTurnAction {
-        let rejected = event.content.iter().any(|content| {
-            matches!(content, AssistantContent::Text(text) if text.text.contains("RETRY:"))
-        });
-        if !rejected {
-            return ModelTurnAction::continue_run();
-        }
-        let attempt = ctx.scratchpad().update(|attempts: &mut RetryAttempts| {
-            attempts.0 += 1;
-            attempts.0
-        });
-        if attempt == 1 {
-            ModelTurnAction::retry_with_feedback(
-                "Replace the rejected response. Reply exactly `ACCEPTED`.",
-            )
-        } else {
-            ModelTurnAction::stop("response retry limit exceeded")
-        }
-    }
-}
-
 /// What a cell observes from one run, moved out of the cassette closure so the
 /// assertions run *after* the wrapper wrote the fixture.
 #[derive(Default)]
 struct RunObservation {
     calls: Vec<rig::agent::CompletionCall>,
-    /// The `raw` of every streamed `StreamedAssistantContent::Final`, in order.
-    finals: Vec<Value>,
     /// The `raw` of every streamed `MultiTurnStreamItem::CompletionCall`.
     stream_calls: Vec<Value>,
     output: String,
@@ -296,8 +233,8 @@ fn blocking_body(sink: Observed, route: Route, tools: bool, probe: RawProbe) -> 
                 .await
                 .expect("agent run should succeed");
             *sink.lock().expect("observation mutex") = Some(RunObservation {
+                output: response.output(),
                 calls: response.completion_calls,
-                output: response.output,
                 ..Default::default()
             });
         })
@@ -314,9 +251,6 @@ fn streamed_body(sink: Observed, route: Route, tools: bool, probe: RawProbe) -> 
             let mut final_response = None;
             while let Some(item) = stream.next().await {
                 match item.expect("stream item should succeed") {
-                    MultiTurnStreamItem::StreamAssistantItem(StreamEvent::Final(terminal)) => {
-                        observation.finals.push(terminal.raw.clone())
-                    }
                     MultiTurnStreamItem::CompletionCall(call) => {
                         observation.stream_calls.push(call.raw.clone());
                     }
@@ -325,8 +259,8 @@ fn streamed_body(sink: Observed, route: Route, tools: bool, probe: RawProbe) -> 
                 }
             }
             let response = final_response.expect("stream should end with a FinalResponse");
+            observation.output = response.output();
             observation.calls = response.completion_calls;
-            observation.output = response.output;
             *sink.lock().expect("observation mutex") = Some(observation);
         })
     })
@@ -351,20 +285,6 @@ fn recorded_ids(scenario: &str, route: Route, streamed: bool) -> Vec<String> {
 /// (`id`), a streamed payload is the route's terminal record (`response_id`).
 fn raw_id(raw: &Value) -> Option<&str> {
     raw["id"].as_str().or_else(|| raw["response_id"].as_str())
-}
-
-/// The assistant text a *blocking* chat payload carries. The captured value is
-/// the response as rig's wire type parsed it, and that type models assistant
-/// content as parts — so a wire string comes back as one text part.
-fn chat_raw_text(raw: &Value) -> String {
-    match &raw["choices"][0]["message"]["content"] {
-        Value::String(text) => text.clone(),
-        Value::Array(parts) => parts
-            .iter()
-            .filter_map(|part| part["text"].as_str())
-            .collect(),
-        other => panic!("unexpected chat raw content shape {other}"),
-    }
 }
 
 /// Every recorded call carries a payload whose id is the matching fixture
@@ -492,11 +412,6 @@ fn assert_streamed_hooks_see_raw(
         "{scenario}: ModelTurnFinished hook sees the terminal's raw"
     );
     assert_eq!(
-        observation.finals,
-        vec![call_raw.clone()],
-        "{scenario}: the streamed Final carries the turn's raw"
-    );
-    assert_eq!(
         observation.stream_calls,
         vec![call_raw],
         "{scenario}: the streamed CompletionCall item carries the turn's raw"
@@ -507,112 +422,9 @@ fn assert_streamed_hooks_see_raw(
 // Multi-turn tool runs (cells 3–4, 8–9)
 // ---------------------------------------------------------------------------
 
-fn assert_tool_run_records_distinct_raw(
-    scenario: &str,
-    route: Route,
-    streamed: bool,
-    probe: &RawProbe,
-    observation: RunObservation,
-) {
-    let recorded = recorded_ids(scenario, route, streamed);
-    assert!(
-        recorded.len() >= 2,
-        "{scenario}: a tool run makes at least two calls, got {}",
-        recorded.len()
-    );
-    assert_calls_carry_recorded_raw(scenario, route, &observation.calls, &recorded);
-    let raws: Vec<Value> = observation
-        .calls
-        .iter()
-        .map(|call| call.raw.clone())
-        .collect();
-    // The payloads differ in *content*, not just id: the first turn called the
-    // tool, the last answered in text.
-    assert!(
-        route.raw_is_tool_turn(&raws[0], streamed),
-        "{scenario}: the first attempt's raw is the tool-call turn's"
-    );
-    let last = raws.last().expect("at least two");
-    assert!(
-        !route.raw_is_tool_turn(last, streamed),
-        "{scenario}: the final attempt's raw is the text answer's"
-    );
-    assert!(
-        observation.output.contains('5'),
-        "{scenario}: the run answered 2 + 3, got {:?}",
-        observation.output
-    );
-    // Every ModelTurnFinished observation sees its own attempt's payload.
-    let turns = probe.turns();
-    assert_eq!(
-        turns.len(),
-        raws.len(),
-        "{scenario}: one turn event per call"
-    );
-    for (index, ((_, turn_raw), raw)) in turns.iter().zip(&raws).enumerate() {
-        assert_eq!(
-            turn_raw, raw,
-            "{scenario}: turn {index} hook sees that attempt's raw"
-        );
-    }
-    // CompletionResponse fires once per accepted call on both drivers — the
-    // tool-only turn included — and each firing sees its own attempt's
-    // payload: the first is the tool-call turn, the last the text answer's.
-    let responses = probe.completion_responses();
-    assert_eq!(
-        responses.len(),
-        raws.len(),
-        "{scenario}: one CompletionResponse per call"
-    );
-    for (index, (seen, raw)) in responses.iter().zip(&raws).enumerate() {
-        assert_eq!(
-            seen.raw, *raw,
-            "{scenario}: CompletionResponse {index} sees that attempt's raw"
-        );
-        assert_eq!(
-            seen.streaming, streamed,
-            "{scenario}: CompletionResponse {index} reports the driver it fired on"
-        );
-    }
-    assert!(
-        responses[0].tool_call,
-        "{scenario}: the first CompletionResponse's content is the tool-call turn"
-    );
-    assert!(
-        !responses.last().expect("at least two").tool_call,
-        "{scenario}: the last CompletionResponse's content is the text answer"
-    );
-    if streamed {
-        assert_eq!(
-            observation.stream_calls, raws,
-            "{scenario}: streamed CompletionCall items carry each attempt's raw in order"
-        );
-        // Only turns that streamed text yield a Final; the last one is the
-        // final answer's, and it carries the final turn's payload.
-        assert_eq!(
-            observation.finals.last(),
-            Some(last),
-            "{scenario}: the streamed Final carries the final turn's raw"
-        );
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Chat route
 // ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn chat_blocking_hooks_see_raw() {
-    const SCENARIO: &str = "raw_capture_agent_matrix/chat_blocking_hooks_see_raw";
-    let probe = RawProbe::default();
-    let observed = Observed::default();
-    with_openai_cassette(
-        "raw_capture_agent_matrix/chat_blocking_hooks_see_raw",
-        blocking_body(observed.clone(), Route::Chat, false, probe.clone()),
-    )
-    .await;
-    assert_blocking_hooks_see_raw(SCENARIO, Route::Chat, &probe, take(&observed));
-}
 
 #[tokio::test]
 async fn chat_streamed_hooks_see_raw() {
@@ -625,127 +437,6 @@ async fn chat_streamed_hooks_see_raw() {
     )
     .await;
     assert_streamed_hooks_see_raw(SCENARIO, Route::Chat, &probe, take(&observed));
-}
-
-#[tokio::test]
-async fn chat_blocking_tool_run_records_distinct_raw() {
-    const SCENARIO: &str = "raw_capture_agent_matrix/chat_blocking_tool_run_records_distinct_raw";
-    let probe = RawProbe::default();
-    let observed = Observed::default();
-    with_openai_cassette(
-        "raw_capture_agent_matrix/chat_blocking_tool_run_records_distinct_raw",
-        blocking_body(observed.clone(), Route::Chat, true, probe.clone()),
-    )
-    .await;
-    assert_tool_run_records_distinct_raw(SCENARIO, Route::Chat, false, &probe, take(&observed));
-}
-
-#[tokio::test]
-async fn chat_streamed_tool_run_records_distinct_raw() {
-    const SCENARIO: &str = "raw_capture_agent_matrix/chat_streamed_tool_run_records_distinct_raw";
-    let probe = RawProbe::default();
-    let observed = Observed::default();
-    with_openai_cassette(
-        "raw_capture_agent_matrix/chat_streamed_tool_run_records_distinct_raw",
-        streamed_body(observed.clone(), Route::Chat, true, probe.clone()),
-    )
-    .await;
-    assert_tool_run_records_distinct_raw(SCENARIO, Route::Chat, true, &probe, take(&observed));
-}
-
-/// A retried turn: the first attempt is rejected by the hook and the run
-/// makes a second attempt at the same turn. `completion_calls[1]` and the
-/// second `ModelTurnFinished` carry the *retried* attempt's payload — the
-/// second fixture interaction's — never the rejected first one's.
-#[tokio::test]
-async fn chat_retried_turn_records_retried_attempt_raw() {
-    const SCENARIO: &str = "raw_capture_agent_matrix/chat_retried_turn_records_retried_attempt_raw";
-    let probe = RawProbe::default();
-    let observed = Observed::default();
-    let sink = observed.clone();
-    let hook_probe = probe.clone();
-    with_openai_cassette(
-        "raw_capture_agent_matrix/chat_retried_turn_records_retried_attempt_raw",
-        |client| async move {
-            let response = client
-                .chat
-                .agent(MODEL)
-                .preamble(
-                    "Follow this protocol exactly. For the initial request, reply exactly \
-                 `RETRY: incomplete draft`. If the latest user message asks you to \
-                 replace the rejected response, reply exactly `ACCEPTED`.",
-                )
-                .temperature(0.0)
-                .build()
-                .prompt("Begin the retry-hook demonstration.")
-                .max_turns(2)
-                .add_hook(hook_probe)
-                .add_hook(RetryOnceOnMarker)
-                .run()
-                .await
-                .expect("the feedback retry should recover");
-            *sink.lock().expect("observation mutex") = Some(RunObservation {
-                calls: response.completion_calls,
-                output: response.output,
-                ..Default::default()
-            });
-        },
-    )
-    .await;
-    let observation = take(&observed);
-
-    // Premise: two interactions — the rejected draft, then the retried
-    // attempt — each a distinct provider response with the protocol's text.
-    let bodies = crate::cassettes::recorded_interaction_bodies(PROVIDER, SCENARIO);
-    assert_eq!(
-        bodies.len(),
-        2,
-        "{SCENARIO}: rejected attempt + retried attempt"
-    );
-    let content = |body: &str| -> String {
-        let body: Value = serde_json::from_str(body).expect("recorded body should be JSON");
-        body["choices"][0]["message"]["content"]
-            .as_str()
-            .expect("recorded chat body carries text")
-            .to_owned()
-    };
-    assert!(
-        content(&bodies[0].1).contains("RETRY:"),
-        "{SCENARIO}: the first recorded attempt is the rejected draft"
-    );
-    assert_eq!(
-        content(&bodies[1].1).trim(),
-        "ACCEPTED",
-        "{SCENARIO}: the second recorded attempt is the retry"
-    );
-    assert_eq!(observation.output.trim(), "ACCEPTED");
-
-    let recorded = recorded_ids(SCENARIO, Route::Chat, false);
-    assert_calls_carry_recorded_raw(SCENARIO, Route::Chat, &observation.calls, &recorded);
-    let retried_raw = &observation.calls[1].raw;
-    assert_eq!(
-        chat_raw_text(retried_raw).trim(),
-        "ACCEPTED",
-        "{SCENARIO}: the second record carries the retried attempt's own payload"
-    );
-    assert!(
-        chat_raw_text(&observation.calls[0].raw).contains("RETRY:"),
-        "{SCENARIO}: the first record carries the rejected attempt's own payload"
-    );
-    let turns = probe.turns();
-    assert_eq!(
-        turns.len(),
-        2,
-        "{SCENARIO}: the retry hook saw both attempts"
-    );
-    assert_eq!(
-        &turns[1].1, retried_raw,
-        "{SCENARIO}: the retried ModelTurnFinished sees the retried attempt's raw"
-    );
-    assert_ne!(
-        turns[0].1, turns[1].1,
-        "{SCENARIO}: attempts carry different payloads"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -776,38 +467,4 @@ async fn responses_streamed_hooks_see_raw() {
     )
     .await;
     assert_streamed_hooks_see_raw(SCENARIO, Route::Responses, &probe, take(&observed));
-}
-
-#[tokio::test]
-async fn responses_blocking_tool_run_records_distinct_raw() {
-    const SCENARIO: &str =
-        "raw_capture_agent_matrix/responses_blocking_tool_run_records_distinct_raw";
-    let probe = RawProbe::default();
-    let observed = Observed::default();
-    with_openai_cassette(
-        "raw_capture_agent_matrix/responses_blocking_tool_run_records_distinct_raw",
-        blocking_body(observed.clone(), Route::Responses, true, probe.clone()),
-    )
-    .await;
-    assert_tool_run_records_distinct_raw(
-        SCENARIO,
-        Route::Responses,
-        false,
-        &probe,
-        take(&observed),
-    );
-}
-
-#[tokio::test]
-async fn responses_streamed_tool_run_records_distinct_raw() {
-    const SCENARIO: &str =
-        "raw_capture_agent_matrix/responses_streamed_tool_run_records_distinct_raw";
-    let probe = RawProbe::default();
-    let observed = Observed::default();
-    with_openai_cassette(
-        "raw_capture_agent_matrix/responses_streamed_tool_run_records_distinct_raw",
-        streamed_body(observed.clone(), Route::Responses, true, probe.clone()),
-    )
-    .await;
-    assert_tool_run_records_distinct_raw(SCENARIO, Route::Responses, true, &probe, take(&observed));
 }

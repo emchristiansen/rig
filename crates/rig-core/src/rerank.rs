@@ -1,38 +1,26 @@
 //! Provider-agnostic reranking abstractions.
 //!
 //! Reranking models reorder a list of documents by relevance to a query.
-//! The [`RerankModel`] trait defines the interface, and [`RerankResponse`]
-//! carries both the scored results and token usage.
+//! A [`Model`](crate::driver::Model) over a rerank wire calls one, and
+//! [`RerankResponse`] carries both the scored results and token usage.
 //!
 //! ```no_run
-//! use rig_core::rerank::RerankModel;
+//! use rig_core::DynModel;
+//! use rig_core::operation::{Rerank, RerankRequest};
 //!
-//! # async fn example(model: &impl RerankModel) -> Result<(), Box<dyn std::error::Error>> {
-//! let response = model.rerank("Rust", vec!["A systems programming language".into()]).await?;
+//! # async fn example(model: &DynModel<Rerank>) -> Result<(), Box<dyn std::error::Error>> {
+//! let request = RerankRequest {
+//!     query: "Rust".into(),
+//!     documents: vec!["A systems programming language".into()],
+//! };
+//! let response = model.call(request).await?;
 //! # let _ = response;
 //! # Ok(())
 //! # }
 //! ```
 
-use crate::error::ProviderError;
-use crate::{
-    completion::{ResponseIdentity, Usage},
-    wasm_compat::{WasmCompatSend, WasmCompatSync},
-};
+use crate::completion::Usage;
 use serde::{Deserialize, Serialize};
-
-/// Trait for reranking models that score documents by relevance to a query.
-pub trait RerankModel: WasmCompatSend + WasmCompatSync {
-    /// Maximum documents accepted in one request.
-    fn max_documents(&self) -> usize;
-
-    /// Rerank a list of documents against a query.
-    fn rerank(
-        &self,
-        query: &str,
-        documents: Vec<String>,
-    ) -> impl std::future::Future<Output = Result<RerankResponse, ProviderError>> + WasmCompatSend;
-}
 
 /// A single reranked document result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,30 +63,18 @@ pub struct RerankResponse {
 }
 
 impl RerankResponse {
-    /// Create a response from its required parts; optional metadata starts
-    /// unset and is filled in with the `with_*` helpers.
-    pub fn new(results: Vec<RerankResult>, provider: impl Into<String>) -> Self {
+    /// A response carrying `results`. The driver writes the provider, the
+    /// transport request id and the reply document; decoders set what the
+    /// provider reported.
+    pub fn new(results: Vec<RerankResult>) -> Self {
         Self {
             results,
             model: None,
             usage: Usage::default(),
-            provider: provider.into(),
+            provider: String::new(),
             response_id: None,
             provider_request_id: None,
             raw: serde_json::Value::Null,
         }
     }
-
-    /// This response's identity metadata as one [`ResponseIdentity`] carrier.
-    /// `message_id` is always `None`: nothing here is replayed as an
-    /// assistant message.
-    pub fn identity(&self) -> ResponseIdentity {
-        ResponseIdentity {
-            message_id: None,
-            response_id: self.response_id.clone(),
-            provider_request_id: self.provider_request_id.clone(),
-        }
-    }
 }
-
-crate::provider_response::modality_response_metadata_setters!(RerankResponse);

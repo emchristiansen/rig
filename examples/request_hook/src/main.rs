@@ -68,10 +68,10 @@ impl AgentHook for LoggingHook {
         // `on_outcome` fires for every effect family; only report completions.
         if let Some(response) = event.completion() {
             println!(
-                "[run {}] received response (usage: {:?}, message_id: {:?}): {:?}",
+                "[run {}] received response (usage: {:?}, response_id: {:?}): {:?}",
                 ctx.run_id(),
                 response.usage,
-                response.message_id,
+                response.response_id(),
                 response.choice
             );
         }
@@ -150,9 +150,7 @@ impl AgentHook for TurnCounterHook {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let agent = OpenAI::from_env()?
-        .bound()?
-        .agent(openai::GPT_4O)
+    let agent = AgentBuilder::new(OpenAI::from_env()?.completion(openai::GPT_4O))
         .preamble("You are a comedian here to entertain the user using humour and jokes.")
         .build();
 
@@ -167,7 +165,7 @@ async fn main() -> Result<()> {
         .add_hook(SamplingHook)
         .add_hook(TurnCounterHook)
         .await?
-        .output;
+        .output();
 
     println!("\nFinal response:\n{response}");
 

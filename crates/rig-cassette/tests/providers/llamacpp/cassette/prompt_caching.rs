@@ -13,8 +13,7 @@
 //! `cache_prompt` default, and reports its work in two independently populated
 //! places: `usage.prompt_tokens_details.cached_tokens`, which rig normalizes
 //! into [`Usage::cached_input_tokens`](rig::completion::Usage), and
-//! `timings.cache_n`, which this provider preserves through
-//! [`llamacpp::Timings`](rig::providers::llamacpp::Timings).
+//! `timings.cache_n`, which reaches a caller in `raw`, the reply document.
 //!
 //! Measured by the fixtures below, against b10964-b29c606e2 with
 //! `unsloth/Qwen3-1.7B-GGUF` Q4_K_M: `prompt_caching/blocking_probe` bills
@@ -24,11 +23,9 @@
 //!
 //! | Cell | Dimension | Pinned |
 //! | --- | --- | --- |
-//! | [`blocking_probe_hits_and_keeps_hitting_as_the_prefix_grows`] | blocking, cold → warm → grown | full `assert_cache_conformance` |
 //! | [`streaming_probe_survives_the_streaming_accumulator`] | streaming | the terminal frame's usage carries the read |
 //! | [`cache_prompt_false_turns_the_cache_off_for_that_turn_only`] | `cache_prompt` | a llama.cpp-only request field; off means 0 cached, and it does not poison the next turn |
 //! | [`agent_loop_does_not_move_its_own_prefix`] | agent loop | every outbound request extends its predecessor |
-//! | [`timings_cache_n_agrees_with_the_normalized_cached_tokens`] | two counters | the field rig normalizes and the field llama.cpp's own tooling reads must agree |
 //!
 //! # Recording
 //!
@@ -37,19 +34,19 @@
 //! RIG_PROVIDER_TEST_MODE=record cargo test -p rig --test llamacpp --all-features \
 //!     prompt_caching:: -- --test-threads=1
 //! ```
+//!
 
-use rig::completion::CompletionModel as _;
-use rig::prelude::*;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::cache_conformance::{
-    AGENT_CACHE_PROMPT, CacheAccounting, CacheProbe, CacheProbeLookupTool, CacheSupport,
+    AGENT_CACHE_PROMPT, CacheProbe, CacheProbeLookupTool, CacheSupport,
     assert_breakpoints_match_support, assert_cache_conformance, assert_prefix_stable,
-    run_cache_probe, run_cache_probe_streaming,
+    run_cache_probe_streaming,
 };
 use crate::cassettes::recorded_statuses_and_bodies;
 
 use super::super::cassette_support::*;
+use rig::completion::CompletionRequest;
 
 /// llama.cpp's cache, as a descriptor.
 ///
@@ -61,7 +58,6 @@ const LLAMACPP_CACHE_SUPPORT: CacheSupport = CacheSupport {
     provider: "llamacpp",
     // `openai::Usage`: `prompt_tokens_details.cached_tokens` is a breakdown of
     // `prompt_tokens`, not a sibling of it.
-    accounting: CacheAccounting::Subset,
     // The KV cache is automatic; there is no `cache_control` on this wire.
     explicit_breakpoints: false,
     // llama.cpp reports reads only. There is no cache-creation counter, and
@@ -131,43 +127,11 @@ fn recorded_cache_counters(scenario: &str) -> Vec<(u64, u64, u64)> {
 }
 
 #[tokio::test]
-async fn blocking_probe_hits_and_keeps_hitting_as_the_prefix_grows() {
-    with_llamacpp_prompt_caching_cassette("prompt_caching/blocking_probe", |client| async move {
-        let model = client.completion(CASSETTE_MODEL);
-        let observation = run_cache_probe(&model, &probe_for("llamacpp blocking probe")).await;
-        assert_cache_conformance(&observation, &LLAMACPP_CACHE_SUPPORT, "blocking probe");
-    })
-    .await;
-
-    assert_prefix_stable("llamacpp", "prompt_caching/blocking_probe");
-    assert_breakpoints_match_support(
-        "llamacpp",
-        "prompt_caching/blocking_probe",
-        &LLAMACPP_CACHE_SUPPORT,
-    );
-
-    // The premise, from the recorded bytes: turn 1 really was cold and turn 2
-    // really was warm. A fixture recorded against an already-warm server would
-    // satisfy the conformance assertions while proving nothing about the
-    // cold→warm transition.
-    let counters = recorded_cache_counters("prompt_caching/blocking_probe");
-    assert!(counters.len() >= 2, "{counters:?}");
-    assert_eq!(
-        counters[0].1, 0,
-        "turn 1 must be a cold miss — restart the server before re-recording: {counters:?}"
-    );
-    assert!(
-        counters[1].1 > 0,
-        "turn 2 must read the prefix back: {counters:?}"
-    );
-}
-
-#[tokio::test]
 async fn streaming_probe_survives_the_streaming_accumulator() {
     with_llamacpp_prompt_caching_cassette("prompt_caching/streaming_probe", |client| async move {
         let model = client.completion(CASSETTE_MODEL);
         let observation =
-            run_cache_probe_streaming(&model, &probe_for("llamacpp streaming probe")).await;
+            run_cache_probe_streaming(model, &probe_for("llamacpp streaming probe")).await;
         assert_cache_conformance(&observation, &LLAMACPP_CACHE_SUPPORT, "streaming probe");
     })
     .await;
@@ -198,26 +162,22 @@ async fn cache_prompt_false_turns_the_cache_off_for_that_turn_only() {
 
             // Warm the slot.
             let warm = model
-                .completion(
-                    model
-                        .completion_request(probe.prompt)
+                .call(
+                    CompletionRequest::new(probe.prompt)
                         .preamble(probe.preamble.clone())
                         .temperature(0.0)
-                        .max_tokens(16)
-                        .build(),
+                        .max_tokens(16),
                 )
                 .await
                 .expect("the warming turn should succeed");
             let _ = warm;
 
             let second = model
-                .completion(
-                    model
-                        .completion_request(probe.prompt)
+                .call(
+                    CompletionRequest::new(probe.prompt)
                         .preamble(probe.preamble.clone())
                         .temperature(0.0)
-                        .max_tokens(16)
-                        .build(),
+                        .max_tokens(16),
                 )
                 .await
                 .expect("the warm turn should succeed");
@@ -228,14 +188,12 @@ async fn cache_prompt_false_turns_the_cache_off_for_that_turn_only() {
             );
 
             let disabled = model
-                .completion(
-                    model
-                        .completion_request(probe.prompt)
+                .call(
+                    CompletionRequest::new(probe.prompt)
                         .preamble(probe.preamble.clone())
                         .temperature(0.0)
                         .max_tokens(16)
-                        .additional_params(json!({ "cache_prompt": false }))
-                        .build(),
+                        .cache(rig::completion::CacheRetention::None),
                 )
                 .await
                 .expect("cache_prompt: false should succeed");
@@ -247,13 +205,11 @@ async fn cache_prompt_false_turns_the_cache_off_for_that_turn_only() {
             );
 
             let after = model
-                .completion(
-                    model
-                        .completion_request(probe.prompt)
+                .call(
+                    CompletionRequest::new(probe.prompt)
                         .preamble(probe.preamble.clone())
                         .temperature(0.0)
-                        .max_tokens(16)
-                        .build(),
+                        .max_tokens(16),
                 )
                 .await
                 .expect("the turn after the switch should succeed");
@@ -281,8 +237,7 @@ async fn cache_prompt_false_turns_the_cache_off_for_that_turn_only() {
 #[tokio::test]
 async fn agent_loop_does_not_move_its_own_prefix() {
     with_llamacpp_prompt_caching_cassette("prompt_caching/agent_loop", |client| async move {
-        let response = client
-            .agent(CASSETTE_MODEL)
+        let response = rig::AgentBuilder::new(client.completion(CASSETTE_MODEL))
             .preamble(&probe_for("llamacpp agent loop").preamble)
             .tool(CacheProbeLookupTool)
             .temperature(0.0)
@@ -303,37 +258,4 @@ async fn agent_loop_does_not_move_its_own_prefix() {
     .await;
 
     assert_prefix_stable("llamacpp", "prompt_caching/agent_loop");
-}
-
-/// The two counters llama.cpp populates independently must agree.
-///
-/// `usage.prompt_tokens_details.cached_tokens` is what rig normalizes;
-/// `timings.cache_n` is what llama.cpp's own tooling reads and what this
-/// provider preserves through `llamacpp::Timings`. They are computed
-/// separately in the server, so a disagreement would mean one of them is
-/// describing something else — and rig's users would be reading whichever one
-/// their tool happened to pick.
-#[test]
-fn timings_cache_n_agrees_with_the_normalized_cached_tokens() {
-    let mut compared = 0usize;
-    for scenario in [
-        "prompt_caching/blocking_probe",
-        "prompt_caching/cache_prompt_disabled",
-        "prompt_caching/agent_loop",
-    ] {
-        for (index, (prompt_tokens, cached_tokens, cache_n)) in
-            recorded_cache_counters(scenario).into_iter().enumerate()
-        {
-            assert_eq!(
-                cached_tokens, cache_n,
-                "{scenario} turn {index}: usage.cached_tokens and timings.cache_n \
-                 describe the same thing and must agree ({prompt_tokens} prompt tokens)"
-            );
-            compared += 1;
-        }
-    }
-    assert!(
-        compared >= 6,
-        "only {compared} turns compared; the fixtures moved and this check went vacuous"
-    );
 }

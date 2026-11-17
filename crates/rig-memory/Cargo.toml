@@ -2,25 +2,45 @@
 name = "rig-memory"
 version.workspace = true
 edition = { workspace = true }
+rust-version = { workspace = true }
 license = "MIT"
 readme = "README.md"
-description = "Conversation memory policies (sliding window, token budget, ...) for the Rig agent framework."
+description = "Conversations over time for the Rig agent framework: recent messages, compaction, and saving and resuming sessions."
 repository = "https://github.com/0xPlaygrounds/rig"
 
 [lints]
 workspace = true
 
+[features]
+default = []
+# `DirStore`: a session kept as files in a directory (std::fs).
+fs = []
+# `conformance`: the contract suite a store's own tests run against it;
+# `migration::testing`: a synthetic earlier format and the chain from it.
+test-utils = []
+
 [dependencies]
-rig-core = { path = "../rig-core", version = "0.42.0", default-features = false }
-tracing = { workspace = true }
+rig-core = { path = "../rig-core", version = "0.46.0", default-features = false }
+base64 = { workspace = true }
+memchr = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+# The names of the blobs a session stores images in.
+sha2 = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
-rig-reqwest = { path = "../rig-reqwest", version = "0.42.0" }
-anyhow = { workspace = true }
-rig-agent.workspace = true
-serde_json = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+divan = { workspace = true }
+
+# Opening, saving and measuring sessions (`cargo bench -p rig-memory --bench
+# session --features fs`). CI only compiles it.
+[[bench]]
+name = "session"
+harness = false
+required-features = ["fs"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [[example]]
-name = "agent_with_memory_policies"
-required-features = []
+name = "recent_messages_and_compaction"

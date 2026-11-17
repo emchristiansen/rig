@@ -2,13 +2,12 @@
 //! `on_run_settled`, and durable scratchpad state, recorded against the live
 //! Anthropic API.
 //!
-//! Every cell sends through a `BoxedHttpClient` carrying a `WireProbe`
+//! Every cell sends through a `DynHttpClient` carrying a `WireProbe`
 //! middleware, so one recorded exchange proves both the transport seam (the
 //! phases fired, the serialized body and response status were visible) and
 //! the hook-level lifecycle claims. All assertions hold in both cassette
 //! modes: on replay the same code paths run against the replay server.
 
-use rig::prelude::*;
 use rig::providers::anthropic;
 
 use super::super::support::with_anthropic_lifecycle_cassette;
@@ -26,12 +25,14 @@ async fn middleware_phases_observe_a_unary_completion() {
         "lifecycle_matrix/middleware_unary",
         probe.clone(),
         |client| async move {
-            let agent = client.agent(MODEL).preamble(BASIC_PREAMBLE).build();
+            let agent = rig::AgentBuilder::new(client.completion(MODEL))
+                .preamble(BASIC_PREAMBLE)
+                .build();
             let response = agent
                 .prompt(BASIC_PROMPT)
                 .await
                 .expect("completion should succeed")
-                .output;
+                .output();
             assert_nonempty_response(&response);
         },
     )
@@ -48,13 +49,12 @@ async fn middleware_response_phase_precedes_stream_consumption() {
         "lifecycle_matrix/middleware_streaming",
         probe.clone(),
         |client| async move {
-            let agent = client
-                .agent(MODEL)
+            let agent = rig::AgentBuilder::new(client.completion(MODEL))
                 .preamble(STREAMING_PREAMBLE)
                 .add_hook(settle_hook)
                 .build();
             let mut stream = agent.prompt(STREAMING_PROMPT).stream();
-            let (response, provider_final): (_, rig::streaming::StreamFinal) =
+            let (response, provider_final) =
                 collect_stream_final_response_and_provider_final(&mut stream)
                     .await
                     .expect("streaming prompt should succeed");
@@ -79,8 +79,7 @@ async fn run_start_rewrite_reaches_the_provider() {
         "lifecycle_matrix/run_start_rewrite",
         WireProbe::default(),
         |client| async move {
-            let agent = client
-                .agent(MODEL)
+            let agent = rig::AgentBuilder::new(client.completion(MODEL))
                 .preamble(BASIC_PREAMBLE)
                 .add_hook(agent_hook)
                 .build();
@@ -90,7 +89,7 @@ async fn run_start_rewrite_reaches_the_provider() {
                 .prompt("Tell me about the Rust borrow checker.")
                 .await
                 .expect("completion should succeed")
-                .output;
+                .output();
             assert!(
                 response.to_uppercase().contains("PINEAPPLE"),
                 "the provider answered the rewritten prompt, not the original: {response:?}"
@@ -110,8 +109,7 @@ async fn entry_log_orders_and_turn_stamps_across_a_streamed_tool_run() {
         "lifecycle_matrix/entry_log_order",
         WireProbe::default(),
         |client| async move {
-            let agent = client
-                .agent(MODEL)
+            let agent = rig::AgentBuilder::new(client.completion(MODEL))
                 .preamble("You are a calculator. Use the add tool for arithmetic.")
                 .tool(Adder)
                 .add_hook(agent_hook)
@@ -120,10 +118,9 @@ async fn entry_log_orders_and_turn_stamps_across_a_streamed_tool_run() {
                 .prompt("What is 9 + 16? Use the add tool, then reply with just the number.")
                 .max_turns(3)
                 .stream();
-            let (response, _final): (_, rig::streaming::StreamFinal) =
-                collect_stream_final_response_and_provider_final(&mut stream)
-                    .await
-                    .expect("streamed tool run should succeed");
+            let (response, _final) = collect_stream_final_response_and_provider_final(&mut stream)
+                .await
+                .expect("streamed tool run should succeed");
             assert!(
                 response.contains("25"),
                 "the tool result reached the final answer: {response:?}"
@@ -144,8 +141,7 @@ async fn run_settles_once_across_a_multi_turn_tool_run_with_durable_state() {
         "lifecycle_matrix/run_settled_tool_run",
         WireProbe::default(),
         |client| async move {
-            let agent = client
-                .agent(MODEL)
+            let agent = rig::AgentBuilder::new(client.completion(MODEL))
                 .preamble("You are a calculator. Use the add tool for arithmetic.")
                 .tool(Adder)
                 .add_hook(agent_hook)
@@ -155,7 +151,7 @@ async fn run_settles_once_across_a_multi_turn_tool_run_with_durable_state() {
                 .max_turns(3)
                 .await
                 .expect("tool run should succeed")
-                .output;
+                .output();
             assert!(
                 response.contains("22"),
                 "the tool result reached the final answer: {response:?}"

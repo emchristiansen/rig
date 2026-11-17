@@ -1,6 +1,5 @@
 //! xAI tools smoke test.
 
-use rig::prelude::*;
 use rig::providers::xai;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
@@ -87,8 +86,7 @@ impl Tool for Subtract {
 #[tokio::test]
 async fn tools_smoke() {
     with_xai_cassette("tools/tools_smoke", |client| async move {
-        let agent = client
-            .agent(xai::GROK_3_MINI)
+        let agent = rig::AgentBuilder::new(client.completion(xai::GROK_3_MINI))
             .preamble(TOOLS_PREAMBLE)
             .tool(Adder)
             .tool(Subtract)
@@ -100,7 +98,7 @@ async fn tools_smoke() {
             .await
             .expect("tool prompt should succeed");
 
-        assert_mentions_expected_number(&response.output, -3);
+        assert_mentions_expected_number(&response.output(), -3);
     })
     .await;
 }

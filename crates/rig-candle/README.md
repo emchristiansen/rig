@@ -1,8 +1,10 @@
 # rig-candle
 
-`rig-candle` runs validated local checkpoints through Rig's `CompletionModel`
-and agent APIs. The crate receives byte buffers and performs no filesystem or
-network access itself.
+`rig-candle` runs validated local checkpoints through Rig's model and agent
+APIs: `CandleModel::completion()` is the model a loaded checkpoint serves, and
+`CandlePoseModel::pose()` estimates human poses (see
+[Pose estimation](#pose-estimation)). The crate receives byte buffers and
+performs no filesystem or network access itself.
 
 ```rust,no_run
 use rig_agent::agent::AgentBuilder;
@@ -16,10 +18,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         weights: std::fs::read("./model/model.safetensors")?,
     })
     .await?;
-    let agent = AgentBuilder::new(model)
+    let agent = AgentBuilder::new(model.completion())
         .preamble("You are a concise assistant.")
         .build();
-    println!("{}", agent.prompt("Explain ownership briefly.").await?.output);
+    println!("{}", agent.prompt("Explain ownership briefly.").await?.output());
     Ok(())
 }
 ```
@@ -75,8 +77,8 @@ are rejected before rendering so they cannot create structural prompt content.
 
 Qwen tool syntax can cross token boundaries, so streaming buffers one model
 turn, parses it, then emits ordered text/reasoning items and whole tool calls
-(a `BlockStart`/`BlockEnd` pair per call on the stream) followed by the
-terminal record. It does not currently emit tool-call deltas. This keeps model XML out of user-visible text
+(a `Start`/`End` pair per call on the stream) followed by the terminal
+record. This keeps model XML out of user-visible text
 while preserving cancellation, bounded backpressure, and the same parsed result
 as buffered completion.
 
@@ -153,12 +155,76 @@ authentication, SSE framing, hosted tools, remote files, and provider-specific
 reasoning/session assertions; those are transport conformance, not local model
 quality.
 
+## Pose estimation
+
+`rig_candle::pose` runs YOLOv8 pose checkpoints in the safetensors layout of
+Candle's YOLOv8 example (`lmz/candle-yolo-v8`, sizes n, s, m, l and x). Its
+`PoseEstimation` operation takes RGB frames and yields one `FramePoses` event
+per frame, in order: every person's box, confidence and the 17 COCO
+keypoints, in the frame's pixels. A call folds the events into a `PoseTrack`.
+The model is a `Local<PoseEstimation>` wire on the loaded checkpoint, so it
+streams, erases to `DynModel<PoseEstimation>` and swaps transports like any
+other Rig model.
+
+```rust,no_run
+use futures::StreamExt;
+use rig_candle::pose::{BodyPart, CandlePoseModel, ImageFrame, PoseRequest};
+use rig_core::streaming::Item;
+
+# async fn run(weights: Vec<u8>, video: Vec<(u32, u32, Vec<u8>)>) -> Result<(), Box<dyn std::error::Error>> {
+let model = CandlePoseModel::builder(weights)
+    .confidence_threshold(0.5)
+    .build_async()
+    .await?
+    .pose();
+let frames = video
+    .into_iter()
+    .map(|(width, height, rgb)| ImageFrame::from_rgb8(width, height, rgb))
+    .collect::<Result<PoseRequest, _>>()?;
+let mut poses = model.stream(frames)?;
+while let Some(item) = poses.next().await {
+    if let Item::Event(frame) = item? {
+        for person in frame.people {
+            println!("{:?}", person.keypoint(BodyPart::LeftWrist));
+        }
+    }
+}
+# Ok(())
+# }
+```
+
+The loader reads the size from the checkpoint and refuses a detection or
+non-COCO checkpoint before allocating tensors. Frames are resized so their
+longest side is the builder's `input_size` (640 by default, a multiple of 32)
+and the other keeps the aspect ratio; overlapping boxes above
+`iou_threshold` are suppressed. Frames run one at a time on a blocking worker,
+and dropping the stream stops it before the next frame. A reply that ends
+before every frame was answered fails the call.
+
+The weights are Ultralytics' YOLOv8 pose weights and are licensed under
+AGPL-3.0; rig-candle neither ships nor downloads them. Check that license
+before you ship them. `examples/candle_pose` runs the model on JPEG or PNG
+files, and the opt-in live test checks the nano checkpoint on a photo:
+
+```bash
+./crates/rig-candle/tests/download_yolov8_pose.sh
+cargo test --release -p rig-candle --test live_pose -- --ignored --nocapture
+```
+
+| artifact | revision | bytes | SHA-256 |
+|---|---|---:|---|
+| `yolov8n-pose.safetensors` (`lmz/candle-yolo-v8`) | `be388c6fab95ae3035a039070e1b883b9c5a1325` | 6,650,412 | `08c76047b41744c027c8150e81d1dbbd94f996656cf5be266491367ae7fad072` |
+| `bike.jpg` (`huggingface/candle`) | `7a62aad24a5d8b1d8cb351e5ef77a7b3457a74b8` | 182,991 | `317e4a9d2d2be7859ba0ab8726a526f5ece9d77daf92857f3e93fb7b367824c1` |
+
 ## Runtime behavior and limits
 
-Builder defaults can be overridden by request `max_tokens` and `temperature`.
-The Candle-only `additional_params` keys are `top_k`, `top_p`, `seed`,
-`repeat_penalty`, and `repeat_last_n`; unknown keys are errors. Omitting `top_k`
-or `top_p` inherits its builder default, while explicit JSON `null` disables it.
+Builder defaults can be overridden by request `max_tokens` and `temperature`,
+by the `GenerationOptions` `top_p` and `seed`, and by the `CandleOptions`
+provider options `top_k`, `repeat_penalty` and `repeat_last_n`
+(`rig_candle::extension`). The same five keys are accepted in
+`additional_params`, which take precedence; unknown keys are errors. Omitting
+`top_k` or `top_p` inherits its builder default, while an explicit JSON `null`
+in `additional_params` disables it.
 Native inference runs in `spawn_blocking`; model loading and each complete
 inference operation run inside Candle's CPU context so its private Rayon pool
 stays active. `max_concurrent_requests` defaults to one. Every request owns its

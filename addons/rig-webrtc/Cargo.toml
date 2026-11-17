@@ -1,0 +1,43 @@
+[package]
+name = "rig-webrtc"
+version.workspace = true
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = "MIT"
+readme = "README.md"
+description = "The WebRTC peer for Rig's GPT-Live realtime calls: one Opus audio track and the ordered event data channel."
+repository = "https://github.com/0xPlaygrounds/rig"
+# Depends on the unpublished `rig-live`.
+publish = false
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints]
+workspace = true
+
+[dependencies]
+rig-live = { path = "../rig-live", version = "0.46.0" }
+thiserror = { workspace = true }
+
+# webrtc-rs is native-only: it binds UDP/TCP sockets on a tokio runtime.
+# Pinned exactly, as the Codex voice host pins it.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+bytes = { workspace = true }
+fastrand = { workspace = true }
+futures = { workspace = true }
+rtc = "=0.20.3"
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+webrtc = "=0.20.3"
+
+[dev-dependencies]
+anyhow = { workspace = true }
+rig-core = { path = "../../crates/rig-core", version = "0.46.0", default-features = false }
+rig-live = { path = "../rig-live", version = "0.46.0", features = ["websocket"] }
+rig-reqwest = { path = "../../crates/rig-reqwest", version = "0.46.0", default-features = false, features = ["rustls"] }
+rig-tungstenite = { path = "../../crates/rig-tungstenite", version = "0.46.0" }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-tungstenite = { workspace = true, features = ["handshake"] }

@@ -6,9 +6,9 @@
 use futures::StreamExt;
 use rig::agent::MultiTurnStreamItem;
 use rig::effect::EffectFamily;
-use rig::prelude::*;
 use rig::providers::anthropic::completion::CLAUDE_SONNET_4_6;
-use rig::streaming::{Delta, StreamEvent};
+use rig::streaming::Item;
+use rig::streaming::StreamEvent;
 use rig_cassette::agent::AgentReplayExt;
 
 use super::super::support::with_anthropic_cassette;
@@ -26,8 +26,7 @@ fn families(log: &rig::cassette::effect_log::EffectLog) -> Vec<EffectFamily> {
 async fn tool_call_turn_effect_log_is_the_golden_fixture() {
     with_anthropic_cassette("effect_corpus/tool_call_turn", |client| async move {
         let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
-        let agent = client
-            .agent(CLAUDE_SONNET_4_6)
+        let agent = rig::AgentBuilder::new(client.completion(CLAUDE_SONNET_4_6))
             .name("golden")
             .preamble(TOOLS_PREAMBLE)
             .temperature(0.0)
@@ -39,7 +38,7 @@ async fn tool_call_turn_effect_log_is_the_golden_fixture() {
             .max_turns(3)
             .await
             .expect("the agent answers");
-        assert!(response.output.contains("42"), "{}", response.output);
+        assert!(response.output().contains("42"), "{}", response.output());
         let log = agent.stamp(recorder.take());
         assert_eq!(
             families(&log),
@@ -61,8 +60,7 @@ async fn tool_call_turn_effect_log_is_the_golden_fixture() {
 async fn cancelled_stream_effect_log_is_the_golden_fixture() {
     with_anthropic_cassette("effect_corpus/cancelled_stream", |client| async move {
         let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
-        let agent = client
-            .agent(CLAUDE_SONNET_4_6)
+        let agent = rig::AgentBuilder::new(client.completion(CLAUDE_SONNET_4_6))
             .name("golden")
             .preamble("You are a concise assistant. Answer directly.")
             .temperature(0.0)
@@ -73,10 +71,9 @@ async fn cancelled_stream_effect_log_is_the_golden_fixture() {
                 .prompt("Write a 600-word essay on the history of the Rust programming language.")
                 .stream();
             while let Some(item) = stream.next().await {
-                if let Ok(MultiTurnStreamItem::StreamAssistantItem(StreamEvent::BlockDelta {
-                    delta: Delta::Text { .. },
-                    ..
-                })) = item
+                if let Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(
+                    StreamEvent::Text { .. },
+                ))) = item
                 {
                     break;
                 }

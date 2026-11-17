@@ -98,12 +98,13 @@ impl AgentHook for RetryOnMarker {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let client = OpenAI::from_env()?.bound()?;
-    let agent = client
-        .agent(openai::GPT_4O_MINI)
+    let client = OpenAI::from_env()?;
+    // One model serves both agents: erase it once, clone the handle.
+    let model = client.completion(openai::GPT_4O_MINI).erase();
+    let agent = AgentBuilder::new(model.clone())
         .preamble(
             "Follow this protocol exactly. For the initial request, reply exactly \
-             `RETRY: incomplete draft`. If the latest user message asks you to \
+             `RETRY_POLICY: incomplete draft`. If the latest user message asks you to \
              replace the rejected response, reply exactly `ACCEPTED`.",
         )
         .build();
@@ -119,15 +120,14 @@ async fn main() -> Result<()> {
         .run()
         .await?;
 
-    println!("Final response: {}", response.output);
+    println!("Final response: {}", response.output());
     println!("Model calls: {}", response.completion_calls.len());
 
     // Repeat is a distinct policy: it discards the rejected response and reuses
     // the prompt and preceding history, while freshly preparing the next
     // request. It is configured here but not run because this deterministic
     // protocol deliberately returns the same marker each time.
-    let _repeat_agent = client
-        .agent(openai::GPT_4O_MINI)
+    let _repeat_agent = AgentBuilder::new(model)
         .default_max_turns(2)
         .add_hook(RetryOnMarker::repeat("RETRY:", 1))
         .build();

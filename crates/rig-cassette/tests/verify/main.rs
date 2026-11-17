@@ -3,14 +3,16 @@
 #![allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 
 #[macro_use]
+#[allow(
+    dead_code,
+    reason = "each target uses a different subset of the corpus"
+)]
 #[path = "../corpus/mod.rs"]
 mod corpus;
 #[path = "../corpus_breadth.rs"]
 mod corpus_breadth;
 #[path = "../corpus_causal.rs"]
 mod corpus_causal;
-#[path = "../corpus_checkpoint.rs"]
-mod corpus_checkpoint;
 #[path = "../corpus_delta.rs"]
 mod corpus_delta;
 #[path = "../corpus_endings.rs"]
@@ -27,8 +29,6 @@ mod corpus_invalid;
 mod corpus_layers;
 #[path = "../corpus_leftovers.rs"]
 mod corpus_leftovers;
-#[path = "../corpus_memory.rs"]
-mod corpus_memory;
 #[path = "../corpus_oracle.rs"]
 mod corpus_oracle;
 #[path = "../corpus_outcome.rs"]

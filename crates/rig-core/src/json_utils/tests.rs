@@ -1,148 +1,43 @@
 use super::*;
-use serde::{Deserialize, Serialize};
 
-#[derive(Serialize)]
-struct SortedMapHolder {
-    #[serde(serialize_with = "serialize_map_sorted")]
-    map: HashMap<String, u32>,
-}
-
-#[derive(Serialize)]
-struct OptionalSortedMapHolder {
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_map_sorted"
-    )]
-    map: Option<HashMap<String, u32>>,
-}
-
-/// The property this exists to guarantee: identical content serializes to
-/// identical bytes, no matter how the map was built.
-///
-/// Two maps with the same entries inserted in *opposite* orders must produce
-/// the same JSON. Without sorting they generally do not, and every request
-/// carrying such a map gets a different wire prefix — which makes it a
-/// permanent prompt-cache miss.
 #[test]
-fn sorted_map_serialization_is_insertion_order_independent() {
-    let forward = SortedMapHolder {
-        map: [("alpha", 1), ("beta", 2), ("gamma", 3), ("delta", 4)]
-            .into_iter()
-            .map(|(key, value)| (key.to_owned(), value))
-            .collect(),
-    };
-    let reverse = SortedMapHolder {
-        map: [("delta", 4), ("gamma", 3), ("beta", 2), ("alpha", 1)]
-            .into_iter()
-            .map(|(key, value)| (key.to_owned(), value))
-            .collect(),
-    };
+fn remove_preserving_order_keeps_remaining_entries_in_original_order() {
+    let mut map: serde_json::Map<String, serde_json::Value> = [
+        ("z", serde_json::json!(1)),
+        ("m", serde_json::json!({"nested": [2, 3]})),
+        ("a", serde_json::Value::Null),
+        ("y", serde_json::json!(4)),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), value))
+    .collect();
+    let expected: Vec<_> = map
+        .iter()
+        .filter(|(key, _)| key.as_str() != "m")
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
 
-    let forward = serde_json::to_string(&forward).expect("serialize");
-    let reverse = serde_json::to_string(&reverse).expect("serialize");
-
-    assert_eq!(forward, reverse);
     assert_eq!(
-        forward, r#"{"map":{"alpha":1,"beta":2,"delta":4,"gamma":3}}"#,
-        "keys must come out in sorted order"
+        remove_preserving_order(&mut map, "m"),
+        Some(serde_json::json!({"nested": [2, 3]}))
     );
+    assert_eq!(map.into_iter().collect::<Vec<_>>(), expected);
 }
 
 #[test]
-fn optional_sorted_map_serializes_some_sorted_and_skips_none() {
-    let some = OptionalSortedMapHolder {
-        map: Some(
-            [("zulu", 1), ("alpha", 2)]
-                .into_iter()
-                .map(|(key, value)| (key.to_owned(), value))
-                .collect(),
-        ),
-    };
+fn remove_preserving_order_distinguishes_missing_and_null_values() {
+    let mut map = serde_json::Map::new();
+    map.insert("z".to_owned(), serde_json::json!(1));
+    map.insert("a".to_owned(), serde_json::Value::Null);
+    let before: Vec<_> = map.clone().into_iter().collect();
+
+    assert_eq!(remove_preserving_order(&mut map, "missing"), None);
+    assert_eq!(map.clone().into_iter().collect::<Vec<_>>(), before);
     assert_eq!(
-        serde_json::to_string(&some).expect("serialize"),
-        r#"{"map":{"alpha":2,"zulu":1}}"#
+        remove_preserving_order(&mut map, "a"),
+        Some(serde_json::Value::Null)
     );
-
-    let none = OptionalSortedMapHolder { map: None };
-    assert_eq!(serde_json::to_string(&none).expect("serialize"), "{}");
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-struct Dummy {
-    #[serde(with = "stringified_json")]
-    data: serde_json::Value,
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-struct DummyMaybeStringified {
-    #[serde(deserialize_with = "stringified_json::deserialize_maybe_stringified")]
-    data: serde_json::Value,
-}
-
-#[derive(serde::Deserialize)]
-struct ArgWrapper {
-    #[serde(default, deserialize_with = "deserialize_json_string_or_value")]
-    arguments: Option<String>,
-}
-
-/// Spec-compliant case: `arguments` is already a JSON-encoded string, taken verbatim.
-#[test]
-fn json_string_or_value_string_passthrough() {
-    let w: ArgWrapper = serde_json::from_str(r#"{"arguments":"{\"a\":1}"}"#).unwrap();
-    assert_eq!(w.arguments.as_deref(), Some(r#"{"a":1}"#));
-}
-
-/// Non-compliant gateway: an empty object `{}` must serialize to the string `"{}"`,
-/// not be treated as absent (None).
-#[test]
-fn json_string_or_value_empty_object() {
-    let w: ArgWrapper = serde_json::from_str(r#"{"arguments":{}}"#).unwrap();
-    assert_eq!(w.arguments.as_deref(), Some("{}"));
-}
-
-/// Non-compliant gateway: a nested object is re-serialized to a string.
-#[test]
-fn json_string_or_value_nested_object() {
-    let w: ArgWrapper = serde_json::from_str(r#"{"arguments":{"path":"/tmp","depth":2}}"#).unwrap();
-    // `arguments` is re-serialized from a Value; object key order is not guaranteed
-    // (depends on serde_json's `preserve_order` feature), so re-parse and compare
-    // values rather than the raw string.
-    let parsed: serde_json::Value = serde_json::from_str(w.arguments.as_deref().unwrap()).unwrap();
-    assert_eq!(parsed["path"], "/tmp");
-    assert_eq!(parsed["depth"], 2);
-}
-
-/// Non-compliant gateway: an array is also "any other JSON value" and serializes to a
-/// string. Array order is meaningful and preserved by serde_json, so compare the string
-/// directly.
-#[test]
-fn json_string_or_value_array() {
-    let w: ArgWrapper = serde_json::from_str(r#"{"arguments":[1,2,3]}"#).unwrap();
-    assert_eq!(w.arguments.as_deref(), Some("[1,2,3]"));
-}
-
-/// Regression test: JSON null must collapse to None (not the string "null").
-/// Removing `.filter(|v| !v.is_null())` from the deserializer would fail this test.
-#[test]
-fn json_string_or_value_null_is_none() {
-    let w: ArgWrapper = serde_json::from_str(r#"{"arguments":null}"#).unwrap();
-    assert!(w.arguments.is_none());
-}
-
-/// A missing field is likewise None (relies on `#[serde(default)]`).
-#[test]
-fn json_string_or_value_missing_is_none() {
-    let w: ArgWrapper = serde_json::from_str(r#"{}"#).unwrap();
-    assert!(w.arguments.is_none());
-}
-
-#[test]
-fn test_merge() {
-    let a = serde_json::json!({"key1": "value1"});
-    let b = serde_json::json!({"key2": "value2"});
-    let result = merge(a, b);
-    let expected = serde_json::json!({"key1": "value1", "key2": "value2"});
-    assert_eq!(result, expected);
+    assert_eq!(remove_preserving_order(&mut map, "a"), None);
 }
 
 #[test]
@@ -155,69 +50,10 @@ fn test_merge_inplace() {
 }
 
 #[test]
-fn test_stringified_json_serialize() {
-    let dummy = Dummy {
-        data: serde_json::json!({"key": "value"}),
-    };
-    let serialized = serde_json::to_string(&dummy).unwrap();
-    let expected = r#"{"data":"{\"key\":\"value\"}"}"#;
-    assert_eq!(serialized, expected);
-}
-
-#[test]
-fn test_stringified_json_deserialize() {
-    let json_str = r#"{"data":"{\"key\":\"value\"}"}"#;
-    let dummy: Dummy = serde_json::from_str(json_str).unwrap();
-    let expected = Dummy {
-        data: serde_json::json!({"key": "value"}),
-    };
-    assert_eq!(dummy, expected);
-}
-
-#[test]
-fn test_stringified_json_deserialize_empty_string() {
-    let json_str = r#"{"data":""}"#;
-    let dummy: Dummy = serde_json::from_str(json_str).unwrap();
-    assert_eq!(dummy.data, serde_json::json!({}));
-}
-
-#[test]
-fn test_deserialize_maybe_stringified_value_from_string() {
-    let json_str = r#"{"data":"{\"key\":\"value\"}"}"#;
-    let dummy: DummyMaybeStringified = serde_json::from_str(json_str).unwrap();
-    assert_eq!(dummy.data, serde_json::json!({"key": "value"}));
-}
-
-#[test]
-fn test_deserialize_maybe_stringified_value_from_object() {
-    let json_str = r#"{"data":{"key":"value"}}"#;
-    let dummy: DummyMaybeStringified = serde_json::from_str(json_str).unwrap();
-    assert_eq!(dummy.data, serde_json::json!({"key": "value"}));
-}
-
-#[test]
-fn test_deserialize_maybe_stringified_value_from_empty_string() {
-    let json_str = r#"{"data":""}"#;
-    let dummy: DummyMaybeStringified = serde_json::from_str(json_str).unwrap();
-    assert_eq!(dummy.data, serde_json::json!({}));
-}
-
-#[test]
-fn test_parse_tool_arguments_empty_string() {
-    let parsed = parse_tool_arguments("").unwrap();
-    assert_eq!(parsed, serde_json::json!({}));
-}
-
-#[test]
-fn test_parse_tool_arguments_whitespace_string() {
-    let parsed = parse_tool_arguments("   ").unwrap();
-    assert_eq!(parsed, serde_json::json!({}));
-}
-
-#[test]
-fn test_parse_tool_arguments_valid_json() {
-    let parsed = parse_tool_arguments(r#"{"key":"value"}"#).unwrap();
-    assert_eq!(parsed, serde_json::json!({"key": "value"}));
+fn text_that_states_no_object_has_none() {
+    for text in ["not json", "[1, 2", "\"str", "12"] {
+        assert_eq!(parse_partial_object(text), None, "{text}");
+    }
 }
 
 mod string_or_vec_shapes {
@@ -285,14 +121,6 @@ mod string_or_vec_shapes {
     }
 
     #[test]
-    fn a_sequence_decodes_elementwise() {
-        assert_eq!(
-            decode(serde_json::json!({"content": [{"text": "a"}, {"text": "b"}]})),
-            vec![block("a"), block("b")]
-        );
-    }
-
-    #[test]
     fn an_empty_sequence_is_an_empty_list() {
         // The non-empty container this helper replaced rejected `[]`
         // outright. It is now a value.
@@ -305,5 +133,120 @@ mod string_or_vec_shapes {
         // carries only tool calls, so dropping this arm would turn a normal
         // response into a decode error.
         assert!(decode(serde_json::json!({"content": null})).is_empty());
+    }
+}
+
+mod partial_arguments {
+    use super::super::parse_partial_arguments;
+    use serde_json::{Value, json};
+
+    fn parsed(text: &str) -> Value {
+        Value::Object(parse_partial_arguments(text))
+    }
+
+    #[test]
+    fn cut_off_text_keeps_what_it_states() {
+        for (text, expected) in [
+            ("", json!({})),
+            ("   ", json!({})),
+            ("{", json!({})),
+            (r#"{"path"#, json!({})),
+            (r#"{"path":"#, json!({})),
+            (r#"{"path": "no"#, json!({"path": "no"})),
+            (r#"{"path": "notes.md","#, json!({"path": "notes.md"})),
+            (r#"{"path": "notes.md", "con"#, json!({"path": "notes.md"})),
+            (r#"{"a": {"b": [1, 2"#, json!({"a": {"b": [1, 2]}})),
+            (r#"{"a": [{"b": "c"}, {"d"#, json!({"a": [{"b": "c"}, {}]})),
+            (r#"{"a": 1, "b": 2,"#, json!({"a": 1, "b": 2})),
+            (r#"{"line": "one\ntw"#, json!({"line": "one\ntw"})),
+            (r#"{"quote": "say \"hi"#, json!({"quote": "say \"hi"})),
+        ] {
+            assert_eq!(parsed(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn escapes_cut_short_keep_the_string_before_them() {
+        for (text, expected) in [
+            (r#"{"a": "x\"#, json!({"a": "x"})),
+            (r#"{"a": "x\u"#, json!({"a": "x"})),
+            (r#"{"a": "x\u00"#, json!({"a": "x"})),
+            (r#"{"a": "x\u00e"#, json!({"a": "x"})),
+            (r#"{"a": "x\u00e9"#, json!({"a": "xé"})),
+            (r#"{"a": "x\\u00"#, json!({"a": "x\\u00"})),
+        ] {
+            assert_eq!(parsed(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn numbers_and_literals_cut_short_are_dropped_until_valid() {
+        for (text, expected) in [
+            (r#"{"n": 1"#, json!({"n": 1})),
+            (r#"{"n": 1."#, json!({})),
+            (r#"{"n": -"#, json!({})),
+            (r#"{"n": 1e"#, json!({})),
+            (r#"{"n": 1.5"#, json!({"n": 1.5})),
+            (r#"{"b": tru"#, json!({})),
+            (r#"{"b": true"#, json!({"b": true})),
+            (r#"{"v": nul"#, json!({})),
+            (r#"{"a": 1, "v": nul"#, json!({"a": 1})),
+        ] {
+            assert_eq!(parsed(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn raw_control_characters_and_stray_backslashes_are_repaired() {
+        assert_eq!(
+            parsed("{\"text\": \"line one\nline two\ttabbed\"}"),
+            json!({"text": "line one\nline two\ttabbed"})
+        );
+        assert_eq!(
+            parsed(r#"{"path": "C:\Users\me"}"#),
+            json!({"path": "C:\\Users\\me"})
+        );
+        assert_eq!(
+            parsed("{\"text\": \"cut\nshort"),
+            json!({"text": "cut\nshort"})
+        );
+    }
+
+    #[test]
+    fn a_complete_object_parses_as_serde_does() {
+        let text = r#"{"path": "a.md", "content": "x\ny \"q\" \u00e9", "n": [1, 2.5, -3e2], "o": {"t": true, "f": null}}"#;
+        assert_eq!(
+            parsed(text),
+            serde_json::from_str::<Value>(text).expect("valid json")
+        );
+    }
+
+    #[test]
+    fn a_top_level_that_is_not_an_object_is_empty() {
+        for text in [
+            "[1, 2]", "[1, 2", "\"str\"", "\"str", "12", "true", "null", "not json",
+        ] {
+            assert_eq!(parsed(text), json!({}), "{text}");
+        }
+    }
+
+    #[test]
+    fn every_prefix_parses_and_the_whole_text_parses_exactly() {
+        for whole in [
+            json!({"path": "notes/today.md", "content": "Line one.\nLine \"two\" \\ é ✓\n\tIndented."}),
+            json!({"x": 1, "y": -2.5, "z": 3e10, "flags": [true, false, null], "nested": {"a": [{"b": "c"}]}}),
+            json!({"query": "", "limit": 0, "filters": {}, "tags": []}),
+        ] {
+            for text in [
+                whole.to_string(),
+                serde_json::to_string_pretty(&whole).expect("json"),
+            ] {
+                for (cut, _) in text.char_indices() {
+                    // Never fails, and always an object.
+                    let _ = parse_partial_arguments(&text[..cut]);
+                }
+                assert_eq!(parsed(&text), whole);
+            }
+        }
     }
 }

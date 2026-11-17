@@ -7,11 +7,11 @@ use rig_test_support::cassettes;
 use rig_test_support::raw_capture;
 use rig_test_support::support;
 
+#[path = "common/responses_route.rs"]
+mod responses_route;
+
 #[path = "providers/groq/mod.rs"]
 mod groq;
 
 use rig_test_support::history_survival;
 use rig_test_support::matrix;
-
-#[path = "common/request_identity.rs"]
-mod request_identity;

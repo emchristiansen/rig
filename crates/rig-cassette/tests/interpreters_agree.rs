@@ -16,19 +16,17 @@ use rig_cassette::agent::AgentReplayExt;
 use std::time::Duration;
 
 use proptest::prelude::*;
-use rig_agent::bus::{ModelHandle, ToolHandle};
+use rig_agent::handlers::{ModelHandle, ToolHandle};
 use rig_agent::{
     AgentBuilder,
-    run::{AgentRun, AgentRunStep, ModelTurn, RunSpec, prepare_request},
+    run::{AgentRun, AgentRunStep, ModelTurn, PendingToolCall, RunSpec, prepare_request},
     tool::{Tool, ToolContext, ToolExecutionError},
 };
 use rig_cassette::effect_log::EffectLogRecorder;
-use rig_core::serve::ServingPolicy;
 use rig_core::{
-    completion::CompletionRequestBuilder,
+    completion::CompletionRequest,
     effect::{EffectKind, EffectRecord},
     test_utils::{MockCompletionModel, MockTurn},
-    transcript,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -83,7 +81,6 @@ enum Turn {
 struct Case {
     turns: Vec<Turn>,
     tool_concurrency: usize,
-    serial_per_handler: bool,
 }
 
 fn case() -> impl Strategy<Value = Case> {
@@ -92,22 +89,17 @@ fn case() -> impl Strategy<Value = Case> {
         "[a-z]{1,8}".prop_map(Turn::Text),
         prop::collection::vec(call, 1..=3).prop_map(Turn::Calls),
     ];
-    (
-        prop::collection::vec(turn, 0..=3),
-        "[a-z]{1,8}",
-        1usize..=2,
-        any::<bool>(),
-    )
-        .prop_map(|(mut turns, last, tool_concurrency, serial_per_handler)| {
+    (prop::collection::vec(turn, 0..=3), "[a-z]{1,8}", 1usize..=2).prop_map(
+        |(mut turns, last, tool_concurrency)| {
             // A text turn ends the run, so only the final turn is text.
             turns.retain(|turn| matches!(turn, Turn::Calls(_)));
             turns.push(Turn::Text(last));
             Case {
                 turns,
                 tool_concurrency,
-                serial_per_handler,
             }
-        })
+        },
+    )
 }
 
 fn tool_name(index: u8) -> &'static str {
@@ -122,7 +114,11 @@ fn model_for(case: &Case) -> MockCompletionModel {
             id += 1;
             rig_core::message::AssistantContent::ToolCall(rig_core::message::ToolCall::from_wire(
                 format!("tc-{id}"),
-                rig_core::message::ToolFunction::new(tool_name(*tool).to_owned(), json!({"n": n})),
+                rig_core::message::ToolFunction::new(
+                    rig_core::message::ToolName::new(tool_name(*tool).to_owned())
+                        .expect("tool name"),
+                    json!({"n": n}),
+                ),
             ))
         })),
     }))
@@ -147,10 +143,6 @@ fn trace_of<'a>(records: impl IntoIterator<Item = &'a EffectRecord>) -> Trace {
 async fn bus_interpreter(case: &Case) -> (String, Trace) {
     let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
     let agent = AgentBuilder::named_model("default", model_for(case))
-        .configure_bus(ServingPolicy {
-            serial_per_handler: case.serial_per_handler,
-            ..ServingPolicy::default()
-        })
         .tool(Alpha)
         .tool(Beta)
         .record_to(recorder.clone())
@@ -174,7 +166,7 @@ async fn bus_interpreter(case: &Case) -> (String, Trace) {
         )),
         "only completions and tool calls in this program"
     );
-    (response.output, trace_of(log.iter()))
+    (response.output(), trace_of(log.iter()))
 }
 
 async fn hand_interpreter(case: &Case) -> (String, Trace) {
@@ -182,35 +174,22 @@ async fn hand_interpreter(case: &Case) -> (String, Trace) {
     // by hand: the model and the tools are reached through typed views,
     // never called directly, so the record is the bus's, as the engine's is.
     let agent = AgentBuilder::named_model("default", model_for(case))
-        .configure_bus(ServingPolicy {
-            serial_per_handler: case.serial_per_handler,
-            ..ServingPolicy::default()
-        })
         .tool(Alpha)
         .tool(Beta)
         .build();
     let model_key = agent.model_key().clone();
-    let parts = agent
-        .into_parts()
-        .unwrap_or_else(|_| panic!("the only clone"));
-    let rig_agent::agent::AgentParts {
-        dispatcher,
-        registrar: _,
-        mut driver,
-        agent,
-    } = parts;
+    let handlers = agent.handlers().clone();
     let recorder = EffectLogRecorder::new();
-    driver.record_to(recorder.clone());
-    let driver_task = tokio::spawn(driver);
-    let model: ModelHandle = dispatcher.bind(&model_key).expect("the model");
+    handlers.record_to(recorder.clone());
+    let model: ModelHandle = handlers.bind(&model_key).expect("the model");
     let catalog = agent.tool_server_handle().snapshot();
     let tool_handle = |name: &str| -> ToolHandle {
-        let key = dispatcher
+        let key = handlers
             .keys()
             .into_iter()
             .find(|key| key.as_str().contains(&format!("/tool:{name}#")))
             .expect("the tool is published");
-        dispatcher.handle(&key).expect("a tool")
+        handlers.handle(&key).expect("a tool")
     };
     let spec = RunSpec {
         max_turns: Some(case.turns.len()),
@@ -234,58 +213,46 @@ async fn hand_interpreter(case: &Case) -> (String, Trace) {
                 )
                 .expect("prepared");
                 run.advertise_tools(turn, prepared.tools.clone());
-                let executable = prepared.executable_tool_names.clone();
-                let allowed = prepared.allowed_tool_names.clone();
-                let request = prepared
-                    .apply(CompletionRequestBuilder::unbound(prompt))
-                    .build();
-                let response =
-                    tokio::time::timeout(Duration::from_secs(5), model.complete(request))
-                        .await
-                        .expect("never hangs")
-                        .expect("the model");
+                let policy = prepared.policy.clone();
+                let request = prepared.apply(CompletionRequest::new(prompt));
+                let response = tokio::time::timeout(Duration::from_secs(5), model.call(request))
+                    .await
+                    .expect("never hangs")
+                    .expect("the model");
                 run.model_response(ModelTurn::new(
-                    None,
+                    response.head(),
                     response.choice,
                     response.usage,
-                    executable,
-                    allowed,
+                    policy,
                     response.raw,
                 ))
                 .expect("a model turn");
             }
             AgentRunStep::CallTools { calls } => {
-                let mut results = Vec::with_capacity(calls.len());
                 for call in calls {
-                    let name = call.tool_call.function.name.clone();
+                    let PendingToolCall::Execute(call) = call else {
+                        panic!("an executable call: {call:?}");
+                    };
+                    let name = call.name().clone();
                     let answer = tokio::time::timeout(
                         Duration::from_secs(5),
                         tool_handle(&name).call(
                             name.clone(),
-                            call.tool_call.function.arguments.to_string(),
+                            call.arguments().to_string(),
                             ToolContext::new(),
                         ),
                     )
                     .await
                     .expect("never hangs")
                     .expect("the tool");
-                    results.push(transcript::tool_result_output(
-                        call.tool_call.id.clone(),
-                        call.tool_call.provider.clone(),
-                        name,
-                        answer.result.output().clone(),
-                    ));
+                    run.answer(call.answer(answer.result))
+                        .expect("tool results");
                 }
-                run.tool_results(results).expect("tool results");
             }
-            AgentRunStep::Done(response) => break response.output,
+            AgentRunStep::Done(response) => break response.output(),
         }
     };
-    drop((model, dispatcher, agent));
-    tokio::time::timeout(Duration::from_secs(5), driver_task)
-        .await
-        .expect("never hangs")
-        .expect("driver task");
+    drop((model, agent));
     let log = recorder.take();
     (output, trace_of(log.iter()))
 }

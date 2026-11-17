@@ -14,10 +14,15 @@ More information about this crate can be found in the [crate documentation](http
   - [Who is using Rig?](#who-is-using-rig)
 
 ## Features
-- Portable contracts for agent runtimes, including completions, messages, tools, and memory
+- Portable contracts for agent runtimes, including completions, messages, conversations, and tools
+- `conversation`: one conversation type with stable message ids, authors, asides, branches and a change log a store replays; `rig-memory` saves it
+- Provider facts a host acts on: calls a provider cut off, prefill support, foreign reasoning
+- `Model::check`: a dry run that lists the options a model would drop
 - Full [GenAI Semantic Convention](https://opentelemetry.io/docs/specs/semconv/gen-ai/) compatibility
 - 20+ model providers, all under one singular unified interface
-- Built-in providers selectable as data: `providers::registry` names a vendor and a protocol family (`deepseek/openai:deepseek-chat`) or carries a whole typed configuration, and both round-trip through serde without a credential. Model references discard embedded credentials and reject empty identifiers; a configuration's `id()` returns a catalog selection only when its dialect name is registered. Providers outside this catalog can use `CompletionModel` and `CompletionAdapter` directly.
+- Built-in providers selectable as data: `Catalog::connect("anthropic/claude-opus-5-5")` builds a model from a `vendor/model` reference with the key from the environment, in the protocol family the model catalog names, and the model encodes and prices with that catalog's facts. `providers::registry` references name a model or carry a whole typed configuration, and both round-trip through serde without a credential. Model references discard embedded credentials and reject empty identifiers; a configuration's `id()` returns a catalog selection only when its dialect name is registered. Providers outside this catalog can use a `Model` and `ModelAdapter` directly.
+- A model catalog an application can correct: lay a fetched copy of models.dev (`Catalog::from_models_dev`, which skips what it cannot read) and the user's override file (`Catalog::from_overrides`, which rejects a misspelt vendor, field or model id with a "did you mean" hint) over `Catalog::builtin()` with `with_models_dev` (which keeps rig's hand-reviewed facts) and `with_overrides`, and connect through the result.
+- `catalog::Connector`: reach a catalog's models by `vendor/model`, with keys or a sign-in
 - 10+ vector store integrations, all under one singular unified interface
 - Full support for LLM completion and embedding workflows
 - Support for transcription, audio generation and image generation model capabilities
@@ -26,8 +31,38 @@ More information about this crate can be found in the [crate documentation](http
 
 ## Installation
 ```bash
-cargo add rig-core
+cargo add rig-core --features reqwest
 ```
+
+The `reqwest` feature gives provider clients a default HTTP transport, so
+`OpenAI::from_env()` needs no client of yours. Without it, pass a transport
+with `OpenAIConfig::from_env()?.connect(http)`.
+
+`rig-core` no longer forces serde_json's `preserve_order` or
+`float_roundtrip` features. Without them, JSON object keys sort by name,
+including schema properties and JSON text embedded in prompts, embeddings
+and tool results. Parsing floating-point numbers can change their low bits.
+To restore the previous configuration, add this to your application's
+`Cargo.toml` dependencies:
+
+```toml
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+```
+
+Cargo unifies features across dependencies. `rig-cassette` with `traffic`
+(and therefore `rig-traffic`) still enables both features. `rig-claude-cloak`,
+`rig-mcp-client` and `rig-mongodb` through BSON still enable `preserve_order`. These are
+application-level serde_json choices; Rig has no forwarding feature.
+
+Native calls with float arguments store a projection baseline beside their
+provider item. Its floats pass through the same JSON parser as the arguments
+on each load, so repeated float drift does not stale an unedited item. Integers
+are encoded as text, with distinct markers for integers and strings, so a store
+that rounds a large integer still invalidates the item. Saving preserves the
+baseline and records edits before parsing can make adjacent floats equal. Calls
+without floats need only the existing fingerprint. Older fingerprint-only
+records keep their previous validation and can become stale when float parsing
+changes their canonical values.
 
 ## WASM target support
 
@@ -39,27 +74,20 @@ Node.js 19 or later do. WASI targets are not supported.
 ## Simple example
 ```rust
 use rig_core::{
-    completion::{AssistantContent, CompletionModel},
+    completion::CompletionRequest,
     providers::openai::{self, OpenAI},
 };
-// rig-core ships no transport; `.bound()` builds the bundled `reqwest` one.
-use rig_reqwest::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Read `OPENAI_API_KEY` into the provider's configuration, bind it to a
-    // transport, and pick a model: a model is a wire plus its socket.
-    // OpenAI's default completion route is the Responses API;
-    // `.with_route(Route::Chat)` on the configuration selects Chat Completions.
-    let model = OpenAI::from_env()?.bound()?.completion(openai::GPT_5_2);
+    // The client reads `OPENAI_API_KEY` and sends through the bundled reqwest
+    // client (rig-core's `reqwest` feature). A config's `connect(http)` uses another.
+    let model = OpenAI::from_env()?.completion(openai::GPT_5_2);
 
-    let request = model.completion_request("Who are you?").build();
-    let response = model.completion(request).await?;
-    for item in response.choice {
-        if let AssistantContent::Text(text) = item {
-            println!("{}", text.text);
-        }
-    }
+    let response = model
+        .call(CompletionRequest::new("Who are you?").temperature(0.2))
+        .await?;
+    println!("{}", response.text());
 
     Ok(())
 }
@@ -74,7 +102,7 @@ Rig supports the following LLM providers out of the box:
 
 - Anthropic
 - Azure OpenAI
-- ChatGPT and GitHub Copilot auth-backed clients (ChatGPT also creates GPT-Live realtime calls)
+- ChatGPT and GitHub Copilot auth-backed clients
 - Cohere
 - DeepSeek
 - Gemini
@@ -86,8 +114,9 @@ Rig supports the following LLM providers out of the box:
 - Mira
 - Mistral
 - Moonshot
-- Ollama
+- Ollama (native, OpenAI-compatible and Anthropic-compatible)
 - OpenAI
+- OpenCode Zen and Go
 - OpenRouter
 - Perplexity
 - Together
@@ -97,10 +126,14 @@ Rig supports the following LLM providers out of the box:
 - Xiaomi MiMo
 - Z.ai
 
+The built-in `rig_core::vector_store::in_memory_store::InMemoryVectorStore`
+stores serializable documents without requiring `Eq` or `Default`. Its custom
+ID callbacks accept closures that capture and mutate application state.
+
 Vector stores are available as separate companion-crates and as feature-gated modules on the root `rig` facade:
 
 ```toml
-rig = { version = "0.36.0", features = ["lancedb", "fastembed"] }
+rig = { version = "0.46.0", features = ["lancedb", "fastembed"] }
 ```
 
 - MongoDB: [`rig-mongodb`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-mongodb)
@@ -123,18 +156,7 @@ The following providers are available as separate companion-crates:
 - Google Vertex: [`rig-vertexai`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-vertexai)
 
 ## Who is using Rig?
-Below is a non-exhaustive list of companies and people who are using Rig:
-- [St Jude](https://www.stjude.org/) - Using Rig for a chatbot utility as part of [`proteinpaint`](https://github.com/stjude/proteinpaint), a genomics visualisation tool.
-- [Coral Protocol](https://www.coralprotocol.org/) - Using Rig extensively, both internally as well as part of the [Coral Rust SDK.](https://github.com/Coral-Protocol/coral-rs)
-- [VT Code](https://github.com/vinhnx/vtcode) - VT Code is a Rust-based terminal coding agent with semantic code intelligence via Tree-sitter and ast-grep. VT Code uses `rig` for simplifying LLM calls and implement model picker.
-- [Dria](https://dria.co/) - a decentralised AI network. Currently using Rig as part of their [compute node.](https://github.com/firstbatchxyz/dkn-compute-node)
-- [Nethermind](https://www.nethermind.io/) - Using Rig as part of their [Neural Interconnected Nodes Engine](https://github.com/NethermindEth/nine) framework.
-- [Neon](https://neon.com) - Using Rig for their [app.build](https://github.com/neondatabase/appdotbuild-agent) V2 reboot in Rust.
-- [Listen](https://github.com/piotrostr/listen) - A framework aiming to become the go-to framework for AI portfolio management agents. Powers [the Listen app.](https://app.listen-rs.com/)
-- [Cairnify](https://cairnify.com/) - helps users find documents, links, and information instantly through an intelligent search bar. Rig provides the agentic foundation behind Cairnify’s AI search experience, enabling tool-calling, reasoning, and retrieval workflows.
-- [Ironclaw](https://github.com/nearai/ironclaw) - A secure personal AI assistant
-
-Are you also using Rig in production? [Open an issue](https://www.github.com/0xPlaygrounds/rig/issues) to have your name added!
+Companies, applications, libraries and articles built on Rig are listed in [awesome-rig](https://github.com/0xPlaygrounds/awesome-rig), a community-maintained list. Using Rig? Open a pull request there to add your project.
 
 ## Provider selection persistence
 
@@ -149,16 +171,25 @@ self-describing format such as JSON.
 Copilot presets accept already-exchanged session tokens and derive their endpoint
 from those tokens. Explicit configurations keep their host and instruction
 placement. Token exchange and asynchronous SDK setup belong to the host. The
-catalog is not exhaustive: other models can use `CompletionAdapter` directly.
+catalog is not exhaustive: other models can use `ModelAdapter` directly.
 Registry-qualified names do not replace the provider names used in telemetry.
 
 ## Provider implementation
 
-Provider configuration and endpoint wires are separate from transports. A `Has*`
-implementation exposes each supported capability, while `Bound` supplies shared
-execution. Chat-compatible dialects use the shared `Chat` wire and decoder with
+A provider has a serializable configuration (`OpenAIConfig`) and a client
+(`OpenAI`), the configuration on a transport. The client builds one `Model`
+per capability: the capability's wire, which says what to send and how to
+read the reply, on the client's transport. One driver runs every model.
+Chat-compatible dialects use the shared `Chat` wire and decoder with
 `Dialect` data and `BodyRewrite` hooks rather than duplicating request conversion.
 This keeps normalization, retry classification, and telemetry consistent.
+
+An operation (`wire::Operation`) names its request, event and response types,
+which event ends a reply, and the fold one reply's events pass through; it is
+written once, and every provider of it is interchangeable behind a `DynModel`.
+A crate outside Rig adds an operation and serves it with its own wire and
+decoder over HTTP, or with `driver::Local` and a transport of its own for an
+in-process runtime.
 
 Each wire encodes requests without transport access and creates a fresh decoder
 for each reply. Buffered and streaming replies use the same classifier and event
@@ -192,6 +223,8 @@ Manual caching marks the system prompt, final tool definition, and final message
 block. Automatic caching delegates the moving conversation breakpoint to the
 provider. Combined mode retains static-prefix markers within the four-marker
 budget, including any markers already supplied on provider-specific tools.
+The final request is validated after raw parameter overrides are merged, so
+custom system, message, and tool markers cannot bypass the budget or TTL checks.
 
 A longer TTL can keep shared tools and instructions cached across conversations
 without paying the longer storage lifetime for every conversation tail. Set
@@ -199,6 +232,17 @@ without paying the longer storage lifetime for every conversation tail. Set
 caching for this arrangement. One-hour markers must precede five-minute markers;
 request encoding rejects the inverse ordering. Cache-write prices differ by TTL,
 so choose a lifetime based on actual reuse.
+
+Native Anthropic Messages response estimates use the reported five-minute and
+one-hour creation-token breakdown. Five-minute writes use the catalog write
+rate; one-hour writes use twice the catalog input rate, following
+[Anthropic's standard API pricing](https://platform.claude.com/docs/en/about-claude/pricing).
+A missing or inconsistent breakdown for nonzero writes leaves the write-cost
+estimate incomplete. Provider-reported costs take precedence, and other
+providers keep their configured pricing behavior. These are API list-price
+estimates, not subscription charges or custom-endpoint invoices; service-tier,
+long-context and hosted-tool fees may differ. Previously recorded estimates
+are not retroactively recomputed.
 
 Caching is skipped when the prefix through a marker is below the model's minimum:
 
@@ -240,33 +284,16 @@ retargeted by an invalid handle. A 403 or 404 on an existing handle maps to
 also indicate credential or quota problems. Cache creation does not apply this
 mapping, so authorization failures do not become recreation loops.
 
-## Unknown stream event serialization
-
-`StreamEvent::Unknown(UnknownPayload)` serializes as
-`{"event":"unknown_v2","payload":<value>}`. The required `payload` member
-retains any JSON value, including null, arrays and objects containing their own
-`event` or `payload` keys. An omitted payload is a decode error. The standalone
-`UnknownPayload` type still serializes directly to its JSON value, and other
-`StreamEvent` variants retain their existing encodings.
-
-The earlier flattened `event:"unknown"` encoding is rejected. Existing logs
-using it remain historical evidence; this decoder provides no migration or
-compatibility reader. The format preserves JSON values and event sequence,
-not original provider wire bytes.
-
 ## Provider observations
 
 `observe::AdapterContext` carries a caller-owned operation identity and a
 `Witness` sink. Pass it separately from request data through
-`CompletionModel::completion_with_context(request, Some(context))` or
-`stream_with_context(request, Some(context))`. Ordinary `completion(request)`
-and `stream(request)` are the required provider methods. The observed methods
-have defaults that delegate to them without emitting facts, so ordinary providers
-need no context boilerplate. Request builders and
-request literals contain only provider request data.
+`Model::call_observed(request, context)` or `Model::stream_observed(request,
+context)`; `Model::call` and `Model::stream` record nothing. Request builders
+and request literals contain only provider request data.
 
-Bus-backed `ModelHandle` calls use `complete_with_context` and
-`stream_with_context`. `CompletionAdapter` forwards `Dispatch::adapter_context`;
+Bus-backed `ModelHandle::call_observed` and `ModelHandle::stream_observed`
+take the same context. `ModelAdapter` forwards `Dispatch::adapter_context`;
 explicit caller context takes precedence over Recorder/Observe context for
 that invocation, including through handler layers. It is never serialized into
 provider data or effect records and is not inherited by child calls.
@@ -320,6 +347,5 @@ otherwise-empty frames still count. Corrupt-frame ordinals start at one using
 the same counting rule. `TransportEof`
 records body completeness independently: a provider terminal followed by
 an incomplete trailing frame retains both its terminal closure and partial
-EOF evidence. The context does not promise cross-execution identity. The ECS completion adapter
-forwards its driver's context when the invocation supplies no explicit context. Response bodies and
+EOF evidence. The context does not promise cross-execution identity. Response bodies and
 credentials are not copied into these boundary facts.

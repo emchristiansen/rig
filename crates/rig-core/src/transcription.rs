@@ -1,26 +1,31 @@
 //! Audio transcription requests, normalized responses, and model interfaces.
 //!
 //! ```no_run
-//! use rig_core::transcription::{TranscriptionModel, TranscriptionRequestBuilder};
+//! use rig_core::DynModel;
+//! use rig_core::operation::Transcription;
+//! use rig_core::transcription::TranscriptionRequestBuilder;
 //!
-//! # async fn example(model: impl TranscriptionModel) -> Result<(), Box<dyn std::error::Error>> {
-//! let response = TranscriptionRequestBuilder::from_file(model, "audio.wav")?
-//!     .send().await?;
+//! # async fn example(model: DynModel<Transcription>) -> Result<(), Box<dyn std::error::Error>> {
+//! let request = TranscriptionRequestBuilder::from_file("audio.wav")?.build();
+//! let response = model.call(request).await?;
 //! # let _ = response;
 //! # Ok(())
 //! # }
 //! ```
-use crate::completion::{ResponseIdentity, Usage};
-use crate::error::ProviderError;
+use crate::completion::Usage;
 use crate::json_utils;
-use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use serde::{Deserialize, Serialize};
 use std::io;
-use std::sync::Arc;
 use std::{fs, path::Path};
 
 /// Transcript and normalized provider metadata, with provider-specific data
 /// available through [`Self::raw`].
+///
+/// Timings and speaker labels are filled only when the provider returned
+/// them, which usually takes a provider option passed through
+/// [`TranscriptionRequestBuilder::additional_params`], such as
+/// `{"response_format": "verbose_json", "timestamp_granularities": ["segment", "word"]}`
+/// on OpenAI-compatible endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptionResponse {
     /// The transcribed text.
@@ -42,76 +47,84 @@ pub struct TranscriptionResponse {
     /// Transport request ID from HTTP headers, or `None` when unreported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_request_id: Option<String>,
+    /// Language of the audio as the provider reported it, either a code
+    /// such as `"en"` or a name such as `"english"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Length of the audio in seconds, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<f64>,
+    /// The provider's confidence in the whole transcript, from 0 to 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    /// Timed stretches of the transcript, in the provider's order. Empty when
+    /// the provider returned none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<TranscriptSegment>,
+    /// Timed words, in the provider's order. Empty when the provider returned
+    /// none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<TranscriptWord>,
     /// Provider response document. Defaults to null until populated.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub raw: serde_json::Value,
 }
 
 impl TranscriptionResponse {
-    /// Create a response from its required parts; optional metadata starts
-    /// unset and is filled in with the `with_*` helpers.
-    pub fn new(text: impl Into<String>, provider: impl Into<String>) -> Self {
+    /// A response carrying `text`. The driver writes the provider, the
+    /// transport request id and the reply document; decoders set what the
+    /// provider reported.
+    pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             usage: Usage::default(),
-            provider: provider.into(),
+            provider: String::new(),
             model: None,
             response_id: None,
             provider_request_id: None,
+            language: None,
+            duration: None,
+            confidence: None,
+            segments: Vec::new(),
+            words: Vec::new(),
             raw: serde_json::Value::Null,
         }
     }
-
-    /// This response's identity metadata as one [`ResponseIdentity`] carrier.
-    /// Transcriptions are never replayed as assistant messages, so
-    /// `message_id` is always `None`.
-    pub fn identity(&self) -> ResponseIdentity {
-        ResponseIdentity {
-            message_id: None,
-            response_id: self.response_id.clone(),
-            provider_request_id: self.provider_request_id.clone(),
-        }
-    }
 }
 
-crate::provider_response::modality_response_metadata_setters!(TranscriptionResponse);
-
-/// Converts provider payloads into normalized transcription responses.
-/// Implementations must attribute the response to the supplied provider name.
-pub trait NormalizeTranscriptionResponse {
-    /// Normalize this payload, attributing it to `provider`.
-    fn normalize(self, provider: &str) -> Result<TranscriptionResponse, ProviderError>;
+/// A timed stretch of a transcript. Times are seconds from the start of the
+/// audio.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TranscriptSegment {
+    /// When the segment starts.
+    pub start: f64,
+    /// When the segment ends.
+    pub end: f64,
+    /// The segment's text, with the provider's spacing.
+    pub text: String,
+    /// Who spoke it, when the provider diarized the audio. Labels are the
+    /// provider's own, such as `"0"`, `"A"` or `"speaker_1"`, and are stable
+    /// within one response only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
 }
 
-/// Transcribes audio into normalized responses. Only
-/// [`Self::transcription_request`] requires cloning; `Arc<M>` forwards operations.
-pub trait TranscriptionModel: WasmCompatSend + WasmCompatSync {
-    /// Transcribes the supplied audio request or returns a provider or transport error.
-    fn transcription(
-        &self,
-        request: TranscriptionRequest,
-    ) -> impl std::future::Future<Output = Result<TranscriptionResponse, ProviderError>> + WasmCompatSend;
-
-    /// Creates a request builder over `data`.
-    fn transcription_request(&self, data: Vec<u8>) -> TranscriptionRequestBuilder<Self>
-    where
-        Self: Sized + Clone,
-    {
-        TranscriptionRequestBuilder::new(self.clone(), data)
-    }
-}
-
-impl<M> TranscriptionModel for Arc<M>
-where
-    M: TranscriptionModel,
-{
-    fn transcription(
-        &self,
-        request: TranscriptionRequest,
-    ) -> impl std::future::Future<Output = Result<TranscriptionResponse, ProviderError>> + WasmCompatSend
-    {
-        (**self).transcription(request)
-    }
+/// A timed word of a transcript. Times are seconds from the start of the
+/// audio.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TranscriptWord {
+    /// The word, with the provider's spacing and punctuation.
+    pub word: String,
+    /// When the word starts.
+    pub start: f64,
+    /// When the word ends.
+    pub end: f64,
+    /// Who spoke it, labeled as on [`TranscriptSegment::speaker`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
+    /// The provider's confidence in the word, from 0 to 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
 }
 
 /// Struct representing a general transcription request that can be sent to a transcription model provider.
@@ -133,19 +146,16 @@ pub struct TranscriptionRequest {
 /// The filename a request carries until the caller or its file names it.
 const DEFAULT_FILENAME: &str = "file";
 
-/// Builds a transcription request over the supplied audio. The model is moved
-/// into the builder and consumed by [`Self::send`]. The audio is not validated
-/// for format or nonemptiness.
-pub struct TranscriptionRequestBuilder<M> {
-    model: M,
+/// Builds a transcription request over the supplied audio. The audio is not
+/// validated for format or nonemptiness.
+pub struct TranscriptionRequestBuilder {
     request: TranscriptionRequest,
 }
 
-impl<M> TranscriptionRequestBuilder<M> {
+impl TranscriptionRequestBuilder {
     /// A request over `data`, named `"file"` until [`Self::filename`] names it.
-    pub fn new(model: M, data: Vec<u8>) -> Self {
+    pub fn new(data: Vec<u8>) -> Self {
         Self {
-            model,
             request: TranscriptionRequest {
                 data,
                 filename: DEFAULT_FILENAME.to_owned(),
@@ -159,12 +169,12 @@ impl<M> TranscriptionRequestBuilder<M> {
 
     /// A request over the file at `path`, named after its base name. Reads the
     /// file synchronously and returns I/O errors unchanged.
-    pub fn from_file(model: M, path: impl AsRef<Path>) -> io::Result<Self> {
+    pub fn from_file(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
         let filename = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned());
-        Ok(Self::new(model, fs::read(path)?).filename(filename))
+        Ok(Self::new(fs::read(path)?).filename(filename))
     }
 
     /// Names the audio file; `None` restores the default name.
@@ -207,14 +217,5 @@ impl<M> TranscriptionRequestBuilder<M> {
     }
 }
 
-impl<M: TranscriptionModel> TranscriptionRequestBuilder<M> {
-    /// Sends the request to the model and returns its transcription.
-    pub async fn send(self) -> Result<TranscriptionResponse, ProviderError> {
-        self.model.transcription(self.request).await
-    }
-}
-
 #[cfg(test)]
 mod builder_tests;
-#[cfg(test)]
-mod provider_response_tests;

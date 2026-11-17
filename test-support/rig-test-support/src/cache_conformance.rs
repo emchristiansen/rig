@@ -49,9 +49,6 @@
 //!   determinism check in `tests/cassette_cache_prefix.rs` can catch that.
 //! * A cassette pins what the provider did at record time. Only the live
 //!   economics suite catches the provider changing its cache semantics under us.
-#![allow(dead_code)]
-
-use rig_agent::completion::CompletionModel;
 
 use rig_agent::completion::CompletionRequest;
 
@@ -67,42 +64,6 @@ use rig_core::message::UserContent;
 
 use crate::cache_prefix;
 
-/// How a provider reports cached tokens relative to its input-token counter.
-///
-/// This is the single most likely place to ship a vacuous assertion: divide
-/// turn 2's cache read by the wrong turn-1 denominator and
-/// [`assert_hit_ratio`] either always passes or always fails. Each variant
-/// below cites the mapping code it was derived from.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CacheAccounting {
-    /// Cache reads and writes are reported *alongside* `input_tokens`, not
-    /// inside it, so the prompt total is the sum of all three.
-    ///
-    /// Anthropic: `anthropic_usage_totals` computes
-    /// `total = input + cached + cache_creation + output`
-    /// (`crates/rig-core/src/providers/anthropic/completion.rs`, and the doc
-    /// comment above it says so explicitly).
-    Alongside,
-    /// `cached_input_tokens` is a *subset* of `input_tokens`, so the prompt
-    /// total is `input_tokens` on its own.
-    ///
-    /// * OpenAI chat completions: `prompt_tokens_details.cached_tokens` is a
-    ///   breakdown of `prompt_tokens`
-    ///   (`crates/rig-core/src/providers/openai/completion/mod.rs`, normalized
-    ///   through `providers::internal::completion_usage`).
-    /// * OpenAI Responses: `input_tokens_details.cached_tokens` inside
-    ///   `input_tokens` (`.../openai/responses_api/mod.rs`).
-    /// * Cohere: the field's own doc reads "Subset of `tokens.input_tokens`"
-    ///   (`.../cohere/completion.rs`).
-    /// * DeepSeek: `prompt_cache_hit_tokens + prompt_cache_miss_tokens` partition
-    ///   `prompt_tokens` (`.../deepseek.rs`).
-    /// * Gemini: `cachedContentTokenCount` is a breakdown of
-    ///   `promptTokenCount` (`.../gemini/completion.rs`).
-    /// * OpenRouter, Mistral, and every `openai::Usage` reuser (groq, xai,
-    ///   venice, doubleword, perplexity): same OpenAI-compatible shape.
-    Subset,
-}
-
 /// What a provider's prompt cache can do, and what its numbers mean.
 ///
 /// Passed to every assertion so the assertions themselves stay provider-generic
@@ -111,13 +72,11 @@ pub enum CacheAccounting {
 pub struct CacheSupport {
     /// Label used in every assertion message.
     pub provider: &'static str,
-    /// See [`CacheAccounting`].
-    pub accounting: CacheAccounting,
     /// Whether the provider reports cache *writes* at all.
     ///
     /// Anthropic and OpenRouter populate `cache_creation_input_tokens`; every
     /// other provider here never does — rig hardcodes it to 0 on those paths
-    /// (`providers::internal::completion_usage`), and Gemini's and Cohere's
+    /// (the Chat and Responses usage mappings), and Gemini's and Cohere's
     /// mappings never set it either.
     ///
     /// Note what each branch of [`assert_warms`] is worth. For a
@@ -150,16 +109,16 @@ pub struct CacheSupport {
 }
 
 impl CacheSupport {
-    /// The prompt tokens the provider billed for a turn, however it reports them.
+    /// The prompt tokens the provider billed for a turn: `Usage::input_tokens`,
+    /// which counts cache reads and writes on every provider.
     ///
-    /// This is [`assert_hit_ratio`]'s denominator. See [`CacheAccounting`].
-    /// A turn whose usage mapping reported no input tokens has no denominator:
-    /// that is a mapping bug, not a cache miss, and fails here by name. An
-    /// absent cache counter is nothing cached.
+    /// This is [`assert_hit_ratio`]'s denominator. A turn whose usage mapping
+    /// reported no input tokens has no denominator: that is a mapping bug, not
+    /// a cache miss, and fails here by name.
     ///
     /// # Panics
     /// When `usage.input_tokens` is `None`.
-    pub fn prompt_tokens(&self, usage: &Usage) -> u64 {
+    pub fn input_tokens(&self, usage: &Usage) -> u64 {
         let Some(input) = usage.input_tokens else {
             panic!(
                 "[{}] the usage mapping reported no input tokens ({usage:?}); a cache ratio over \
@@ -167,10 +126,7 @@ impl CacheSupport {
                 self.provider
             );
         };
-        match self.accounting {
-            CacheAccounting::Alongside => input + cached_reads(usage) + cached_writes(usage),
-            CacheAccounting::Subset => input,
-        }
+        input
     }
 }
 
@@ -220,7 +176,7 @@ pub struct CacheProbe {
     /// System instruction, including deterministic cache padding.
     pub preamble: String,
     /// Tool definitions in the stable order sent by each probe turn.
-    pub tools: Vec<ToolDefinition>,
+    pub tools: Vec<std::sync::Arc<ToolDefinition>>,
     /// Opening prompt used for the first two requests.
     pub prompt: &'static str,
     /// Continuation prompt that extends the cached prefix.
@@ -229,6 +185,10 @@ pub struct CacheProbe {
     pub max_tokens: u64,
     /// Provider-specific request parameters shared by the probe turns.
     pub additional_params: Option<serde_json::Value>,
+    /// Generation options shared by the probe turns.
+    pub options: rig_core::completion::GenerationOptions,
+    /// Typed provider options shared by the probe turns.
+    pub provider_options: rig_core::completion::ProviderOptions,
 }
 
 /// The prompt every probe sends, unless a provider needs its own wording.
@@ -256,11 +216,16 @@ impl CacheProbe {
                  requested phrase.\n{}",
                 cache_padding(CACHE_PADDING_REPETITIONS)
             ),
-            tools: cache_probe_tools(label),
+            tools: cache_probe_tools(label)
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             prompt: CACHE_PROBE_PROMPT,
             follow_up: CACHE_PROBE_FOLLOW_UP,
             max_tokens: 16,
             additional_params: None,
+            options: rig_core::completion::GenerationOptions::default(),
+            provider_options: rig_core::completion::ProviderOptions::new(),
         }
     }
 
@@ -280,6 +245,18 @@ impl CacheProbe {
     /// Set provider-specific request parameters for every probe turn.
     pub fn with_additional_params(mut self, params: serde_json::Value) -> Self {
         self.additional_params = Some(params);
+        self
+    }
+
+    /// Set the generation options of every probe turn.
+    pub fn with_options(mut self, options: rig_core::completion::GenerationOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Set the typed provider options of every probe turn.
+    pub fn with_provider_options(mut self, options: rig_core::completion::ProviderOptions) -> Self {
+        self.provider_options = options;
         self
     }
 
@@ -305,20 +282,18 @@ impl CacheProbe {
     /// order because a reordered tool set is itself one of the prefix moves this
     /// harness exists to catch.
     fn request(&self, chat_history: Vec<Message>) -> CompletionRequest {
-        CompletionRequest {
-            chat_history: std::iter::once(Message::system(self.preamble.clone()))
+        let mut request = CompletionRequest::from(
+            std::iter::once(Message::system(self.preamble.clone()))
                 .chain(chat_history)
-                .collect(),
-            documents: vec![],
-            tools: self.tools.clone(),
-            temperature: Some(0.0),
-            max_tokens: Some(self.max_tokens),
-            tool_choice: None,
-            additional_params: self.additional_params.clone(),
-            model: None,
-            output_schema: None,
-            record_telemetry_content: false,
-        }
+                .collect::<Vec<_>>(),
+        );
+        request.tools = self.tools.clone();
+        request.temperature = Some(0.0);
+        request.max_tokens = Some(self.max_tokens);
+        request.additional_params = self.additional_params.clone();
+        request.options = self.options.clone();
+        request.provider_options = self.provider_options.clone();
+        request
     }
 }
 
@@ -340,7 +315,7 @@ const TOOL_PADDING_REPETITIONS: usize = 3;
 pub fn cache_probe_tools(label: &str) -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
-            name: "lookup_cache_policy".to_string(),
+            name: rig_core::message::ToolName::new("lookup_cache_policy").expect("tool name"),
             description: format!(
                 "Return {label} internal prompt cache policy notes. {}",
                 cache_padding(TOOL_PADDING_REPETITIONS)
@@ -352,9 +327,10 @@ pub fn cache_probe_tools(label: &str) -> Vec<ToolDefinition> {
                 },
                 "required": ["topic"]
             }),
+            annotations: Default::default(),
         },
         ToolDefinition {
-            name: "lookup_cache_fixture".to_string(),
+            name: rig_core::message::ToolName::new("lookup_cache_fixture").expect("tool name"),
             description: format!(
                 "Return {label} prompt cache fixture notes. {}",
                 cache_padding(TOOL_PADDING_REPETITIONS)
@@ -366,6 +342,7 @@ pub fn cache_probe_tools(label: &str) -> Vec<ToolDefinition> {
                 },
                 "required": ["fixture"]
             }),
+            annotations: Default::default(),
         },
     ]
 }
@@ -410,7 +387,7 @@ impl CacheObservation {
                 format!(
                     "  turn {}: prompt={} input={:?} cached={:?} created={:?} output={:?} total={:?}",
                     index + 1,
-                    support.prompt_tokens(usage),
+                    support.input_tokens(usage),
                     usage.input_tokens,
                     usage.cached_input_tokens,
                     usage.cache_creation_input_tokens,
@@ -430,26 +407,24 @@ impl CacheObservation {
 /// message-normalization path, and a normalizer that rewrites the assistant turn
 /// on the way back in is precisely the loop-level prefix move
 /// [`assert_growth_still_hits`] is looking for.
-pub async fn run_cache_probe<M>(model: &M, probe: &CacheProbe) -> CacheObservation
-where
-    M: CompletionModel,
-{
+pub async fn run_cache_probe(
+    model: impl Into<rig_core::DynModel<rig_core::operation::Completion>>,
+    probe: &CacheProbe,
+) -> CacheObservation {
+    let model: rig_core::DynModel<rig_core::operation::Completion> = model.into();
     let opening = Message::User {
         content: vec![UserContent::text(probe.prompt)],
     };
 
-    let first = send(model, probe, vec![opening.clone()], "turn 1 (warm)").await;
-    let second = send(model, probe, vec![opening.clone()], "turn 2 (hit)").await;
+    let first = send(&model, probe, vec![opening.clone()], "turn 1 (warm)").await;
+    let second = send(&model, probe, vec![opening.clone()], "turn 2 (hit)").await;
 
-    let assistant = Message::Assistant {
-        id: second.message_id.clone(),
-        content: second.choice.clone(),
-    };
+    let assistant = Message::Assistant(second.head().with_content(second.choice.clone()));
     let follow_up = Message::User {
         content: vec![UserContent::text(probe.follow_up)],
     };
     let third = send(
-        model,
+        &model,
         probe,
         vec![opening, assistant, follow_up],
         "turn 3 (hit after append)",
@@ -461,17 +436,14 @@ where
     }
 }
 
-async fn send<M>(
-    model: &M,
+async fn send(
+    model: &rig_core::DynModel<rig_core::operation::Completion>,
     probe: &CacheProbe,
     chat_history: Vec<Message>,
     label: &str,
-) -> CompletionResponse
-where
-    M: CompletionModel,
-{
+) -> CompletionResponse {
     model
-        .completion(probe.request(chat_history))
+        .call(probe.request(chat_history))
         .await
         .unwrap_or_else(|error| panic!("cache probe {label} should succeed: {error}"))
 }
@@ -486,18 +458,19 @@ where
 /// class — see the carry-forward logic in
 /// `crates/rig-core/src/providers/anthropic/streaming.rs` — and only a streamed
 /// probe can see it.
-pub async fn run_cache_probe_streaming<M>(model: &M, probe: &CacheProbe) -> CacheObservation
-where
-    M: CompletionModel,
-{
+pub async fn run_cache_probe_streaming(
+    model: impl Into<rig_core::DynModel<rig_core::operation::Completion>>,
+    probe: &CacheProbe,
+) -> CacheObservation {
+    let model: rig_core::DynModel<rig_core::operation::Completion> = model.into();
     let opening = Message::User {
         content: vec![UserContent::text(probe.prompt)],
     };
 
     let (first_usage, _, _) =
-        stream_turn(model, probe, vec![opening.clone()], "turn 1 (warm)").await;
-    let (second_usage, text, message_id) =
-        stream_turn(model, probe, vec![opening.clone()], "turn 2 (hit)").await;
+        stream_turn(&model, probe, vec![opening.clone()], "turn 1 (warm)").await;
+    let (second_usage, text, _response_id) =
+        stream_turn(&model, probe, vec![opening.clone()], "turn 2 (hit)").await;
 
     // A model can legitimately produce no *text* within the probe's small
     // output budget — a reasoning model may spend all of it on thinking, which
@@ -510,15 +483,14 @@ where
     } else {
         text
     };
-    let assistant = Message::Assistant {
-        id: message_id,
-        content: vec![rig_core::message::AssistantContent::text(&assistant_text)],
-    };
+    let assistant = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        rig_core::message::AssistantContent::text(&assistant_text),
+    ]));
     let follow_up = Message::User {
         content: vec![UserContent::text(probe.follow_up)],
     };
     let (third_usage, _, _) = stream_turn(
-        model,
+        &model,
         probe,
         vec![opening, assistant, follow_up],
         "turn 3 (hit after append)",
@@ -532,49 +504,38 @@ where
 
 /// Drive one streamed turn, returning its final usage, accumulated text, and
 /// message id.
-async fn stream_turn<M>(
-    model: &M,
+async fn stream_turn(
+    model: &rig_core::DynModel<rig_core::operation::Completion>,
     probe: &CacheProbe,
     chat_history: Vec<Message>,
     label: &str,
-) -> (Usage, String, Option<String>)
-where
-    M: CompletionModel,
-{
+) -> (Usage, String, Option<String>) {
     use futures::StreamExt;
 
-    use rig_core::streaming::Delta;
-
-    use rig_core::streaming::StreamEvent;
+    use rig_core::streaming::{Item, StreamEvent};
 
     let mut stream = model
         .stream(probe.request(chat_history))
-        .await
         .unwrap_or_else(|error| panic!("streamed cache probe {label} should start: {error}"));
 
     let mut text = String::new();
-    let mut usage = None;
-
     while let Some(item) = stream.next().await {
-        match item
+        if let Item::Event(StreamEvent::Text { text: delta, .. }) = item
             .unwrap_or_else(|error| panic!("streamed cache probe {label} should succeed: {error}"))
         {
-            StreamEvent::BlockDelta {
-                delta: Delta::Text { text: delta },
-                ..
-            } => text.push_str(&delta),
-            StreamEvent::Final(response) => usage = Some(response.usage),
-            _ => {}
+            text.push_str(&delta);
         }
     }
 
-    let usage = usage.unwrap_or_else(|| {
-        panic!(
-            "streamed cache probe {label} produced no final usage — the accumulator dropped it, \
-             which is exactly the streaming-path bug class this probe exists to catch"
-        )
-    });
-    (usage, text, stream.message_id.clone())
+    let response = stream
+        .finish()
+        .await
+        .unwrap_or_else(|error| panic!("streamed cache probe {label} should finish: {error}"));
+    (
+        response.usage,
+        text,
+        response.response_id().map(str::to_owned),
+    )
 }
 
 /// Turn 1 must create a cache entry, or read one that was already warm.
@@ -587,7 +548,7 @@ where
 /// nothing to do with rig.
 ///
 /// Providers that cannot report writes at all (`reports_writes: false`, i.e.
-/// everything rig normalizes through `completion_usage`) may legitimately report
+/// everything rig normalizes through those mappings) may legitimately report
 /// zero for both counters on turn 1: their first turn is the miss that populates
 /// the cache and they say nothing about it. For those, turn 1 is only required
 /// not to *claim* a write it cannot produce.
@@ -615,12 +576,12 @@ pub fn assert_warms(observation: &CacheObservation, support: &CacheSupport, cont
     }
 
     assert!(
-        support.prompt_tokens(turn) as usize >= support.min_cacheable_tokens,
+        support.input_tokens(turn) as usize >= support.min_cacheable_tokens,
         "[{}] {context}: turn 1 billed only {} prompt tokens, below this provider's documented \
          {}-token cacheable minimum — the probe is under-padded and the fixture would pin a miss \
          no matter what rig does.\n{}",
         support.provider,
-        support.prompt_tokens(turn),
+        support.input_tokens(turn),
         support.min_cacheable_tokens,
         observation.report(support)
     );
@@ -649,7 +610,7 @@ pub fn assert_hit_ratio(observation: &CacheObservation, support: &CacheSupport, 
     let warm = observation.turn(0, support);
     let hit = observation.turn(1, support);
 
-    let denominator = support.prompt_tokens(warm);
+    let denominator = support.input_tokens(warm);
     assert!(
         denominator > 0,
         "[{}] {context}: turn 1 billed zero prompt tokens, so a hit ratio is undefined — the \
@@ -694,7 +655,7 @@ pub fn assert_growth_still_hits(
     context: &str,
 ) {
     let grown = observation.turn(2, support);
-    let denominator = support.prompt_tokens(grown);
+    let denominator = support.input_tokens(grown);
     assert!(
         denominator > 0,
         "[{}] {context}: turn 3 billed zero prompt tokens, so its hit ratio is undefined.\n{}",
@@ -960,15 +921,6 @@ look up the cache policy for the topic 'breakpoint'. Call the tool once per \
 topic, one after the other. Then reply with exactly these three words: cache \
 probe ready";
 
-/// Turn an agent run's per-call usage into a [`CacheObservation`].
-pub fn observation_from_completion_calls(
-    calls: &[rig_agent::agent::CompletionCall],
-) -> CacheObservation {
-    CacheObservation {
-        turns: calls.iter().map(|call| call.usage).collect(),
-    }
-}
-
 /// Across a real agent loop, every turn must stay mostly served from cache.
 ///
 /// Each iteration appends an assistant turn and a tool result, so the cacheable
@@ -1005,7 +957,7 @@ pub fn assert_agent_growth_still_hits(
 
     let mut ever_hit = false;
     for (index, usage) in observation.turns.iter().enumerate() {
-        let denominator = support.prompt_tokens(usage);
+        let denominator = support.input_tokens(usage);
         let ratio = if denominator == 0 {
             0.0
         } else {
@@ -1071,7 +1023,7 @@ pub fn assert_no_meaningful_prefix_cache(
     assert_probe_is_padded_enough(observation, support, context);
 
     for (index, usage) in observation.turns.iter().enumerate() {
-        let turn_denominator = support.prompt_tokens(usage);
+        let turn_denominator = support.input_tokens(usage);
         let ratio = if turn_denominator == 0 {
             0.0
         } else {
@@ -1126,7 +1078,7 @@ pub fn assert_cache_warms_over_turns(
         .turns
         .iter()
         .map(|usage| {
-            let denominator = support.prompt_tokens(usage);
+            let denominator = support.input_tokens(usage);
             if denominator == 0 {
                 0.0
             } else {
@@ -1178,7 +1130,7 @@ fn assert_probe_is_padded_enough(
     support: &CacheSupport,
     context: &str,
 ) {
-    let denominator = support.prompt_tokens(observation.turn(0, support));
+    let denominator = support.input_tokens(observation.turn(0, support));
     assert!(
         denominator > 0,
         "[{}] {context}: turn 1 billed zero prompt tokens, so nothing can be concluded.\n{}",
@@ -1223,7 +1175,7 @@ pub fn assert_cache_read_is_surfaced(
         .turns
         .iter()
         .map(|usage| {
-            let denominator = support.prompt_tokens(usage);
+            let denominator = support.input_tokens(usage);
             if denominator == 0 {
                 0.0
             } else {
@@ -1259,7 +1211,7 @@ pub fn report_and_assert_live(
     let warm = observation.turn(0, support);
     let hit = observation.turn(1, support);
     let grown = observation.turn(2, support);
-    let denominator = support.prompt_tokens(warm);
+    let denominator = support.input_tokens(warm);
     let ratio = if denominator == 0 {
         0.0
     } else {

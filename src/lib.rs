@@ -3,9 +3,9 @@
 //!
 //! Re-exports `rig_core` at `rig::...` paths and, under the default `agent`
 //! feature, the runtime from `rig_agent` at `rig::agent`. `rig::tool` then
-//! carries the contextual tool API alongside the portable contracts, which are
-//! always available. `use rig::prelude::*;` brings in the model traits, the
-//! transport conveniences, and constructors such as `provider.agent(...)`.
+//! carries the agent's tool registry alongside the `rig-core` tool contracts,
+//! which are always available. `use rig::prelude::*;` brings in
+//! [`Model`], [`DynModel`] and, with `agent`, the common agent types.
 //!
 //! Companion provider and vector-store crates are feature-gated modules, named
 //! after their features wherever module naming allows:
@@ -13,89 +13,69 @@
 //! ```toml
 //! [dependencies]
 //! rig = { version = "*", features = ["lancedb", "fastembed"] }
+//! serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 //! ```
 //!
 //! Depend on `rig-core` directly to skip this facade's companion integrations.
+//! Core does not force serde_json's `preserve_order` or `float_roundtrip`; the
+//! application dependency above restores the previous configuration. Without
+//! those features, schema properties and JSON text in prompts, embeddings and
+//! tool results use sorted object keys, and parsed floats can differ in their
+//! low bits. Cargo unifies features: `rig-cassette` with `traffic` (including
+//! `rig-traffic`) enables both; `rig-claude-cloak`, `rig-mcp-client` and
+//! `rig-mongodb` through BSON enable `preserve_order`. Rig has no forwarding feature for either setting.
 
 pub use rig_core::*;
 
-/// The bundled `reqwest` transport and its construction convenience
-/// (`rig-reqwest`). A provider's wire is bound to a transport to become a
-/// model, and that transport defaults to the erased
-/// [`BoxedHttpClient`](rig_core::http_client::BoxedHttpClient); with the
-/// default `reqwest` feature, [`prelude`] carries
-/// [`rig_reqwest::client::DefaultTransport`], which fills that default with a
-/// [`rig_reqwest::ReqwestClient`] so `Provider::from_env()?.bound()?` works
-/// without naming a transport. Without the feature, bind explicitly with
-/// [`Bind::bind`](rig_core::driver::Bind::bind) and any `HttpClientExt`
-/// implementation.
+/// The bundled `reqwest` transport (`rig-reqwest`). A provider client built
+/// with no transport named (`OpenAI::from_env()`) sends through its shared
+/// client; a config's `connect` builds one on any other `HttpClientExt`.
 #[cfg(feature = "reqwest")]
 #[cfg_attr(docsrs, doc(cfg(feature = "reqwest")))]
 pub use rig_reqwest;
 
-/// The bundled `tokio-tungstenite` websocket backend and its default-backend
-/// conveniences (`rig-tungstenite`), on native targets. With the `websocket`
-/// feature, `bound.responses_websocket()` opens a session over it with no
+/// The bundled `tokio-tungstenite` websocket backend (`rig-tungstenite`), on
+/// native targets. With the `websocket` feature,
+/// `model.responses_websocket().connect()` opens a session over it with no
 /// backend named; without it, rig has no websocket backend and a session is
-/// opened with `responses_websocket_with(..)` and any
+/// opened with `responses_websocket().connect_with(..)` and any
 /// [`rig_core::ws_client::WebSocketClientExt`] implementation.
 #[cfg(all(feature = "websocket", not(target_family = "wasm")))]
 #[cfg_attr(docsrs, doc(cfg(feature = "websocket")))]
 pub use rig_tungstenite;
-
-/// The WebRTC peer of a GPT-Live realtime call (`rig-webrtc`), on native
-/// targets: an Opus track and the `oai-events` data channel for calls created
-/// with [`providers::chatgpt::realtime`].
-#[cfg(all(feature = "webrtc", not(target_family = "wasm")))]
-#[cfg_attr(docsrs, doc(cfg(feature = "webrtc")))]
-pub mod webrtc {
-    pub use rig_webrtc::*;
-}
-
-/// Provider configurations and their wires. A wire says what to send and how
-/// to read the reply; bind it to a transport with
-/// [`Bound`](rig_core::driver::Bound) to get a model. The transport defaults
-/// to the erased [`BoxedHttpClient`](rig_core::http_client::BoxedHttpClient);
-/// the `reqwest` feature supplies the value behind it.
-pub mod providers {
-    pub use rig_core::providers::*;
-}
 
 /// Transport-agnostic HTTP contracts, plus the bundled reqwest transport type.
 pub mod http_client {
     pub use rig_core::http_client::*;
     #[cfg(feature = "reqwest")]
     #[cfg_attr(docsrs, doc(cfg(feature = "reqwest")))]
-    pub use rig_reqwest::{ReqwestClient, from_reqwest};
+    pub use rig_reqwest::ReqwestClient;
 }
 
 #[cfg(feature = "agent")]
 #[cfg_attr(docsrs, doc(cfg(feature = "agent")))]
 pub use rig_agent::{Agent, AgentBuilder, AgentRun, AgentRunner, TypedPromptResponse};
 
-/// Direct access to the portable provider and data contracts.
-pub mod core {
-    pub use rig_core::*;
-}
+#[doc(hidden)]
+pub use rig_core as __core;
 
-/// The classic runtime's effect bus (`rig_agent::bus`): the dispatcher,
-/// the registrar, the driver, the typed views. What a handler implements is
-/// `rig::core::serve`; the vocabulary is `rig::core::effect`. Effects
-/// without the classic agent are `rig-ecs`'s.
+/// The classic runtime's handler table and typed views
+/// (`rig_agent::handlers`). What a handler implements is
+/// `rig::serve`; the vocabulary is `rig::effect`.
 #[cfg(feature = "agent")]
 #[cfg_attr(docsrs, doc(cfg(feature = "agent")))]
-pub mod bus {
-    pub use rig_agent::bus::*;
-}
+pub use rig_agent::handlers;
 
 /// Effect-log recording and replay; optional runtime and native HTTP integrations.
+#[cfg(feature = "cassette")]
+#[cfg_attr(docsrs, doc(cfg(feature = "cassette")))]
 pub use rig_cassette as cassette;
 
 /// The sans-IO run layer of rig-agent (`rig_agent::run`): `AgentRun` and its
 /// step/turn types, the run's spec, request preparation, output policy and
 /// per-turn patch, its response and error types, the invalid-call decision
 /// data, the streamed-turn assembler and the loop-side transcript helpers.
-/// rig-core keeps only the message-model invariants (`rig::core::transcript`).
+/// rig-core keeps only the message-model invariants (`rig::conversation::pairing`).
 #[cfg(feature = "agent")]
 #[cfg_attr(docsrs, doc(cfg(feature = "agent")))]
 pub mod run {
@@ -112,25 +92,6 @@ pub mod agent {
     pub mod tool {
         pub use rig_agent::tool::*;
     }
-}
-
-/// Provider construction: bind a wire to a transport, then build agents.
-pub mod client {
-    // Runtime construction extensions on completion providers and models.
-    #[cfg(feature = "agent")]
-    pub use rig_agent::client::{AgentModelExt, AgentProviderExt};
-
-    // Binding a provider configuration or bare wire to its transport.
-    // `CompletionProvider` is the seam `agent()` and `extractor()` hang on.
-    pub use rig_core::driver::{Bind, Bound, CompletionProvider};
-
-    // Construction errors and environment handling shared by every provider.
-    pub use rig_core::client::*;
-
-    // Default-transport construction over the bundled reqwest transport.
-    #[cfg(feature = "reqwest")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "reqwest")))]
-    pub use rig_reqwest::client::DefaultTransport;
 }
 
 /// Low-level completion contracts plus the classic runtime's errors.
@@ -159,34 +120,19 @@ pub mod prelude {
     // The contextual `Tool` and its mutable `ToolContext`.
     #[cfg(feature = "agent")]
     pub use crate::tool::{Tool, ToolContext};
-    // `AgentProviderExt` adds `agent()` and `extractor()` to every type that
-    // builds a completion model.
     #[cfg(feature = "agent")]
     pub use rig_agent::prelude::{
-        Agent, AgentModelExt, AgentProviderExt, MultiTurnStreamItem, PromptError, RunEvents,
-        StreamingResult, StructuredOutputError, ToolSet,
+        Agent, AgentBuilder, MultiTurnStreamItem, PromptError, RunEvents, StreamingResult,
+        StructuredOutputError, ToolSet,
     };
     pub use rig_core::prelude::*;
-    // Default-transport construction over the bundled reqwest transport.
-    #[cfg(feature = "reqwest")]
-    pub use rig_reqwest::prelude::*;
-    // Default-backend websocket traits: `client.responses_websocket(..)` and
-    // `builder().connect()` over the bundled tungstenite backend, plus the
-    // provider's own session extension trait.
-    #[cfg(all(feature = "websocket", not(target_family = "wasm")))]
-    pub use rig_tungstenite::prelude::*;
-}
-
-/// Low-level streaming values.
-pub mod streaming {
-    pub use rig_core::streaming::*;
 }
 
 /// Tools: contextual authoring, the erased tool set, and the live registry.
 ///
-/// The contextual and portable contracts come from `rig-core` and need no
+/// The tool contracts come from `rig-core` and need no
 /// feature. The registry, tool set, and catalog belong to the agent runtime and
-/// need the `agent` feature; they also live at [`crate::agent::tool`].
+/// need the `agent` feature; they also live at `rig::agent::tool`.
 pub mod tool {
     /// Derive a stable serialized key for a tool-context value.
     #[cfg(feature = "derive")]
@@ -195,18 +141,15 @@ pub mod tool {
 
     #[cfg(feature = "agent")]
     #[cfg_attr(docsrs, doc(cfg(feature = "agent")))]
-    pub use rig_agent::tool::{
-        RegisteredTool, ToolCatalog, ToolDispatch, ToolLease, ToolSet, execute_tool,
-    };
+    pub use rig_agent::tool::{RegisteredTool, ToolCatalog, ToolSet};
     pub use rig_core::tool::builtin;
     pub use rig_core::tool::{
-        ContextValue, DynamicTool, ErasedTool, Tool, ToolContext, ToolContextError, ToolEmbedding,
-        tool_definition,
+        ContextValue, DynamicTool, Tool, ToolContext, ToolContextError, ToolEmbedding,
+        tool_definition, tool_name,
     };
     pub use rig_core::tool::{
         IntoToolOutput, ToolErrorKind, ToolExecutionError, ToolOutput, ToolResult,
     };
-    pub use rig_core::tool::{PortableTool, PortableToolEmbedding};
 
     /// MCP tool support from `rig-rmcp`, which supports native targets only.
     #[cfg(all(feature = "rmcp", not(target_family = "wasm")))]
@@ -218,13 +161,9 @@ pub mod tool {
     #[cfg(feature = "agent")]
     #[cfg_attr(docsrs, doc(cfg(feature = "agent")))]
     pub use rig_agent::tool::server;
-
-    /// The complete portable `rig-core` tool surface, under one explicit path.
-    pub mod portable {
-        pub use rig_core::tool::*;
-    }
 }
 
+/// rig-agent's helpers for tests of code built on it.
 #[cfg(all(feature = "agent", any(test, feature = "test-utils")))]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-utils")))]
 pub mod test_utils {
@@ -235,15 +174,15 @@ pub mod test_utils {
 #[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
 pub use rig_derive::rig_tool;
 
-/// Conversation memory traits and the in-process backend, plus the `rig-memory`
-/// policy types when the `memory` feature is enabled.
-pub mod memory {
-    pub use rig_core::memory::*;
+/// One conversation: its entries with stable ids and authors, its asides,
+/// its halt, and the changes made to it that nobody has saved yet.
+pub use rig_core::conversation;
 
-    #[cfg(feature = "memory")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "memory")))]
-    pub use rig_memory::*;
-}
+/// Conversations over time (`rig-memory`): windows, compaction, and saving
+/// and resuming them in the `rig-session` format.
+#[cfg(feature = "memory")]
+#[cfg_attr(docsrs, doc(cfg(feature = "memory")))]
+pub use rig_memory as memory;
 
 /// Declares one feature-gated facade module per companion crate, each row giving
 /// the module, its crate, and the features enabling it.
@@ -284,7 +223,8 @@ companion_modules! {
     /// Typed TypeSafe Jev judgments for routing and rubric evaluation.
     typesafeai = rig_typesafeai ["typesafeai"];
     bedrock = rig_bedrock ["bedrock"];
-    /// Local CPU inference with validated Llama/SmolLM2 and native tool-capable Qwen3 models.
+    /// Local CPU inference with validated Llama/SmolLM2 and native tool-capable Qwen3 models,
+    /// and YOLOv8 pose estimation.
     candle = rig_candle ["candle"];
     fastembed = rig_fastembed [
         "fastembed",

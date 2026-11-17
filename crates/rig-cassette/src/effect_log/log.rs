@@ -9,38 +9,29 @@ use std::collections::BTreeMap;
 
 use rig_core::effect::{EffectId, EffectRecord, EffectRow, HandlerDescriptor};
 use rig_core::error::{ErrorKind, ErrorReport};
-use rig_core::serve::ServingPolicy;
+use rig_core::json_utils::to_canonical_string;
 use serde::{Deserialize, Serialize};
 
 /// The checkpoint envelope format this crate writes and reads. This versions
 /// [`Checkpoint`], not [`LogHeader`]; logs have no global format number.
-pub const CHECKPOINT_FORMAT: u32 = 6;
+pub const CHECKPOINT_FORMAT: u32 = 7;
 
-/// Recorded run identity, handler declarations, and optional delivery metadata
-/// used to validate replay compatibility. Deserialization rejects unknown fields;
-/// headers have no global format number.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Recorded run identity and handler declarations used to validate replay
+/// compatibility. Deserialization rejects unknown fields; headers have no
+/// global format number.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogHeader {
-    /// Consumer-visible deliveries, in observation order, when the runtime
-    /// records schedule boundaries. `None` supplies no delivery guarantee.
-    /// A batch groups transitions observed in one pass; it is not a clock.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deliveries: Option<Vec<rig_core::effect::Delivery>>,
-    /// Reasons this recording cannot establish policy-visible delivery.
-    /// Exchange replay remains possible; exact policy mode must refuse it.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub delivery_limitations: Vec<String>,
     /// Error items omitted from `EffectRecord::events`, at their original
     /// positions among all stream items. Empty for streams without errors.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub stream_errors: BTreeMap<EffectId, Vec<RecordedStreamError>>,
     /// A hash of the run spec the run was recorded under, when an agent
-    /// recorded it (`None` for a bare-bus record). An agent that replays
+    /// recorded it (`None` for a record made without an agent). An agent that replays
     /// compares it with its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_spec: Option<u64>,
-    /// The handlers registered on the bus when recording began, stamped
+    /// The handlers registered when recording began, stamped
     /// with their keys.
     pub handlers: Vec<HandlerDescriptor>,
     /// The effect signature: which keys the run performed effects on, and
@@ -50,17 +41,14 @@ pub struct LogHeader {
     /// Replay requires the same stack because hooks execute again.
     pub hooks: Vec<String>,
     /// The program's required effect row at record time: every key it could
-    /// dispatch to (its model, its tools, its memory, its retrieval
-    /// indexes) with the family it needs. A replay checks this row against
+    /// dispatch to (its model, its tools, its retrieval indexes) with the
+    /// family it needs. A replay checks this row against
     /// what the log's handlers serve, not only against what happened to be
     /// dispatched.
     pub required: EffectRow,
-    /// The recorded serving policy, when known. Per-key order remains dispatch
-    /// order under either policy.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bus: Option<ServingPolicy>,
-    /// Required effects and policy hashes per `EffectRecord::scope` for shared
-    /// world logs. Single-agent logs use `run_spec` and `required` instead.
+    /// Required effects and policy hashes per `EffectRecord::scope`, for a
+    /// log several programs write into. A single agent's log uses
+    /// `run_spec` and `required` instead, and has no `programs` field.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub programs: BTreeMap<String, ProgramIdentity>,
 }
@@ -72,7 +60,8 @@ pub struct LogHeader {
 pub struct ProgramIdentity {
     /// Every key the program could dispatch to, with the family it needs.
     pub required: EffectRow,
-    /// [`stable_hash`] of the program's policy.
+    /// [`stable_hash`] of the program's policy. Replay never compares it:
+    /// the host compares it with its program's own before it replays.
     pub policy: u64,
 }
 
@@ -85,20 +74,27 @@ pub struct RecordedStreamError {
     pub error: ErrorReport,
 }
 
-impl Default for LogHeader {
-    fn default() -> Self {
-        Self {
-            deliveries: None,
-            delivery_limitations: Vec::new(),
-            stream_errors: BTreeMap::new(),
-            run_spec: None,
-            handlers: Vec::new(),
-            signature: EffectRow::new(),
-            hooks: Vec::new(),
-            required: EffectRow::new(),
-            bus: None,
-            programs: BTreeMap::new(),
+impl LogHeader {
+    /// Describes each of `handlers`: one already described in place, a new
+    /// one after the others.
+    pub fn describe(&mut self, handlers: impl IntoIterator<Item = HandlerDescriptor>) {
+        for handler in handlers {
+            match self
+                .handlers
+                .iter_mut()
+                .find(|known| known.key == handler.key)
+            {
+                Some(known) => *known = handler,
+                None => self.handlers.push(handler),
+            }
         }
+    }
+
+    /// Names `record`'s key, with its family, in the signature, unless it
+    /// is named.
+    pub fn sign(&mut self, record: &EffectRecord) {
+        let family = record.kind.family();
+        self.signature.insert_if_absent(record.key.clone(), family);
     }
 }
 
@@ -118,11 +114,7 @@ impl EffectLog {
     /// the signature read off the records).
     pub fn from_records(records: Vec<EffectRecord>) -> Self {
         let mut header = LogHeader::default();
-        for record in &records {
-            header
-                .signature
-                .insert_if_absent(record.key.clone(), record.kind.family());
-        }
+        records.iter().for_each(|record| header.sign(record));
         Self { header, records }
     }
 
@@ -133,89 +125,98 @@ impl EffectLog {
             header: self.header.clone(),
             records: self.records.get(at..).unwrap_or_default().to_vec(),
         };
-        tail.retain_recorded_deliveries();
+        tail.retain_recorded_errors();
         tail
     }
 
-    /// Drop delivery entries outside this log's records, preserving order and
-    /// batch identities. Used for snapshots and tails of a shared recorder.
-    pub(crate) fn retain_recorded_deliveries(&mut self) {
-        let ids: std::collections::BTreeSet<_> =
-            self.records.iter().map(|record| record.id).collect();
-        self.header.stream_errors.retain(|id, _| ids.contains(id));
-        if let Some(deliveries) = &mut self.header.deliveries {
-            deliveries.retain(|delivery| ids.contains(&delivery.id));
-        }
-    }
-
-    /// Return a checkpoint containing `state`, position `at`, and the next
-    /// record ID, together with the remaining log. Positions at or beyond the
-    /// end produce an empty tail.
+    /// A checkpoint holding `state`, position `at`, the highest id before
+    /// it and the id of the record after it, together with the rest of the
+    /// log. A position at or past the end gives an empty tail.
     pub fn checkpoint<S>(&self, at: usize, state: S) -> (Checkpoint<S>, Self) {
         let checkpoint = Checkpoint {
             format: CHECKPOINT_FORMAT,
             at,
+            last: self.records.iter().take(at).map(|record| record.id).max(),
             next: self.records.get(at).map(|record| record.id),
             state,
         };
         (checkpoint, self.tail(at))
     }
 
-    /// Validate and return `tail`, or an error if the checkpoint format or next
-    /// record ID does not match. An ending checkpoint requires an empty tail.
+    /// `tail`, once it is checked to follow `checkpoint`.
+    ///
+    /// # Errors
+    ///
+    /// `Divergence` when the checkpoint's format is not
+    /// [`CHECKPOINT_FORMAT`], or the tail does not begin with the record the
+    /// checkpoint names next (a checkpoint that ends the log needs an empty
+    /// tail).
     pub fn from_checkpoint<S>(checkpoint: &Checkpoint<S>, tail: Self) -> Result<Self, ErrorReport> {
         if checkpoint.format != CHECKPOINT_FORMAT {
             return Err(ErrorReport::new(
-                ErrorKind::Internal,
+                ErrorKind::Divergence,
                 format!(
-                    "resume refused: the checkpoint is format {}, this rig reads format {}",
-                    checkpoint.format, CHECKPOINT_FORMAT
+                    "resume refused: the checkpoint is format {}, this rig reads format {CHECKPOINT_FORMAT}",
+                    checkpoint.format
                 ),
             ));
         }
-        let first = tail.records.first().map(|record| record.id);
-        if first != checkpoint.next {
-            return Err(ErrorReport::new(
-                ErrorKind::Internal,
-                match (checkpoint.next, first) {
-                    (Some(next), Some(first)) => format!(
-                        "resume refused: the checkpoint at {} expects record {next} next, the tail begins at {first}",
-                        checkpoint.at
-                    ),
-                    (Some(next), None) => format!(
-                        "resume refused: the checkpoint at {} expects record {next} next, the tail is empty",
-                        checkpoint.at
-                    ),
-                    (None, Some(first)) => format!(
-                        "resume refused: the checkpoint at {} ends the log, the tail begins at {first}",
-                        checkpoint.at
-                    ),
-                    (None, None) => unreachable_refusal(),
-                },
-            ));
-        }
-        Ok(tail)
+        let at = checkpoint.at;
+        let refusal = match (
+            checkpoint.next,
+            tail.records.first().map(|record| record.id),
+        ) {
+            (Some(next), Some(first)) if next == first => return Ok(tail),
+            (None, None) => return Ok(tail),
+            (Some(next), Some(first)) => format!(
+                "resume refused: the checkpoint at {at} expects record {next} next, the tail begins at {first}"
+            ),
+            (Some(next), None) => format!(
+                "resume refused: the checkpoint at {at} expects record {next} next, the tail is empty"
+            ),
+            (None, Some(first)) => format!(
+                "resume refused: the checkpoint at {at} ends the log, the tail begins at {first}"
+            ),
+        };
+        Err(ErrorReport::new(ErrorKind::Divergence, refusal))
+    }
+
+    /// Drop stream errors of effects outside this log's records. Used for
+    /// snapshots and tails of a shared recorder.
+    pub(crate) fn retain_recorded_errors(&mut self) {
+        let ids: std::collections::BTreeSet<_> =
+            self.records.iter().map(|record| record.id).collect();
+        self.header.stream_errors.retain(|id, _| ids.contains(id));
     }
 }
 
-/// Return the fallback diagnostic for a mismatched checkpoint tail.
-fn unreachable_refusal() -> String {
-    "resume refused: the tail does not follow the checkpoint".to_owned()
-}
-
-/// A suspended log position, expected next record ID, and driver-owned state.
-/// Resume validation requires a tail whose first ID matches `next`.
+/// Where a host's own runtime stopped in a log: the position, the id of
+/// the record it expects next, and the state it persists, in its own type.
+///
+/// The log alone does not restore an application: a host saves its state
+/// here beside the log, and on resume restores that state, checks the tail
+/// with [`EffectLog::from_checkpoint`], numbers its dispatches after
+/// [`last`](Self::last), and replays the tail.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Checkpoint<S> {
     /// The checkpoint envelope format ([`CHECKPOINT_FORMAT`]).
     pub format: u32,
     /// The position in the log: `at` records were performed before it.
     pub at: usize,
+    /// The highest id among the records before `at`; `None` when there
+    /// are none, so a checkpoint at 0 of a tail or a later segment carries
+    /// no id to resume after: checkpoint a log that starts at the run's
+    /// first record. A resumed host numbers its dispatches after it (rig-agent's
+    /// `Handlers::resume_ids_after`), so a by-id replay of the tail
+    /// ([`EffectLogReplayer::for_log_by_id`](super::EffectLogReplayer::for_log_by_id))
+    /// meets the ids it recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<EffectId>,
     /// The id of the record the tail begins with; `None` when the
     /// checkpoint ends the log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<EffectId>,
-    /// What the driver persists, in its own type.
+    /// What the host persists, in its own type.
     pub state: S,
 }
 
@@ -261,13 +262,80 @@ impl<'a> IntoIterator for &'a EffectLog {
 /// sorted object keys, or a serialization error.
 /// Sorting makes identity independent of JSON map insertion order.
 pub fn stable_hash<T: Serialize>(value: &T) -> Result<u64, serde_json::Error> {
-    let json = serde_json::to_vec(&Canonical::from(serde_json::to_value(value)?))?;
+    let json = to_canonical_string(&serde_json::to_value(value)?);
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in json {
+    for byte in json.into_bytes() {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     Ok(hash)
+}
+
+/// `log` with each rig-issued call id (a random uuid) renamed, in order of
+/// first appearance, to a fixed one. Rig issues its ids afresh on every run,
+/// so two runs that differ only in them record and replay the same log.
+///
+/// ```
+/// let issued = serde_json::json!({"local": "7ecaf57b-5bbb-4b9e-a440-63738a5939ec"});
+/// assert_eq!(
+///     rig_cassette::effect_log::canonical_local_ids(issued),
+///     serde_json::json!({"local": "00000000-0000-4000-8000-000000000000"}),
+/// );
+/// ```
+pub fn canonical_local_ids(mut log: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    fn issued(value: &Value, ids: &mut Vec<String>) {
+        match value {
+            Value::Object(object) => {
+                if let (1, Some(Value::String(id))) = (object.len(), object.get("local"))
+                    && !ids.contains(id)
+                {
+                    ids.push(id.clone());
+                }
+                object.values().for_each(|value| issued(value, ids));
+            }
+            Value::Array(values) => values.iter().for_each(|value| issued(value, ids)),
+            _ => {}
+        }
+    }
+    fn rename(value: &mut Value, ids: &[String], order: &mut Vec<String>) {
+        match value {
+            Value::String(text) => {
+                // Mark every id first, so a fixed id that is also an issued
+                // one is never renamed twice. A string without one is left.
+                let (mut marked, mut hits) = (None, Vec::new());
+                for id in ids.iter().filter(|id| text.contains(id.as_str())) {
+                    let index = order.iter().position(|seen| seen == id).unwrap_or_else(|| {
+                        order.push(id.clone());
+                        order.len() - 1
+                    });
+                    let into: &mut String = marked.get_or_insert_with(|| text.clone());
+                    *into = into.replace(id.as_str(), &format!("\u{0}{index}\u{0}"));
+                    hits.push(index);
+                }
+                if let Some(mut marked) = marked {
+                    for index in hits {
+                        marked = marked.replace(
+                            &format!("\u{0}{index}\u{0}"),
+                            &format!("00000000-0000-4000-8000-{index:012}"),
+                        );
+                    }
+                    *text = marked;
+                }
+            }
+            Value::Object(object) => object
+                .values_mut()
+                .for_each(|value| rename(value, ids, order)),
+            Value::Array(values) => values
+                .iter_mut()
+                .for_each(|value| rename(value, ids, order)),
+            _ => {}
+        }
+    }
+    let mut ids = Vec::new();
+    issued(&log, &mut ids);
+    rename(&mut log, &ids, &mut Vec::new());
+    log
 }
 
 /// A tool call's JSON arguments with object keys sorted, or the text as is
@@ -276,42 +344,8 @@ pub fn stable_hash<T: Serialize>(value: &T) -> Result<u64, serde_json::Error> {
 /// `serde_json`'s `preserve_order` feature is unified into it.
 pub(crate) fn canonical_tool_args(args: &str) -> String {
     serde_json::from_str::<serde_json::Value>(args)
-        .ok()
-        .and_then(|value| serde_json::to_string(&Canonical::from(value)).ok())
-        .unwrap_or_else(|| args.to_owned())
-}
-
-/// A JSON value whose objects serialize with sorted keys whatever
-/// `serde_json`'s map type is.
-#[derive(Serialize)]
-#[serde(untagged)]
-enum Canonical {
-    Null,
-    Bool(bool),
-    Number(serde_json::Number),
-    String(String),
-    Array(Vec<Canonical>),
-    Object(BTreeMap<String, Canonical>),
-}
-
-impl From<serde_json::Value> for Canonical {
-    fn from(value: serde_json::Value) -> Self {
-        match value {
-            serde_json::Value::Null => Self::Null,
-            serde_json::Value::Bool(bool) => Self::Bool(bool),
-            serde_json::Value::Number(number) => Self::Number(number),
-            serde_json::Value::String(string) => Self::String(string),
-            serde_json::Value::Array(items) => {
-                Self::Array(items.into_iter().map(Self::from).collect())
-            }
-            serde_json::Value::Object(fields) => Self::Object(
-                fields
-                    .into_iter()
-                    .map(|(key, value)| (key, Self::from(value)))
-                    .collect(),
-            ),
-        }
-    }
+        .map(|value| to_canonical_string(&value))
+        .unwrap_or_else(|_| args.to_owned())
 }
 
 // A log serializes and crosses threads on every target.
@@ -319,6 +353,7 @@ const _: fn() = || {
     fn assert_wire<T: Clone + Send + Sync + 'static + Serialize + serde::de::DeserializeOwned>() {}
     assert_wire::<LogHeader>();
     assert_wire::<EffectLog>();
+    assert_wire::<Checkpoint<serde_json::Value>>();
 };
 
 #[cfg(test)]

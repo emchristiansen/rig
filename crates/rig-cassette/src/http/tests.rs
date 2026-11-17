@@ -1,4 +1,8 @@
 use super::*;
+#[cfg(feature = "bedrock")]
+use aws_smithy_eventstream::frame::{read_message_from, write_message_to};
+#[cfg(feature = "bedrock")]
+use aws_smithy_types::event_stream::Message as EventStreamMessage;
 
 /// Scrubbing must redact, never invent. An empty wire value carries
 /// nothing sensitive, and minting a placeholder for it makes a recording
@@ -7,7 +11,7 @@ use super::*;
 /// Anthropic's `content_block_start.signature`, empty on the wire).
 #[test]
 fn scrubbing_an_empty_value_invents_nothing() {
-    let mut scrubber = CassetteScrubber::new(CassettePolicy::default());
+    let mut scrubber = Scrubber::default();
     assert_eq!(scrubber.placeholder("", "signature_"), "");
     // A real value still redacts, and stays stable across occurrences.
     let first = scrubber.placeholder("sig-abc", "signature_");
@@ -46,6 +50,7 @@ fn cassette_request(path: &str) -> CassetteRequest {
         header: Vec::new(),
         body: None,
         body_encoding: BodyEncoding::Utf8,
+        withheld: None,
     }
 }
 
@@ -55,6 +60,7 @@ fn cassette_response() -> CassetteResponse {
         header: Vec::new(),
         body: None,
         body_encoding: BodyEncoding::Utf8,
+        withheld: None,
     }
 }
 
@@ -64,61 +70,132 @@ fn incoming_request(path: &str, body: impl Into<Bytes>) -> IncomingRequest {
         uri: path.parse().expect("test URI should parse"),
         headers: axum::http::HeaderMap::new(),
         body: body.into(),
+        context: std::sync::OnceLock::new(),
     }
+}
+
+fn query_matches_query(query: Option<&str>, expected: &[NameValue]) -> bool {
+    let uri = query.map_or_else(|| "/items".to_owned(), |query| format!("/items?{query}"));
+    super::query_matches(&incoming_request(&uri, Bytes::new()), expected)
 }
 
 #[test]
 fn query_matches_exact_pairs_in_any_order() {
     let expected = [query_pair("a", "1"), query_pair("b", "2")];
 
-    assert!(query_matches(Some("b=2&a=1"), &expected));
+    assert!(query_matches_query(Some("b=2&a=1"), &expected));
+}
+
+#[test]
+fn query_matches_scrubs_sensitive_values_and_keeps_pair_multiplicity() {
+    let expected = [
+        query_pair("access_token", REDACTED),
+        query_pair("alt", "json"),
+    ];
+    assert!(query_matches_query(
+        Some("access_token=abc123&alt=json"),
+        &expected
+    ));
+    assert!(query_matches_query(
+        Some("access%5Ftoken=xyz789&alt=json"),
+        &expected
+    ));
+    assert!(!query_matches_query(
+        Some("access_token=abc123&alt=sse"),
+        &expected
+    ));
+    assert!(!query_matches_query(
+        Some("access_token=abc123&access_token=xyz789&alt=json"),
+        &expected
+    ));
+    let cursor = [query_pair("page_token", "p2"), query_pair("alt", "json")];
+    assert!(query_matches_query(Some("page_token=p2&alt=json"), &cursor));
+    assert!(!query_matches_query(
+        Some("page_token=p1&alt=json"),
+        &cursor
+    ));
+    assert!(!query_matches_query(
+        Some("page_token=p2&page_token=p2&alt=json"),
+        &cursor
+    ));
 }
 
 #[test]
 fn query_matches_counts_duplicate_pairs() {
     let expected = [query_pair("a", "1"), query_pair("a", "1")];
 
-    assert!(query_matches(Some("a=1&a=1"), &expected));
-    assert!(!query_matches(Some("a=1"), &expected));
-    assert!(!query_matches(Some("a=1&a=2"), &expected));
+    assert!(query_matches_query(Some("a=1&a=1"), &expected));
+    assert!(!query_matches_query(Some("a=1"), &expected));
+    assert!(!query_matches_query(Some("a=1&a=2"), &expected));
 }
 
 #[test]
 fn query_matches_rejects_extra_actual_params() {
     let expected = [query_pair("a", "1")];
 
-    assert!(!query_matches(Some("a=1&b=2"), &expected));
+    assert!(!query_matches_query(Some("a=1&b=2"), &expected));
 }
 
 #[test]
 fn query_matches_rejects_missing_actual_params() {
     let expected = [query_pair("a", "1"), query_pair("b", "2")];
 
-    assert!(!query_matches(Some("a=1"), &expected));
+    assert!(!query_matches_query(Some("a=1"), &expected));
 }
 
 #[test]
 fn query_matches_empty_expected_only_matches_empty_actual_query() {
-    assert!(query_matches(None, &[]));
-    assert!(query_matches(Some(""), &[]));
-    assert!(!query_matches(Some("a=1"), &[]));
+    assert!(query_matches_query(None, &[]));
+    assert!(query_matches_query(Some(""), &[]));
+    assert!(!query_matches_query(Some("a=1"), &[]));
+}
+
+fn body_matches_for_request(
+    uri: &str,
+    actual_headers: &axum::http::HeaderMap,
+    expected_headers: &[NameValue],
+    actual: &[u8],
+    expected: Option<&str>,
+    expected_encoding: BodyEncoding,
+) -> bool {
+    super::body_matches(
+        &Scrubber::for_request(uri, actual_headers),
+        actual_headers,
+        expected_headers,
+        actual,
+        expected,
+        expected_encoding,
+    )
+}
+
+#[test]
+fn body_matching_scrubs_object_credentials_and_numeric_echoes() {
+    let expected =
+        r#"{"client_secret":{"value":"[REDACTED]"},"echo":"[REDACTED]","password":"[REDACTED]"}"#;
+    assert!(body_matches_for_request(
+        "",
+        &axum::http::HeaderMap::new(),
+        &[],
+        br#"{"client_secret":{"value":"abc123"},"echo":43211234,"password":43211234}"#,
+        Some(expected),
+        BodyEncoding::Utf8,
+    ));
 }
 
 #[test]
 fn bodyless_cassette_request_only_matches_empty_actual_body() {
-    let policy = CassettePolicy::default();
     let headers = axum::http::HeaderMap::new();
 
-    assert!(body_matches(
-        policy,
+    assert!(body_matches_for_request(
+        "",
         &headers,
         &[],
         &[],
         None,
         BodyEncoding::Utf8
     ));
-    assert!(!body_matches(
-        policy,
+    assert!(!body_matches_for_request(
+        "",
         &headers,
         &[],
         br#"{"unexpected":true}"#,
@@ -145,7 +222,7 @@ fn replay_matching_is_ordered_by_default() {
     ];
 
     assert_eq!(
-        matching_interaction_index(policy, &interactions, &request),
+        matching_interaction_index(policy, &interactions, &request, None, |_| 0),
         None
     );
 }
@@ -171,19 +248,66 @@ fn replay_matching_can_be_explicitly_unordered() {
     ];
 
     assert_eq!(
-        matching_interaction_index(policy, &interactions, &request),
+        matching_interaction_index(policy, &interactions, &request, None, |_| 0),
         Some(1)
+    );
+}
+
+#[test]
+fn unordered_shape_matching_serves_the_closest_interaction() {
+    let policy = CassettePolicy {
+        replay_matching: ReplayMatching::Unordered,
+        body_matching: BodyMatching::Shape,
+        ..CassettePolicy::default()
+    };
+    let recorded = |input: &str| CassetteRequest {
+        body: Some(json!({ "input": input }).to_string()),
+        ..cassette_request("/v1/answer")
+    };
+    let interactions = vec![
+        ReplayInteraction {
+            when: recorded("first"),
+            then: cassette_response(),
+            consumed: false,
+        },
+        ReplayInteraction {
+            when: recorded("second"),
+            then: cassette_response(),
+            consumed: false,
+        },
+    ];
+    let keys: Vec<Value> = interactions
+        .iter()
+        .map(|interaction| shape::shape_key(&recorded_body_view(&interaction.when)))
+        .collect();
+    let request = incoming_request("/v1/answer", json!({ "input": "second" }).to_string());
+    let sent = shape::shape_key(&incoming_body_view(&request).expect("body view"));
+    let shapes = Some(ShapeKeys {
+        recorded: &keys,
+        sent: &sent,
+    });
+    let distance = |index: usize| {
+        let recorded = recorded_body_view(&interactions[index].when);
+        snapshot::diff(&recorded, &incoming_body_view(&request).expect("body view")).len()
+    };
+
+    assert_eq!(
+        matching_interaction_index(policy, &interactions, &request, shapes, distance),
+        Some(1),
+        "the interaction the request equals wins"
+    );
+    assert_eq!(
+        matching_interaction_index(policy, &interactions, &request, shapes, |_| 3),
+        Some(0),
+        "on a tie the first of the same shape serves"
     );
 }
 
 #[test]
 fn replay_matching_requires_bearer_provider_auth_without_recording_its_value() {
     for provider in ["openai", "doubleword"] {
-        let policy = CassettePolicy::for_scenario(
-            provider,
-            "agent/completion_smoke",
-            ReplayMatching::Ordered,
-        );
+        let policy =
+            CassettePolicy::for_scenario(provider, CassetteSpec::new("agent/completion_smoke"));
         let interaction = ReplayInteraction {
             when: cassette_request("/v1/responses"),
             then: cassette_response(),
@@ -198,7 +322,7 @@ fn replay_matching_requires_bearer_provider_auth_without_recording_its_value() {
         );
 
         assert_eq!(
-            matching_interaction_index(policy, &interactions, &request_without_auth),
+            matching_interaction_index(policy, &interactions, &request_without_auth, None, |_| 0),
             None,
             "{provider} replay should require bearer authentication"
         );
@@ -207,7 +331,7 @@ fn replay_matching_requires_bearer_provider_auth_without_recording_its_value() {
             vec!["authorization"]
         );
         assert_eq!(
-            matching_interaction_index(policy, &interactions, &request_with_auth),
+            matching_interaction_index(policy, &interactions, &request_with_auth, None, |_| 0),
             Some(0)
         );
     }
@@ -215,11 +339,8 @@ fn replay_matching_requires_bearer_provider_auth_without_recording_its_value() {
 
 #[test]
 fn gemini_interactions_policy_requires_api_key_header() {
-    let policy = CassettePolicy::for_scenario(
-        "gemini",
-        "interactions_api/tool_result",
-        ReplayMatching::Ordered,
-    );
+    let policy =
+        CassettePolicy::for_scenario("gemini", CassetteSpec::new("interactions_api/tool_result"));
     let mut request = incoming_request("/v1beta/models", Bytes::new());
 
     assert_eq!(
@@ -234,105 +355,101 @@ fn gemini_interactions_policy_requires_api_key_header() {
     assert!(required_headers_present(policy, &request.headers));
 }
 
-/// A request whose credential a credential source stamped at send time
-/// reaches the recorder exactly as a statically encoded one does, as ordinary
-/// request headers, and the recorder keeps neither the token nor the account
-/// it names: only allow-listed request headers are recorded.
+/// A streamed reply through a direct session's client is kept whole, so a
+/// streaming request recorded without the proxy replays.
 #[tokio::test]
-async fn direct_recorder_keeps_no_credential_a_source_stamped() {
-    let policy =
-        CassettePolicy::for_scenario("chatgpt", "agent/completion_smoke", ReplayMatching::Ordered);
-    let interactions = Arc::new(Mutex::new(Vec::new()));
+async fn direct_recording_keeps_a_streamed_reply() {
+    use futures::StreamExt;
+    use rig_core::http_client::HttpClientExt;
+
+    let interactions = Arc::new(std::sync::Mutex::new(Vec::new()));
     let ledger_dir = assert_fs::TempDir::new().expect("ledger directory");
     let recorder = DirectRecorder {
         interactions: interactions.clone(),
-        policy,
-        ledger: Arc::new(relay::LedgerTarget {
+        ledger: Arc::new(ledger::LedgerTarget {
             path: ledger_dir.path().join("ledger.jsonl"),
-            provider: "chatgpt".to_owned(),
-            scenario: "agent/completion_smoke".to_owned(),
-            origin: "https://chatgpt.com".to_owned(),
+            provider: "openai".to_owned(),
+            scenario: "streaming/direct".to_owned(),
+            origin: "https://api.example.com".to_owned(),
         }),
+        refusals: Arc::default(),
+        scrubber: Arc::default(),
+        in_flight: Arc::default(),
+        started: Arc::default(),
     };
+    let sse = "data: {\"text\":\"hi\"}\n\ndata: [DONE]\n\n";
+    let provider = rig_core::test_utils::MockStreamingClient {
+        sse_bytes: Bytes::from_static(sse.as_bytes()),
+    };
+    let http = traffic::recorded(
+        DynHttpClient::new(provider),
+        traffic::Sink::Cassette(recorder),
+    );
+    let request = rig_core::http_client::Request::post("https://api.example.com/v1/chat")
+        .header("authorization", "Bearer plain-key-0f9e8d7c")
+        .body(Bytes::from_static(br#"{"stream":true}"#))
+        .expect("a request");
 
-    recorder
-        .record_http_interaction(
-            DirectHttpRequest {
-                method: "POST",
-                uri: "https://chatgpt.com/backend-api/codex/responses",
-                headers: [
-                    ("authorization", "Bearer source-token-rotated"),
-                    ("chatgpt-account-id", "source-account"),
-                    ("content-type", "application/json"),
-                ],
-                body: br#"{"ok":true}"#,
-            },
-            DirectHttpResponse {
-                status: 200,
-                headers: [("content-type", "application/json")],
-                body: br#"{"ok":true}"#,
-            },
-        )
-        .await;
+    let response = http.send_streaming(request).await.expect("a reply");
+    let _: Vec<_> = response.into_body().collect().await;
 
-    let interactions = interactions.lock().await;
-    let interaction = interactions
-        .first()
-        .expect("interaction should be recorded");
-    let recorded: Vec<&str> = interaction
-        .when
-        .header
+    let interactions: Vec<_> = interactions
+        .lock()
+        .unwrap()
         .iter()
-        .map(|header| header.name.as_str())
+        .map(|(_, interaction)| interaction.clone())
         .collect();
-    assert_eq!(recorded, vec!["content-type"]);
-    let rendered = format!("{interaction:?}");
-    assert!(!rendered.contains("source-token-rotated"), "{rendered}");
-    assert!(!rendered.contains("source-account"), "{rendered}");
+    let interaction = interactions.first().expect("the exchange is recorded");
+    assert_eq!(interaction.when.path, "/v1/chat");
+    assert_eq!(interaction.then.body.as_deref(), Some(sse));
 }
 
 #[tokio::test]
 async fn direct_recorder_omits_sigv4_headers() {
-    let policy =
-        CassettePolicy::for_scenario("bedrock", "agent/completion_smoke", ReplayMatching::Ordered);
-    let interactions = Arc::new(Mutex::new(Vec::new()));
+    let interactions = Arc::new(std::sync::Mutex::new(Vec::new()));
     let ledger_dir = assert_fs::TempDir::new().expect("ledger directory");
     let recorder = DirectRecorder {
         interactions: interactions.clone(),
-        policy,
-        ledger: Arc::new(relay::LedgerTarget {
+        ledger: Arc::new(ledger::LedgerTarget {
             path: ledger_dir.path().join("ledger.jsonl"),
             provider: "bedrock".to_owned(),
             scenario: "agent/completion_smoke".to_owned(),
             origin: "https://bedrock-runtime.us-east-1.amazonaws.com".to_owned(),
         }),
+        refusals: Arc::default(),
+        scrubber: Arc::default(),
+        in_flight: Arc::default(),
+        started: Arc::default(),
     };
 
-    recorder
-        .record_http_interaction(
-            DirectHttpRequest {
-                method: "POST",
-                uri: "https://bedrock-runtime.us-east-1.amazonaws.com/model/example/invoke",
-                headers: [
-                    ("authorization", "AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE"),
-                    ("x-amz-date", "20260709T000000Z"),
-                    ("x-amz-security-token", "session-token"),
-                    ("content-type", "application/json"),
-                ],
-                body: br#"{"ok":true}"#,
-            },
-            DirectHttpResponse {
-                status: 200,
-                headers: [
-                    ("content-type", "application/json"),
-                    ("x-amzn-requestid", "request-id"),
-                ],
-                body: br#"{"ok":true}"#,
-            },
-        )
-        .await;
+    recorder.record_http_interaction(
+        DirectHttpRequest {
+            method: "POST",
+            uri: "https://bedrock-runtime.us-east-1.amazonaws.com/model/example/invoke",
+            headers: [
+                ("authorization", "AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE"),
+                ("x-amz-date", "20260709T000000Z"),
+                ("x-amz-security-token", "session-token"),
+                ("content-type", "application/json"),
+            ],
+            body: br#"{"ok":true}"#,
+        },
+        DirectHttpResponse {
+            status: 200,
+            headers: [
+                ("content-type", "application/json"),
+                ("x-amzn-requestid", "request-id"),
+            ],
+            body: br#"{"ok":true}"#,
+        },
+    );
 
-    let interactions = interactions.lock().await;
+    let interactions: Vec<_> = interactions
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, interaction)| interaction.clone())
+        .collect();
     let interaction = interactions
         .first()
         .expect("interaction should be recorded");
@@ -370,7 +487,7 @@ fn replay_miss_diagnostics_scrub_actual_request_details() {
         consumed: false,
     }];
 
-    let message = replay_miss_message(policy, &request, &interactions);
+    let message = replay_miss_message(policy, &request, &interactions, None, None);
 
     assert!(!message.contains("AIzaSyExampleSecretToken123456"));
     assert!(!message.contains("raw-api-key"));
@@ -383,11 +500,8 @@ fn replay_miss_diagnostics_scrub_actual_request_details() {
 
 #[test]
 fn replay_miss_diagnostics_report_missing_required_headers_without_values() {
-    let policy = CassettePolicy::for_scenario(
-        "anthropic",
-        "agent/completion_smoke",
-        ReplayMatching::Ordered,
-    );
+    let policy =
+        CassettePolicy::for_scenario("anthropic", CassetteSpec::new("agent/completion_smoke"));
     let request = incoming_request("/v1/messages", Bytes::new());
     let interactions = vec![ReplayInteraction {
         when: cassette_request("/v1/messages"),
@@ -395,7 +509,7 @@ fn replay_miss_diagnostics_report_missing_required_headers_without_values() {
         consumed: false,
     }];
 
-    let message = replay_miss_message(policy, &request, &interactions);
+    let message = replay_miss_message(policy, &request, &interactions, None, None);
 
     assert!(message.contains("x-api-key"));
     assert!(message.contains("missing_required_headers"));
@@ -433,6 +547,9 @@ async fn replay_request_records_unexpected_misses() {
         }],
         misses: Vec::new(),
         policy: CassettePolicy::default(),
+        snapshots: None,
+        shapes: None,
+        contextual_shapes: None,
     }));
 
     let response = replay_request(
@@ -533,6 +650,7 @@ async fn cassette_response_preserves_non_sse_body() {
         }],
         body: Some(r#"{"ok":true}"#.to_string()),
         body_encoding: BodyEncoding::Utf8,
+        withheld: None,
     };
 
     let response = super::cassette_response(&response, Path::new("fixture.yaml"));
@@ -553,6 +671,7 @@ async fn cassette_response_decodes_base64_body() {
         }],
         body: Some(BASE64_STANDARD.encode([0, 159, 146, 150])),
         body_encoding: BodyEncoding::Base64,
+        withheld: None,
     };
 
     let response = super::cassette_response(&response, Path::new("fixture.yaml"));
@@ -611,12 +730,11 @@ fn scrubber_reframes_binary_event_stream_payloads() {
 
 #[test]
 fn body_matching_compares_base64_bytes() {
-    let policy = CassettePolicy::default();
     let headers = axum::http::HeaderMap::new();
     let expected = BASE64_STANDARD.encode([0, 159, 146, 150]);
 
-    assert!(body_matches(
-        policy,
+    assert!(body_matches_for_request(
+        "",
         &headers,
         &[],
         &[0, 159, 146, 150],
@@ -643,102 +761,75 @@ fn safety_detects_aws_keys_in_base64_bodies_without_echoing_value() {
     assert!(failures.iter().all(|failure| !failure.contains(leaked)));
 }
 
+/// The safety check names each key-shaped token a cassette that skipped
+/// the scrubber holds, by kind, and never echoes it.
 #[test]
-fn safety_detects_token_shaped_openai_keys_without_echoing_value() {
-    let cassette = scrub_cassette_contents(
-        r#"when:
-  path: /v1/responses
-  method: POST
-then:
-  status: 200
-  body: '{"leaked":"sk-proj-abcdefghijklmnopqrstuvwxyz1234567890"}'
-"#,
-    );
+fn safety_detects_unscrubbed_keys_without_echoing_value() {
+    for (key, kind) in [
+        (
+            "sk-proj-abcdefghijklmnopqrstuvwxyz1234567890",
+            "OpenAI API key",
+        ),
+        (
+            "sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890",
+            "Anthropic API key",
+        ),
+        ("AIzaSyExampleSecretToken1234567890", "Google API key"),
+    ] {
+        let cassette = format!(
+            "when:\n  path: /v1/messages\n  method: POST\nthen:\n  status: 200\n  body: '{{\"leaked\":\"{key}\"}}'\n"
+        );
 
-    let failures = cassette_safety_failures(Path::new("fixture.yaml"), &cassette);
+        let failures = cassette_safety_failures(Path::new("fixture.yaml"), &cassette);
 
-    assert!(
-        failures
+        let shaped = failures
             .iter()
-            .any(|failure| failure.contains("OpenAI API key-shaped token(s)"))
-    );
-    assert!(
-        failures
-            .iter()
-            .all(|failure| !failure.contains("sk-proj-abcdefghijklmnopqrstuvwxyz1234567890"))
-    );
+            .filter(|failure| failure.contains("-shaped token(s)"))
+            .collect::<Vec<_>>();
+        assert_eq!(shaped.len(), 1, "{failures:?}");
+        assert!(
+            shaped
+                .iter()
+                .all(|failure| failure.contains(&format!("{kind}-shaped"))),
+            "{failures:?}"
+        );
+        assert!(failures.iter().all(|failure| !failure.contains(key)));
+    }
 }
 
+/// Key-shaped tokens and multiline private keys are scrubbed from request
+/// queries, headers and bodies, and response headers and bodies, in plain
+/// text or JSON. The result passes the safety check.
 #[test]
-fn safety_detects_token_shaped_anthropic_keys_without_echoing_value() {
-    let cassette = scrub_cassette_contents(
-        r#"when:
-  path: /v1/messages
-  method: POST
-then:
-  status: 200
-  body: '{"leaked":"sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890"}'
-"#,
-    );
+fn recording_scrubs_known_secret_shapes() {
+    let keys = [
+        "sk-proj-abcdefghijklmnopqrstuvwxyz1234567890",
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIEabc\n-----END RSA PRIVATE KEY-----",
+    ];
+    let mut scrubber = Scrubber::default();
+    for key in keys {
+        let mut request = cassette_request("/v1/messages");
+        request.query_param.push(query_pair("q", key));
+        request.header.push(query_pair("anthropic-beta", key));
+        request.body = Some(serde_json::json!({ "input": key }).to_string());
+        let mut response = cassette_response();
+        response.header.push(query_pair("x-request-id", key));
+        response.body = Some(format!("error: {key} is invalid"));
+        let mut interaction = CassetteInteraction {
+            when: request,
+            then: response,
+        };
 
-    let failures = cassette_safety_failures(Path::new("fixture.yaml"), &cassette);
+        scrubber.scrub_interactions(std::slice::from_mut(&mut interaction));
 
-    assert!(
-        failures
-            .iter()
-            .any(|failure| failure.contains("Anthropic API key-shaped token(s)"))
-    );
-    assert!(
-        failures
-            .iter()
-            .all(|failure| !failure.contains("sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890"))
-    );
-    assert!(
-        failures
-            .iter()
-            .all(|failure| !failure.contains("OpenAI API key-shaped token(s)"))
-    );
-}
-
-#[test]
-fn safety_detects_google_api_keys_without_echoing_value() {
-    let cassette = scrub_cassette_contents(
-        r#"when:
-  path: /v1beta/models/gemini
-  method: POST
-then:
-  status: 200
-  body: '{"leaked":"AIzaSyExampleSecretToken1234567890"}'
-"#,
-    );
-
-    let failures = cassette_safety_failures(Path::new("fixture.yaml"), &cassette);
-
-    assert!(
-        failures
-            .iter()
-            .any(|failure| failure.contains("Google API key-shaped token(s)"))
-    );
-    assert!(
-        failures
-            .iter()
-            .all(|failure| !failure.contains("AIzaSyExampleSecretToken1234567890"))
-    );
-}
-
-#[test]
-fn safety_does_not_flag_short_sk_substrings() {
-    let cassette = scrub_cassette_contents(
-        r#"when:
-  path: /v1/responses
-  method: POST
-then:
-  status: 200
-  body: '{"text":"the sk-etch marker is harmless"}'
-"#,
-    );
-
-    assert!(cassette_safety_failures(Path::new("fixture.yaml"), &cassette).is_empty());
+        let recorded = serialize_cassette_interactions(&[interaction]);
+        assert!(!redact::has_secret(&recorded), "{recorded}");
+        assert_eq!(recorded.matches(REDACTED).count(), 5, "{recorded}");
+        assert!(
+            cassette_safety_failures(Path::new("fixture.yaml"), &recorded).is_empty(),
+            "{recorded}"
+        );
+    }
 }
 
 /// Provider ids are recorded verbatim: a file id, a message id and the
@@ -759,7 +850,7 @@ when:
   body: '{"source":{"type":"file","file_id":"file_011Cb1W1wnAxQP1a6AuVcPx5"}}'
 then:
   status: 200
-  body: '{"id":"msg_01D9wgWnWe16jLatSL7ce5Gm","content":[{"type":"text","text":"rig-file-id-page-two-verifier-8c27"}]}'
+  body: '{"id":"msg_01D9wgWnWe16jLatSL7ce5Gm","content":[{"type":"text","text":"rig-file-id-page-two-verifier-8c27"}],"data":[{"type":"model","id":"gpt-5.2"},{"type":"model","id":"claude-sonnet-4-6"}]}'
 ---
 when:
   path: /v1/files/file_011Cb1W1wnAxQP1a6AuVcPx5
@@ -776,6 +867,8 @@ then:
 
     assert_eq!(scrubbed.matches("file_011Cb1W1wnAxQP1a6AuVcPx5").count(), 5);
     assert!(scrubbed.contains("msg_01D9wgWnWe16jLatSL7ce5Gm"));
+    assert!(scrubbed.contains("gpt-5.2"));
+    assert!(scrubbed.contains("claude-sonnet-4-6"));
     assert!(!scrubbed.contains("REDACTED_"));
     assert!(scrubbed.contains("rig-file-id-page-two-verifier-8c27"));
     assert_eq!(scrub_cassette_contents(&scrubbed), scrubbed);
@@ -834,23 +927,6 @@ then:
     assert!(!scrubbed.contains("date"));
     assert!(scrubbed.contains("data: [DONE]"));
     assert!(scrubbed.contains("content-type"));
-}
-
-#[test]
-fn scrubber_keeps_public_model_ids() {
-    let cassette = r#"when:
-  path: /v1/models
-  method: GET
-then:
-  status: 200
-  body: '{"data":[{"type":"model","id":"gpt-5.2"},{"type":"model","id":"claude-sonnet-4-6"}]}'
-"#;
-
-    let scrubbed = scrub_cassette_contents(cassette);
-
-    assert!(scrubbed.contains("gpt-5.2"));
-    assert!(scrubbed.contains("claude-sonnet-4-6"));
-    assert!(!scrubbed.contains("id_REDACTED"));
 }
 
 /// Opaque replay fields are recorded verbatim, so a fixture can seed a live
@@ -931,62 +1007,6 @@ then:
     assert!(cassette_safety_failures(Path::new("fixture.yaml"), &scrubbed).is_empty());
 }
 
-/// A standard-base64 blob puts `+` or `/` before a key-shaped run as often
-/// as any letter; neither starts a key.
-#[test]
-fn safety_scans_ignore_key_prefixes_after_base64_punctuation() {
-    let cassette = scrub_cassette_contents(
-        r#"when:
-  path: /v1/messages
-  method: POST
-then:
-  status: 200
-  body: '{"signature":"Eq/AIzaSyExampleSecretToken1234567890ABCDEFGHIJ+AKIA0123456789ABCDEF=="}'
-"#,
-    );
-    assert!(
-        cassette_safety_failures(Path::new("fixture.yaml"), &cassette).is_empty(),
-        "{cassette}"
-    );
-}
-
-/// Long base64 runs, which verbatim signatures, ciphertext and images now
-/// are, contain every four-letter prefix eventually; a key detector must
-/// require the prefix to start a token.
-#[test]
-fn safety_scans_ignore_key_prefixes_inside_base64_blobs() {
-    let cassette = scrub_cassette_contents(
-        r#"when:
-  path: /v1/messages
-  method: POST
-then:
-  status: 200
-  body: '{"signature":"ErUBCkYIBRgCIkAIzaSyExampleSecretToken1234567890ABCDEFGHIJAKIA0123456789ABCDEFGHASIA0123456789ABCDEFsk-proj-notakeyhereatall0123456789abcdef","x":1}'
-"#,
-    );
-
-    assert!(
-        cassette_safety_failures(Path::new("fixture.yaml"), &cassette).is_empty(),
-        "{cassette}"
-    );
-    // The same prefixes starting a token are still keys.
-    let leaked = scrub_cassette_contents(
-        r#"when:
-  path: /v1/messages
-  method: POST
-then:
-  status: 200
-  body: '{"leaked":"AIzaSyExampleSecretToken1234567890ABCDEFGHIJ","aws":"AKIA0123456789ABCDEF"}'
-"#,
-    );
-    let failures = cassette_safety_failures(Path::new("fixture.yaml"), &leaked);
-    assert!(
-        failures.iter().any(|f| f.contains("Google API key")),
-        "{failures:?}"
-    );
-    assert!(failures.iter().any(|f| f.contains("AWS")), "{failures:?}");
-}
-
 #[test]
 fn scrubber_removes_volatile_headers_and_sensitive_query_params() {
     let cassette = r#"when:
@@ -1027,6 +1047,36 @@ then:
     assert_eq!(scrubbed, scrub_cassette_contents(&scrubbed));
     assert!(!scrubbed.contains("set-cookie"));
     assert!(scrubbed.contains("content-type"));
+}
+
+/// A request's cookie and ChatGPT account id are credentials: redacted
+/// by name, and a raw header line of either fails the safety check.
+#[test]
+fn scrubber_redacts_cookie_and_chatgpt_account_headers() {
+    let cassette = r#"when:
+  path: /backend-api/codex/responses
+  method: POST
+  header:
+  - name: Cookie
+    value: session=very-private-cookie
+  - name: ChatGPT-Account-Id
+    value: acct_private_123
+then:
+  status: 200
+  body: '{}'
+"#;
+
+    let scrubbed = scrub_cassette_contents(cassette);
+
+    assert!(!scrubbed.contains("very-private-cookie"), "{scrubbed}");
+    assert!(!scrubbed.contains("acct_private_123"), "{scrubbed}");
+    assert_eq!(scrubbed.matches(REDACTED).count(), 2);
+    assert!(cassette_safety_failures(Path::new("fixture.yaml"), &scrubbed).is_empty());
+    let raw = "cookie: session=x\nChatGPT-Account-Id: acct_1\n";
+    assert_eq!(
+        artifact_safety_failures(Path::new("dump.txt"), raw).len(),
+        2
+    );
 }
 
 #[test]
@@ -1084,106 +1134,505 @@ then:
     );
 }
 
-/// A source that always supplies `source-secret-token` for `source-account`.
-struct FixedSource;
+#[test]
+fn matching_uses_authoritative_request_headers_for_both_views() {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "x-api-key",
+        HeaderValue::from_static("opaque-matching-credential"),
+    );
+    assert!(body_matches_for_request(
+        "",
+        &headers,
+        &[],
+        br#"{"opaque-matching-credential":"right"}"#,
+        Some(r#"{"opaque-matching-credential":"right"}"#),
+        BodyEncoding::Utf8,
+    ));
+    assert!(!body_matches_for_request(
+        "",
+        &headers,
+        &[],
+        br#"{"opaque-matching-credential":"wrong"}"#,
+        Some(r#"{"opaque-matching-credential":"right"}"#),
+        BodyEncoding::Utf8,
+    ));
+}
 
-impl rig_core::wire::CredentialSource for FixedSource {
-    fn current(
-        &self,
-    ) -> rig_core::wasm_compat::WasmBoxedFuture<
-        '_,
-        Result<rig_core::wire::Credential, rig_core::wire::CredentialSourceError>,
-    > {
-        Box::pin(async {
-            Ok(rig_core::wire::Credential::new("source-secret-token")
-                .with_account_id("source-account"))
-        })
+#[test]
+fn header_and_query_derived_redactions_match_but_unrelated_changes_do_not() {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("authorization", HeaderValue::from_static("Bearer local"));
+    let uri = "/submit?api_key=opaque-query-replay-97531";
+    let expected = r#"{"fingerprint":"[REDACTED]","query_echo":"[REDACTED]","message":"right"}"#;
+    for fingerprint in ["local", "[REDACTED]"] {
+        let actual=json!({"fingerprint":fingerprint,"query_echo":"opaque-query-replay-97531","message":"right"}).to_string();
+        assert!(body_matches_for_request(
+            uri,
+            &headers,
+            &[],
+            actual.as_bytes(),
+            Some(expected),
+            BodyEncoding::Utf8
+        ));
+        let wrong=json!({"fingerprint":fingerprint,"query_echo":"opaque-query-replay-97531","message":"wrong"}).to_string();
+        assert!(!body_matches_for_request(
+            uri,
+            &headers,
+            &[],
+            wrong.as_bytes(),
+            Some(expected),
+            BodyEncoding::Utf8
+        ));
+    }
+    let legacy =
+        r#"{"fingerprint":"local","query_echo":"opaque-query-replay-97531","message":"right"}"#;
+    assert!(body_matches_for_request(
+        uri,
+        &headers,
+        &[],
+        legacy.as_bytes(),
+        Some(legacy),
+        BodyEncoding::Utf8
+    ));
+}
+
+#[tokio::test]
+async fn replay_shape_cache_tracks_authoritative_credentials() {
+    let view = serde_json::json!({"model": "first-credential"});
+    let state = Arc::new(Mutex::new(ReplayState {
+        cassette_path: PathBuf::from("fixture.yaml"),
+        interactions: Vec::new(),
+        misses: Vec::new(),
+        policy: CassettePolicy::default(),
+        snapshots: None,
+        shapes: Some(ReplayShapes {
+            keys: vec![shape::shape_key(&view)],
+            views: vec![view.clone()],
+        }),
+        contextual_shapes: None,
+    }));
+    let mut cached = None;
+    for (credential, length) in [
+        ("Bearer first-credential", "1"),
+        ("Bearer first-credential", "2"),
+        ("Bearer second-credential", "2"),
+    ] {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("authorization", credential.parse().expect("valid header"));
+        headers.insert("content-length", length.parse().expect("valid header"));
+        let _ = replay_request(
+            State(Arc::clone(&state)),
+            Method::POST,
+            "/v1/test".parse().expect("valid URI"),
+            headers,
+            Bytes::new(),
+        )
+        .await;
+        let state = state.lock().await;
+        let (_, shapes) = state.contextual_shapes.as_ref().expect("cached shapes");
+        if credential == "Bearer first-credential" {
+            assert_eq!(
+                shapes.views.first(),
+                Some(&serde_json::json!({"model": "[REDACTED]"}))
+            );
+            if let Some(previous) = &cached {
+                assert!(Arc::ptr_eq(previous, shapes));
+            }
+            cached = Some(Arc::clone(shapes));
+        } else {
+            assert_eq!(shapes.views.first(), Some(&view));
+            assert!(!Arc::ptr_eq(
+                cached.as_ref().expect("previous cache"),
+                shapes
+            ));
+        }
     }
 }
 
-/// End to end through the driver: a credential a source stamps at send time
-/// reaches the upstream, and the recording made of that exchange keeps
-/// neither its token nor either account.
-#[tokio::test]
-async fn a_source_credential_sent_through_the_driver_is_never_recorded() {
-    const CHAT_REPLY: &str = r#"{"id":"chatcmpl-1","object":"chat.completion","created":0,"model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
-    let received = Arc::new(std::sync::Mutex::new(Vec::<axum::http::HeaderMap>::new()));
-    let seen = received.clone();
-    let app = axum::Router::new().fallback(move |headers: axum::http::HeaderMap| {
-        let seen = seen.clone();
-        async move {
-            seen.lock().expect("unpoisoned").push(headers);
-            (
-                [(axum::http::header::CONTENT_TYPE, "application/json")],
-                CHAT_REPLY,
-            )
-        }
-    });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("a local port");
-    let address = listener.local_addr().expect("its address");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
+#[test]
+fn fixture_normalization_withholds_binary_bytes_containing_credentials() {
+    let bytes = b"\xff\x00abc\x00";
+    let encoded = BASE64_STANDARD.encode(bytes);
+    let fixture = format!(
+        "when:\n  path: /binary\n  method: POST\n  header:\n  - name: x-api-key\n    value: abc\nthen:\n  status: 200\n  header:\n  - name: content-type\n    value: audio/mpeg\n  body: {encoded}\n  body_encoding: base64\n"
+    );
+    let scrubbed = scrub_cassette_contents(&fixture);
+    let parsed = parse_cassette_interactions(Path::new("fixture.yaml"), &scrubbed);
+    let interaction = parsed.first().expect("interaction");
+    assert_eq!(interaction.then.body, None);
+    assert_eq!(
+        interaction
+            .then
+            .withheld
+            .as_ref()
+            .map(|summary| summary.bytes),
+        Some(bytes.len())
+    );
+    assert_eq!(
+        interaction
+            .when
+            .header
+            .first()
+            .map(|header| header.value.as_str()),
+        Some("[REDACTED]")
+    );
+    assert_eq!(scrub_cassette_contents(&scrubbed), scrubbed);
+}
 
-    let policy =
-        CassettePolicy::for_scenario("openai", "agent/completion_smoke", ReplayMatching::Ordered);
-    let interactions = Arc::new(Mutex::new(Vec::new()));
-    let ledger_dir = assert_fs::TempDir::new().expect("ledger directory");
-    let recorder = DirectRecorder {
-        interactions: interactions.clone(),
-        policy,
-        ledger: Arc::new(relay::LedgerTarget {
-            path: ledger_dir.path().join("ledger.jsonl"),
-            provider: "openai".to_owned(),
-            scenario: "agent/completion_smoke".to_owned(),
-            origin: format!("http://{address}"),
-        }),
-    };
-    let provider = rig_core::providers::openai::OpenAI::new("static-key")
-        .with_base_url(format!("http://{address}/v1"))
-        .with_account_id("static-account")
-        .with_credential_source(FixedSource);
-    let response = {
-        use rig_core::completion::CompletionModel as _;
-        rig_core::driver::Bound::new(
-            provider.chat("gpt-4o"),
-            DirectRecordingHttpClient::new(Some(recorder)),
-        )
-        .completion(rig_core::completion::CompletionRequest {
-            model: None,
-            chat_history: vec![rig_core::message::Message::user("hi")],
-            documents: Vec::new(),
-            tools: Vec::new(),
-            temperature: None,
-            max_tokens: None,
-            tool_choice: None,
-            additional_params: None,
-            output_schema: None,
-            record_telemetry_content: false,
-        })
-        .await
-    };
-    response.expect("the local upstream answers");
-
-    let received = received.lock().expect("unpoisoned").clone();
-    assert_eq!(received.len(), 1);
-    assert_eq!(received[0]["authorization"], "Bearer source-secret-token");
-    assert_eq!(received[0]["chatgpt-account-id"], "source-account");
-
-    let interactions = interactions.lock().await;
-    assert_eq!(interactions.len(), 1, "the exchange was recorded");
-    let rendered = format!("{:?}", *interactions);
-    for secret in [
-        "source-secret-token",
-        "source-account",
-        "static-key",
-        "static-account",
+#[test]
+fn replay_and_snapshot_share_strict_case_insensitive_multipart_boundaries() {
+    let body =
+        b"--abc\r\nContent-Disposition: form-data; name=\"message\"\r\n\r\nhello\r\n--abc--\r\n";
+    let mut actual = axum::http::HeaderMap::new();
+    actual.insert(
+        "content-type",
+        HeaderValue::from_static("Multipart/Form-Data; boundary= \"abc\""),
+    );
+    let expected = vec![NameValue {
+        name: "content-type".into(),
+        value: "multipart/form-data; boundary=abc".into(),
+    }];
+    let mut request = incoming_request("/", Bytes::new());
+    request.headers = actual.clone();
+    assert!(headers_match(&request, &expected));
+    assert!(body_matches_for_request(
+        "",
+        &actual,
+        &expected,
+        body,
+        Some(std::str::from_utf8(body).expect("text")),
+        BodyEncoding::Utf8
+    ));
+    let view = snapshot::body_view(Some("Multipart/Form-Data; boundary= \"abc\""), body);
+    assert!(view.get("multipart").is_some());
+    assert_eq!(
+        view,
+        snapshot::body_view(Some("multipart/form-data; boundary=abc"), body)
+    );
+    for value in [
+        "multipart/form-data; boundary=abc; boundary=wrong",
+        "multipart/form-data; boundary=\"abc",
     ] {
-        assert!(
-            !rendered.contains(secret),
-            "{secret} was recorded: {rendered}"
-        );
+        actual.insert("content-type", value.parse().expect("header"));
+        assert!(!body_matches_for_request(
+            "",
+            &actual,
+            &expected,
+            body,
+            Some(std::str::from_utf8(body).expect("text")),
+            BodyEncoding::Utf8
+        ));
+        assert!(!body_matches_for_request(
+            "",
+            &actual,
+            &expected,
+            body,
+            None,
+            BodyEncoding::Utf8
+        ));
     }
+}
+
+#[test]
+fn query_matching_normalizes_legacy_echoes_using_incoming_credentials() {
+    let secret = "opaque-query-secret-97531";
+    let mut request =
+        incoming_request(&format!("/items?echo={secret}&page_token=p2"), Bytes::new());
+    request
+        .headers
+        .insert("x-api-key", secret.parse().expect("header"));
+    for echo in [secret, REDACTED] {
+        let expected = [query_pair("echo", echo), query_pair("page_token", "p2")];
+        assert!(super::query_matches(&request, &expected));
+        let wrong = [query_pair("echo", echo), query_pair("page_token", "p1")];
+        assert!(!super::query_matches(&request, &wrong));
+    }
+}
+
+#[test]
+fn replay_miss_previews_use_the_incoming_requests_credentials() {
+    let secret = "opaque-miss-credential-97531";
+    let mut request = incoming_request(
+        &format!("/missing?echo={secret}"),
+        json!({"echo":secret}).to_string(),
+    );
+    request
+        .headers
+        .insert("x-api-key", secret.parse().expect("header"));
+    let message = replay_miss_message(CassettePolicy::default(), &request, &[], None, None);
+    assert!(!message.contains(secret), "{message}");
+    let message: Value = serde_json::from_str(&message).expect("JSON");
+    assert_eq!(message.get("actual_query"), Some(&json!("echo=[REDACTED]")));
+    assert_eq!(
+        message.pointer("/actual_query_params/0/value"),
+        Some(&json!(REDACTED))
+    );
+    let preview: Value = serde_json::from_str(
+        message
+            .get("actual_body_preview")
+            .and_then(Value::as_str)
+            .expect("preview"),
+    )
+    .expect("body JSON");
+    assert_eq!(preview.get("echo"), Some(&json!(REDACTED)));
+}
+
+#[tokio::test]
+async fn withheld_replay_refuses_before_inspection_with_exact_shapes_and_snapshots() {
+    for (request, encoding, request_withheld) in [
+        (b"{\"x\":".as_slice(), None, true),
+        (b"encoded bytes".as_slice(), Some("gzip"), true),
+        (b"{}".as_slice(), None, false),
+    ] {
+        let directory = assert_fs::TempDir::new().expect("directory");
+        let path = directory.path().join("withheld.yaml");
+        let mut headers = vec![("content-type", "application/json")];
+        if let Some(encoding) = encoding {
+            headers.push(("content-encoding", encoding));
+        }
+        let mut first = cassette_request("/first");
+        first.body = Some("{}".to_owned());
+        let mut withheld = recorded_request("POST", "/submit?page_token=p2", headers, request);
+        if request_withheld {
+            withheld.body = None;
+            withheld.withheld = Some(crate::scrub::OpaqueBody::new(
+                request.len(),
+                Some("application/json"),
+            ));
+        }
+        let mut reply = cassette_response();
+        reply.withheld = Some(crate::scrub::OpaqueBody::new(5, Some("application/json")));
+        let interactions = [
+            CassetteInteraction {
+                when: first,
+                then: cassette_response(),
+            },
+            CassetteInteraction {
+                when: withheld,
+                then: reply,
+            },
+        ];
+        let fixture = interactions
+            .iter()
+            .map(|interaction| serde_yaml::to_string(interaction).expect("YAML"))
+            .collect::<Vec<_>>()
+            .join("---\n");
+        fs::write(&path, fixture).expect("fixture");
+        for shape in [false, true] {
+            for snapshots in [SnapshotMode::Off, SnapshotMode::Check] {
+                let spec = CassetteSpec::new("withheld");
+                let spec = if shape {
+                    spec.shape_matched()
+                } else {
+                    spec.exact_matched()
+                };
+                let replay = ProviderCassette::try_start_session(
+                    RecordVia::Proxy,
+                    "example",
+                    spec,
+                    "https://example.test",
+                    CassetteMode::Replay,
+                    path.clone(),
+                    directory.path().join("attempts"),
+                    snapshots,
+                )
+                .await
+                .expect("replay");
+                let client = rig_reqwest::reqwest::Client::builder()
+                    .no_proxy()
+                    .build()
+                    .expect("client");
+                let send = |method, path: &str, media: &str| {
+                    let mut builder = client
+                        .request(method, format!("{}{path}", replay.base_url()))
+                        .header("content-type", media)
+                        .body(request.to_vec());
+                    if let Some(encoding) = encoding {
+                        builder = builder.header("content-encoding", encoding);
+                    }
+                    builder.send()
+                };
+                let out_of_order = send(Method::POST, "/submit?page_token=p2", "application/json")
+                    .await
+                    .expect("reply");
+                assert_eq!(out_of_order.status().as_u16(), 404);
+                assert!(
+                    !out_of_order
+                        .text()
+                        .await
+                        .expect("diagnostic")
+                        .contains("record it again")
+                );
+                let first = client
+                    .post(format!("{}/first", replay.base_url()))
+                    .body("{}")
+                    .send()
+                    .await
+                    .expect("first reply");
+                assert_eq!(first.status().as_u16(), 200);
+                first.bytes().await.expect("body");
+                for (method, path, media) in [
+                    (Method::GET, "/submit?page_token=p2", "application/json"),
+                    (Method::POST, "/other?page_token=p2", "application/json"),
+                    (Method::POST, "/submit?page_token=p1", "application/json"),
+                    (Method::POST, "/submit?page_token=p2", "text/plain"),
+                ] {
+                    let mismatch = send(method, path, media).await.expect("reply");
+                    assert_eq!(mismatch.status().as_u16(), 404);
+                    assert!(
+                        !mismatch
+                            .text()
+                            .await
+                            .expect("diagnostic")
+                            .contains("record it again")
+                    );
+                }
+                let refused = send(Method::POST, "/submit?page_token=p2", "application/json")
+                    .await
+                    .expect("reply");
+                assert_eq!(refused.status().as_u16(), 502);
+                let diagnostic = refused.text().await.expect("diagnostic");
+                assert!(
+                    diagnostic.contains("was recorded without its"),
+                    "{diagnostic}"
+                );
+                assert!(diagnostic.contains("record it again"), "{diagnostic}");
+                let error = replay
+                    .try_finish()
+                    .await
+                    .expect_err("withheld replay fails");
+                assert!(matches!(&error, CassetteError::ReplayMismatch { .. }));
+                assert!(error.to_string().contains("record it again"));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn unordered_replay_serves_a_normal_match_before_a_withheld_one() {
+    for shape in [false, true] {
+        let directory = assert_fs::TempDir::new().expect("directory");
+        let path = directory.path().join("unordered-withheld.yaml");
+        let mut good = cassette_request("/submit");
+        good.body = Some(r#"{"model":"right"}"#.to_owned());
+        let mut withheld = good.clone();
+        withheld.body = None;
+        withheld.withheld = Some(crate::scrub::OpaqueBody::new(5, Some("application/json")));
+        let mut reply = cassette_response();
+        reply.body = Some("good".to_owned());
+        let interactions = [
+            CassetteInteraction {
+                when: withheld,
+                then: cassette_response(),
+            },
+            CassetteInteraction {
+                when: good,
+                then: reply,
+            },
+        ];
+        let fixture = interactions
+            .iter()
+            .map(|interaction| serde_yaml::to_string(interaction).expect("YAML"))
+            .collect::<Vec<_>>()
+            .join("---\n");
+        fs::write(&path, fixture).expect("fixture");
+        let spec = CassetteSpec::new("unordered-withheld").unordered();
+        let spec = if shape {
+            spec.shape_matched()
+        } else {
+            spec.exact_matched()
+        };
+        let replay = ProviderCassette::try_start_session(
+            RecordVia::Proxy,
+            "example",
+            spec,
+            "https://example.test",
+            CassetteMode::Replay,
+            path,
+            directory.path().join("attempts"),
+            SnapshotMode::Check,
+        )
+        .await
+        .expect("replay");
+        let client = rig_reqwest::reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client");
+        let good = client
+            .post(format!("{}/submit", replay.base_url()))
+            .header("content-type", "application/json")
+            .body(r#"{"model":"right"}"#)
+            .send()
+            .await
+            .expect("reply");
+        assert_eq!(good.status().as_u16(), 200);
+        assert_eq!(good.text().await.expect("body"), "good");
+        let refused = client
+            .post(format!("{}/submit", replay.base_url()))
+            .header("content-type", "application/json")
+            .body(r#"{"model":"wrong"}"#)
+            .send()
+            .await
+            .expect("reply");
+        assert_eq!(refused.status().as_u16(), 502);
+        assert!(
+            refused
+                .text()
+                .await
+                .expect("diagnostic")
+                .contains("record it again")
+        );
+        assert!(matches!(
+            replay.try_finish().await,
+            Err(CassetteError::ReplayMismatch { .. })
+        ));
+    }
+}
+
+#[test]
+fn paths_and_headers_normalize_legacy_values_and_unordered_miss_candidates() {
+    let secret = "opaque-path-credential-97531";
+    let mut request = incoming_request(&format!("/files/{secret}"), Bytes::new());
+    request.headers.insert(
+        "authorization",
+        format!("Bearer {secret}").parse().expect("header"),
+    );
+    request.headers.insert(
+        "accept",
+        format!("application/json; echo={secret}; mode=right")
+            .parse()
+            .expect("header"),
+    );
+    for value in [secret, REDACTED] {
+        assert!(paths_match(&request, &format!("/files/{value}")));
+        assert!(!paths_match(&request, &format!("/other/{value}")));
+        assert!(headers_match(
+            &request,
+            &[query_pair(
+                "accept",
+                &format!("application/json; echo={value}; mode=right")
+            )]
+        ));
+        assert!(!headers_match(
+            &request,
+            &[query_pair(
+                "accept",
+                &format!("application/json; echo={value}; mode=wrong")
+            )]
+        ));
+    }
+    let mut expected = cassette_request("/files/[REDACTED]");
+    expected.method = "POST".to_owned();
+    let interactions = [ReplayInteraction {
+        when: expected,
+        then: cassette_response(),
+        consumed: false,
+    }];
+    let policy =
+        CassettePolicy::for_scenario("example", CassetteSpec::new("candidate").unordered());
+    assert_eq!(
+        miss_candidate_index(policy, &interactions, &request),
+        Some(0)
+    );
 }

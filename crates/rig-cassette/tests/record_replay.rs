@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use rig_agent::bus::Bus;
+use rig_agent::handlers::Handlers;
 use rig_agent::{
     AgentBuilder,
     tool::{Tool, ToolContext, ToolExecutionError},
@@ -71,14 +71,14 @@ fn two_tool_calls_then_done() -> MockCompletionModel {
             rig_core::message::AssistantContent::ToolCall(rig_core::message::ToolCall::from_wire(
                 "tc-1",
                 rig_core::message::ToolFunction::new(
-                    "slow".to_owned(),
+                    rig_core::message::ToolName::new("slow".to_owned()).expect("tool name"),
                     json!({"delay_ms": 40, "tag": "first"}),
                 ),
             )),
             rig_core::message::AssistantContent::ToolCall(rig_core::message::ToolCall::from_wire(
                 "tc-2",
                 rig_core::message::ToolFunction::new(
-                    "slow".to_owned(),
+                    rig_core::message::ToolName::new("slow".to_owned()).expect("tool name"),
                     json!({"delay_ms": 0, "tag": "second"}),
                 ),
             )),
@@ -97,7 +97,7 @@ async fn a_run_records_every_dispatch_and_replays_from_the_log() {
     let response = within(recorded.prompt("go").max_turns(3).run())
         .await
         .expect("recorded run");
-    assert_eq!(response.output, "done");
+    assert_eq!(response.output(), "done");
     let log = recorded.stamp(recorder.take());
     assert_eq!(log.len(), 4, "two completions and two tool calls");
     assert_eq!(log[0].kind.family(), EffectFamily::Completion);
@@ -111,9 +111,8 @@ async fn a_run_records_every_dispatch_and_replays_from_the_log() {
     let saved = serde_json::to_string(&log).expect("log serializes");
     let restored: rig_cassette::effect_log::EffectLog =
         serde_json::from_str(&saved).expect("restores");
-    let (dispatcher, registrar, mut driver) = Bus::channel();
-    rig_cassette::agent::replay::register_all(&restored, &mut driver).expect("fresh keys");
-    let replay_task = tokio::spawn(driver);
+    let handlers = Handlers::default();
+    rig_cassette::agent::replay::register_all(&restored, &handlers).expect("fresh keys");
 
     // The replayed agent advertises the same tool (its handler is the
     // replayer under the recorded key) and dispatches to the recorded keys.
@@ -121,30 +120,28 @@ async fn a_run_records_every_dispatch_and_replays_from_the_log() {
     let tool_key = log[1].key.clone();
     let tool_replayer =
         EffectLogReplayer::for_key(&restored, &tool_key).expect("the log has the tool's records");
-    let replayed =
-        AgentBuilder::over_bus(dispatcher.clone(), registrar.clone(), "replay", model_key)
-            .tool_server_handle({
-                let server = rig_agent::tool::server::ToolServer::new().run();
-                // The registration's handler *is* the replayer, under the recorded
-                // key: the catalog advertises the tool, the bus answers from the
-                // log, and no `Slow` exists on this side at all.
-                server.add_registered_tool(
-                    rig_agent::tool::RegisteredTool::from_handler(tool_replayer)
-                        .expect("a tool-family replayer"),
-                );
-                server
-            })
-            .build();
+    let replayed = AgentBuilder::over_handlers(handlers.clone(), "replay", model_key)
+        .tool_server_handle({
+            let server = rig_agent::tool::server::ToolServer::new().run();
+            // The registration's handler *is* the replayer, under the recorded
+            // key: the catalog advertises the tool, the bus answers from the
+            // log, and no `Slow` exists on this side at all.
+            server.add_registered_tool(
+                rig_agent::tool::RegisteredTool::from_handler(tool_replayer)
+                    .expect("a tool-family replayer"),
+            );
+            server
+        })
+        .build();
     let response = within(replayed.prompt("go").max_turns(3).run())
         .await
         .expect("replayed run");
     assert_eq!(
-        response.output, "done",
+        response.output(),
+        "done",
         "the same PromptResponse from the record"
     );
     drop(replayed);
-    drop(dispatcher);
-    within(replay_task).await.expect("replay driver ends");
 }
 
 /// A tool whose recorded arguments differ from what the program dispatches
@@ -168,26 +165,20 @@ async fn a_tool_divergence_fails_the_run_at_the_tool_record() {
         *args = json!({"delay_ms": 0, "tag": "not what the program asks"}).to_string();
     }
 
-    let (dispatcher, registrar, mut driver) = Bus::channel();
-    rig_cassette::agent::replay::register_all(&log, &mut driver).expect("fresh keys");
-    let replay_task = tokio::spawn(driver);
+    let handlers = Handlers::default();
+    rig_cassette::agent::replay::register_all(&log, &handlers).expect("fresh keys");
     let tool_replayer =
         EffectLogReplayer::for_key(&log, &tool_key).expect("the log has the tool's records");
-    let replayed = AgentBuilder::over_bus(
-        dispatcher.clone(),
-        registrar.clone(),
-        "replay",
-        log[0].key.clone(),
-    )
-    .tool_server_handle({
-        let server = rig_agent::tool::server::ToolServer::new().run();
-        server.add_registered_tool(
-            rig_agent::tool::RegisteredTool::from_handler(tool_replayer)
-                .expect("a tool-family replayer"),
-        );
-        server
-    })
-    .build();
+    let replayed = AgentBuilder::over_handlers(handlers.clone(), "replay", log[0].key.clone())
+        .tool_server_handle({
+            let server = rig_agent::tool::server::ToolServer::new().run();
+            server.add_registered_tool(
+                rig_agent::tool::RegisteredTool::from_handler(tool_replayer)
+                    .expect("a tool-family replayer"),
+            );
+            server
+        })
+        .build();
     let error = within(replayed.prompt("go").max_turns(3).run())
         .await
         .expect_err("the corrupted tool record is a divergence");
@@ -201,6 +192,4 @@ async fn a_tool_divergence_fails_the_run_at_the_tool_record() {
         report.message
     );
     drop(replayed);
-    drop(dispatcher);
-    within(replay_task).await.expect("replay driver ends");
 }

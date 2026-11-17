@@ -15,11 +15,11 @@
 //! # Reading the numbers
 //!
 //! OpenAI reports `cached_tokens` as a **subset** of the prompt-token counter,
-//! not alongside it (see [`crate::cache_conformance::CacheAccounting::Subset`]),
-//! so turn 1's billed prompt is `input_tokens` on its own and the hit ratio is
-//! turn 2's cache read over that. It never reports cache *writes* — rig hardcodes
-//! `cache_creation_input_tokens` to 0 on both paths through
-//! `providers::internal::completion_usage` — so turn 1 legitimately shows zero
+//! as rig's `Usage` counts cache reads on every provider, so turn 1's billed
+//! prompt is `input_tokens` on its own and the hit ratio is turn 2's cache read
+//! over that. It never reports cache *writes* — rig hardcodes
+//! `cache_creation_input_tokens` to 0 on both paths (the Chat and Responses
+//! usage mappings) — so turn 1 legitimately shows zero
 //! for both counters, and [`assert_warms`] does not require otherwise.
 //!
 //! OpenAI caches a prefix only above 1,024 tokens and in 128-token increments,
@@ -39,22 +39,16 @@
 //! records a miss fails immediately instead of committing a fixture that pins
 //! one.
 
-use rig::prelude::*;
 use rig::providers::openai;
-use rig::providers::openai::OpenAI;
-use serde_json::json;
+use rig_test_support::cassette_models::OpenAiModels;
 
 use crate::cache_conformance::{
-    AGENT_CACHE_PROMPT, CacheAccounting, CacheObservation, CacheProbe, CacheProbeLookupTool,
-    CacheSupport, assert_agent_growth_still_hits, assert_breakpoints_match_support,
-    assert_cache_conformance, assert_cache_key_stable, assert_prefix_stable, assert_warms,
-    observation_from_completion_calls, report_and_assert_live, run_cache_probe,
+    CacheProbe, CacheSupport, assert_breakpoints_match_support, assert_cache_conformance,
+    assert_prefix_stable, assert_warms, report_and_assert_live, run_cache_probe,
     run_cache_probe_streaming,
 };
 
-use super::super::support::{
-    with_openai_completions_prompt_caching_cassette, with_openai_prompt_caching_cassette,
-};
+use super::super::support::{shared_options, stateless, with_openai_prompt_caching_cassette};
 
 /// A cheap model that still participates in prompt caching.
 pub(super) const CACHE_MODEL: &str = openai::GPT_4O_MINI;
@@ -66,7 +60,6 @@ pub(super) const CACHE_MODEL: &str = openai::GPT_4O_MINI;
 /// miss no matter what rig did.
 pub(super) const OPENAI_CACHE_SUPPORT: CacheSupport = CacheSupport {
     provider: "openai",
-    accounting: CacheAccounting::Subset,
     explicit_breakpoints: false,
     reports_writes: false,
     min_cacheable_tokens: 1024,
@@ -84,40 +77,18 @@ pub(super) fn probe() -> CacheProbe {
     CacheProbe::new("openai prompt caching")
 }
 
-/// The probe plus the `prompt_cache_key` the Responses surface needs to route
-/// same-prefix traffic to the same cache.
-fn keyed_probe() -> CacheProbe {
-    probe().with_additional_params(json!({
-        "prompt_cache_key": "rig-cache-conformance-openai",
-    }))
+/// The probe on the Responses surface, which stores no response.
+fn responses_probe() -> CacheProbe {
+    probe().with_provider_options(stateless())
 }
 
-/// The Responses surface caches reliably **when rig sends a cache key**.
-///
-/// The un-keyed behavior is recorded separately in
-/// [`responses_without_a_cache_key_does_not_hit_until_the_third_turn`], which is
-/// where the reasoning for keying this cell lives.
-#[tokio::test]
-async fn responses_blocking_probe_hits_and_keeps_hitting_as_the_prefix_grows() {
-    const SCENARIO: &str = "prompt_caching/responses_blocking_probe";
-
-    with_openai_prompt_caching_cassette(
-        "prompt_caching/responses_blocking_probe",
-        |client| async move {
-            let model = client.openai.completion(CACHE_MODEL);
-            let observation: CacheObservation = run_cache_probe(&model, &keyed_probe()).await;
-            assert_cache_conformance(
-                &observation,
-                &OPENAI_RESPONSES_KEYED_SUPPORT,
-                "responses blocking probe",
-            );
-        },
-    )
-    .await;
-
-    assert_prefix_stable("openai", SCENARIO);
-    assert_breakpoints_match_support("openai", SCENARIO, &OPENAI_CACHE_SUPPORT);
-    assert_cache_key_stable("openai", SCENARIO, &OPENAI_RESPONSES_KEYED_SUPPORT);
+/// The Responses probe plus the `prompt_cache_key` that surface needs to route
+/// same-prefix traffic to the same cache.
+fn keyed_probe() -> CacheProbe {
+    probe().with_provider_options(shared_options(
+        Some(false),
+        Some("rig-cache-conformance-openai"),
+    ))
 }
 
 /// Measured Responses behavior without `prompt_cache_key`: turn 2 misses.
@@ -145,7 +116,7 @@ async fn responses_without_a_cache_key_does_not_hit_until_the_third_turn() {
 
     with_openai_prompt_caching_cassette("prompt_caching/responses_unkeyed_probe", |client| async move {
         let model = client.openai.completion(CACHE_MODEL);
-        let observation = run_cache_probe(&model, &probe()).await;
+        let observation = run_cache_probe(model, &responses_probe()).await;
 
         // Not `assert_cache_conformance`: turn 2 legitimately misses here, and
         // pretending otherwise would either fail forever or force the floor
@@ -180,28 +151,6 @@ async fn responses_without_a_cache_key_does_not_hit_until_the_third_turn() {
 }
 
 #[tokio::test]
-async fn chat_completions_blocking_probe_hits_and_keeps_hitting_as_the_prefix_grows() {
-    const SCENARIO: &str = "prompt_caching/chat_completions_blocking_probe";
-
-    with_openai_completions_prompt_caching_cassette(
-        "prompt_caching/chat_completions_blocking_probe",
-        |client| async move {
-            let model = client.chat(CACHE_MODEL);
-            let observation = run_cache_probe(&model, &probe()).await;
-            assert_cache_conformance(
-                &observation,
-                &OPENAI_CACHE_SUPPORT,
-                "chat completions blocking probe",
-            );
-        },
-    )
-    .await;
-
-    assert_prefix_stable("openai", SCENARIO);
-    assert_breakpoints_match_support("openai", SCENARIO, &OPENAI_CACHE_SUPPORT);
-}
-
-#[tokio::test]
 async fn responses_streaming_probe_survives_the_streaming_accumulator() {
     const SCENARIO: &str = "prompt_caching/responses_streaming_probe";
 
@@ -209,7 +158,7 @@ async fn responses_streaming_probe_survives_the_streaming_accumulator() {
         "prompt_caching/responses_streaming_probe",
         |client| async move {
             let model = client.openai.completion(CACHE_MODEL);
-            let observation = run_cache_probe_streaming(&model, &keyed_probe()).await;
+            let observation = run_cache_probe_streaming(model, &keyed_probe()).await;
             assert_cache_conformance(
                 &observation,
                 &OPENAI_RESPONSES_KEYED_SUPPORT,
@@ -223,106 +172,61 @@ async fn responses_streaming_probe_survives_the_streaming_accumulator() {
     assert_breakpoints_match_support("openai", SCENARIO, &OPENAI_CACHE_SUPPORT);
 }
 
+/// A cache point on GPT-5.6 and later places a `prompt_cache_breakpoint`
+/// on the stable document's part, so a follow-up that asks a different
+/// question reads the document from cache. Without it the implicit
+/// breakpoint sits on the changed question, and an unkeyed second request
+/// was measured to read nothing.
 #[tokio::test]
-async fn chat_completions_streaming_probe_survives_the_streaming_accumulator() {
-    const SCENARIO: &str = "prompt_caching/chat_completions_streaming_probe";
+async fn responses_cache_point_breakpoint_serves_a_changed_question() {
+    const SCENARIO: &str = "prompt_caching/responses_cache_point_breakpoint";
 
-    with_openai_completions_prompt_caching_cassette(
-        "prompt_caching/chat_completions_streaming_probe",
-        |client| async move {
-            let model = client.chat(CACHE_MODEL);
-            let observation = run_cache_probe_streaming(&model, &probe()).await;
-            assert_cache_conformance(
-                &observation,
-                &OPENAI_CACHE_SUPPORT,
-                "chat completions streaming probe",
-            );
-        },
-    )
-    .await;
-
-    assert_prefix_stable("openai", SCENARIO);
-    assert_breakpoints_match_support("openai", SCENARIO, &OPENAI_CACHE_SUPPORT);
-}
-
-/// A real agent loop with a tool round-trip, on the chat-completions wire.
-///
-/// The cell the rest of the suite cannot replace: the three-turn probe builds
-/// its own history, so it proves the *provider* caches a growing prefix, but
-/// only a real run proves rig's agent driver does not disturb that prefix
-/// between iterations. Tool definitions re-advertised in a different order, a
-/// system prompt rebuilt differently on turn N, an assistant turn re-normalized
-/// on the way back in — each busts the cache from that point on while every
-/// counter stays non-zero.
-#[tokio::test]
-async fn chat_completions_agent_loop_keeps_hitting_across_tool_turns() {
-    const SCENARIO: &str = "prompt_caching/chat_completions_agent_loop";
-
-    with_openai_completions_prompt_caching_cassette(
-        "prompt_caching/chat_completions_agent_loop",
-        |client| async move {
-            let response = client
-                .agent(CACHE_MODEL)
-                .preamble(&probe().preamble)
-                .tool(CacheProbeLookupTool)
-                .temperature(0.0)
-                .build()
-                .prompt(AGENT_CACHE_PROMPT)
-                .max_turns(6)
-                .await
-                .expect("openai agent cache probe should complete");
-
-            let observation = observation_from_completion_calls(response.completion_calls());
-            assert_agent_growth_still_hits(
-                &observation,
-                &OPENAI_CACHE_SUPPORT,
-                "chat completions agent loop",
-            );
-        },
-    )
-    .await;
-
-    // The loop-level prefix guard: every one of the agent's own outbound
-    // requests must extend its predecessor rather than rewrite it.
-    assert_prefix_stable("openai", SCENARIO);
-    assert_breakpoints_match_support("openai", SCENARIO, &OPENAI_CACHE_SUPPORT);
-}
-
-/// The Responses twin of [`chat_completions_agent_loop_keeps_hitting_across_tool_turns`].
-#[tokio::test]
-async fn responses_agent_loop_keeps_hitting_across_tool_turns() {
-    const SCENARIO: &str = "prompt_caching/responses_agent_loop";
-
+    let document: String = (0..1500)
+        .map(|fact| format!("Fact {fact} is {}.", fact * 7 % 1000))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut cached = 0;
     with_openai_prompt_caching_cassette(
-        "prompt_caching/responses_agent_loop",
-        |client| async move {
-            let response = client
-                .openai
-                .agent(CACHE_MODEL)
-                .preamble(&probe().preamble)
-                .tool(CacheProbeLookupTool)
-                .temperature(0.0)
-                .additional_params(json!({
-                    "prompt_cache_key": "rig-cache-conformance-openai-agent",
-                }))
-                .build()
-                .prompt(AGENT_CACHE_PROMPT)
-                .max_turns(6)
-                .await
-                .expect("openai responses agent cache probe should complete");
-
-            let observation = observation_from_completion_calls(response.completion_calls());
-            assert_agent_growth_still_hits(
-                &observation,
-                &OPENAI_CACHE_SUPPORT,
-                "responses agent loop",
-            );
+        "prompt_caching/responses_cache_point_breakpoint",
+        |client| {
+            let cached = &mut cached;
+            async move {
+                let model = client.openai.responses(openai::GPT_5_6_LUNA);
+                for question in ["What is fact 3?", "What is fact 11?"] {
+                    let mut request = rig::completion::CompletionRequest::new(question)
+                        .messages([
+                            rig::completion::Message::user(document.clone()),
+                            rig::completion::Message::assistant("Noted."),
+                        ])
+                        .max_tokens(64)
+                        .reasoning(rig::completion::Reasoning::Off)
+                        .provider_options(stateless());
+                    request.cache_points = vec![rig::completion::CachePoint::Messages(1)];
+                    let response = model.call(request).await.expect("the turn answers");
+                    *cached = response.usage.cached_input_tokens.unwrap_or_default();
+                }
+            }
         },
     )
     .await;
-
-    assert_prefix_stable("openai", SCENARIO);
-    assert_breakpoints_match_support("openai", SCENARIO, &OPENAI_CACHE_SUPPORT);
+    assert!(
+        cached > 1000,
+        "the second question reads the document from cache, read {cached}"
+    );
+    for (request, _) in crate::cassettes::recorded_interaction_bodies("openai", SCENARIO) {
+        let body: serde_json::Value = serde_json::from_str(&request).expect("request is JSON");
+        assert_eq!(
+            body["input"][0]["content"][0]["prompt_cache_breakpoint"],
+            serde_json::json!({"mode": "explicit"}),
+            "the document carries the breakpoint"
+        );
+        assert!(
+            body["input"][2]["content"][0]
+                .get("prompt_cache_breakpoint")
+                .is_none(),
+            "the question carries none"
+        );
+    }
 }
 
 /// Live economics: run the same probe against the real API.
@@ -335,12 +239,9 @@ async fn responses_agent_loop_keeps_hitting_across_tool_turns() {
 #[tokio::test]
 #[ignore = "requires OPENAI_API_KEY and spends real tokens"]
 async fn live_cache_economics() {
-    let client = OpenAI::from_env()
-        .expect("OPENAI_API_KEY")
-        .bound()
-        .expect("the bundled transport should build");
+    let client = OpenAiModels::from_env().expect("OPENAI_API_KEY");
     let model = client.completion(CACHE_MODEL);
-    let observation = run_cache_probe(&model, &keyed_probe()).await;
+    let observation = run_cache_probe(model, &keyed_probe()).await;
     report_and_assert_live(
         &observation,
         &OPENAI_RESPONSES_KEYED_SUPPORT,

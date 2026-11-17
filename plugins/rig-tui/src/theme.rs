@@ -1,0 +1,337 @@
+//! The view's colors, by what each thing is: a band behind what the user
+//! wrote, one behind tool calls and what plugins put in the conversation,
+//! the model's replies on the terminal's own background, red and green
+//! behind a diff's removed and added lines, stronger behind the words that
+//! changed, a tool call's row tinted by where it stands, and the surfaces
+//! of panels and of boxes over the screen. Each
+//! is mixed from the terminal's background, asked of the terminal once it
+//! is opened, so it reads as a tint on a dark or a light terminal alike; a
+//! terminal without 24-bit color gets fixed shades of its 256.
+//!
+//! Nothing is drawn with box-drawing lines: a surface is a flat tint, the
+//! higher the lighter (on a dark terminal), with a bold title on its first
+//! row and a cell of padding around its content.
+//!
+//! With `NO_COLOR` set the theme is [`plain`](Theme::plain): the view draws
+//! no color at all, and what a color said is said with bold, underline and
+//! reverse instead, through [`Theme::selection`], [`Theme::changed_word`]
+//! and a surface's reversed title.
+
+use bevy_ecs::prelude::*;
+use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Padding};
+
+/// The background assumed when the terminal does not say its own, and a
+/// light one's.
+const DARK: Rgb = (0x1c, 0x1c, 0x1c);
+const LIGHT: Rgb = (0xfa, 0xfa, 0xfa);
+
+/// The colors each band leans to, and how far.
+const ADDED: (Rgb, f32) = ((0x3f, 0xb9, 0x50), 0.16);
+const ADDED_WORD: (Rgb, f32) = ((0x3f, 0xb9, 0x50), 0.38);
+const REMOVED: (Rgb, f32) = ((0xf8, 0x51, 0x49), 0.16);
+const REMOVED_WORD: (Rgb, f32) = ((0xf8, 0x51, 0x49), 0.38);
+const SELECTED: (Rgb, f32) = ((0xd2, 0x99, 0x22), 0.30);
+const CALL_RUNNING: (Rgb, f32) = ((0xd2, 0x99, 0x22), 0.14);
+const CALL_DONE: (Rgb, f32) = ((0x3f, 0xb9, 0x50), 0.10);
+const CALL_FAILED: (Rgb, f32) = ((0xf8, 0x51, 0x49), 0.24);
+const NOTE: (Rgb, f32) = ((0x58, 0xa6, 0xff), 0.16);
+const IMPORTANT: (Rgb, f32) = ((0xa3, 0x71, 0xf7), 0.18);
+/// How far the user's and the tool band lean from the background to the
+/// foreground: gray, the user's the lighter.
+const USER: f32 = 0.12;
+const TOOL: f32 = 0.06;
+/// How far a panel's, the input's and a box over the screen's surface lean
+/// the same way: a panel just off the background, the input a step above
+/// what the user sent, a box above everything else.
+const PANEL: f32 = 0.04;
+const INPUT: f32 = 0.17;
+const RAISED: f32 = 0.21;
+/// How far a call not yet running leans to the foreground: a step above
+/// the tool band its output is on.
+const CALL_WAITING: f32 = 0.10;
+/// How far code leans to the foreground: just off the background.
+const CODE: f32 = 0.08;
+
+/// The bands of a terminal without 24-bit color, of its 256: on a dark
+/// background and on a light one. A tint mixed as above would fall on
+/// the same few grays.
+const DARK_256: Theme = indexed(
+    DARK,
+    [
+        238, 236, 22, 28, 52, 88, 58, 235, 240, 237, 94, 23, 89, 239, 234, 17, 53,
+    ],
+);
+const LIGHT_256: Theme = indexed(
+    LIGHT,
+    [
+        252, 254, 194, 157, 224, 217, 230, 255, 248, 251, 223, 193, 218, 250, 253, 189, 225,
+    ],
+);
+
+type Rgb = (u8, u8, u8);
+
+/// The view's colors, a resource. Plugins' looks and panels may use them
+/// too, such as [`added`](Self::added) behind a line a tool added, or
+/// [`panel`](Self::panel) for a panel's surface.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Theme {
+    /// Behind what the user wrote.
+    pub user: Color,
+    /// Behind tool calls, their results, and what plugins put in the
+    /// conversation, such as notes and a compaction's summary.
+    pub tool: Color,
+    /// Behind a diff's added lines.
+    pub added: Color,
+    /// Behind the words an added line changed.
+    pub added_word: Color,
+    /// Behind a diff's removed lines.
+    pub removed: Color,
+    /// Behind the words a removed line changed.
+    pub removed_word: Color,
+    /// Behind the item the user selected, in the transcript and in lists.
+    pub selected: Color,
+    /// The surface of a panel beside the transcript.
+    pub panel_surface: Color,
+    /// The surface of a box over the screen, such as a picker.
+    pub raised_surface: Color,
+    /// Behind the input, a step off what the user sent.
+    pub input: Color,
+    /// Behind a tool call's row while it streams, waits or is held.
+    pub call_waiting: Color,
+    /// Behind a running call's row, and a warning in a reply.
+    pub call_running: Color,
+    /// Behind an answered call's row, and a tip in a reply.
+    pub call_done: Color,
+    /// Behind the row of a call that failed, and a caution in a reply.
+    pub call_failed: Color,
+    /// Behind code in a reply: a fenced block, and inline code.
+    pub code: Color,
+    /// Behind a note in a reply (`> [!NOTE]`). A tip uses
+    /// [`call_done`](Self::call_done), a warning
+    /// [`call_running`](Self::call_running), a caution
+    /// [`call_failed`](Self::call_failed).
+    pub note: Color,
+    /// Behind something important in a reply (`> [!IMPORTANT]`).
+    pub important: Color,
+    /// No colors: `NO_COLOR` is set. The view strips every color it would
+    /// draw, and looks mark with bold, underline and reverse instead.
+    pub plain: bool,
+    /// The terminal's background, which [`shade`](Self::shade) leans from.
+    background: Rgb,
+    /// Whether the terminal shows 24-bit color.
+    truecolor: bool,
+}
+
+impl Default for Theme {
+    /// The colors for a dark terminal, in 24-bit color when `COLORTERM`
+    /// says the terminal has it.
+    fn default() -> Self {
+        Self::on(DARK, truecolor())
+    }
+}
+
+impl Theme {
+    /// The colors on a terminal whose background is `background`, in
+    /// 24-bit color or the nearest of 256.
+    pub fn on(background: Rgb, truecolor: bool) -> Self {
+        let dark = lightness(background) < 0.5;
+        if !truecolor {
+            return if dark { DARK_256 } else { LIGHT_256 };
+        }
+        let contrast = if dark { (0xff, 0xff, 0xff) } else { (0, 0, 0) };
+        let lean = |(to, by): (Rgb, f32)| {
+            let (r, g, b) = mix(background, to, by);
+            Color::Rgb(r, g, b)
+        };
+        Self {
+            user: lean((contrast, USER)),
+            tool: lean((contrast, TOOL)),
+            added: lean(ADDED),
+            added_word: lean(ADDED_WORD),
+            removed: lean(REMOVED),
+            removed_word: lean(REMOVED_WORD),
+            selected: lean(SELECTED),
+            panel_surface: lean((contrast, PANEL)),
+            raised_surface: lean((contrast, RAISED)),
+            input: lean((contrast, INPUT)),
+            call_waiting: lean((contrast, CALL_WAITING)),
+            call_running: lean(CALL_RUNNING),
+            call_done: lean(CALL_DONE),
+            call_failed: lean(CALL_FAILED),
+            code: lean((contrast, CODE)),
+            note: lean(NOTE),
+            important: lean(IMPORTANT),
+            plain: false,
+            background,
+            truecolor,
+        }
+    }
+
+    /// A gray `by` (0 to 1) of the way from the terminal's background to
+    /// the far end of its lightness: white on a dark terminal, black on a
+    /// light one; the nearest of 256's grays without 24-bit color.
+    pub fn shade(&self, by: f32) -> Color {
+        let toward = match lightness(self.background) < 0.5 {
+            true => (0xff, 0xff, 0xff),
+            false => (0, 0, 0),
+        };
+        let (r, g, b) = mix(self.background, toward, by.clamp(0.0, 1.0));
+        if self.truecolor {
+            return Color::Rgb(r, g, b);
+        }
+        // The 256's grays are 232 (8) to 255 (238), ten apart.
+        let level = lightness((r, g, b)) * 255.0;
+        let step = ((level - 8.0) / 10.0).round().clamp(0.0, 23.0) as u8;
+        Color::Indexed(232 + step)
+    }
+
+    /// The same theme with no colors, as with `NO_COLOR`.
+    pub fn without_color(self) -> Self {
+        Self {
+            plain: true,
+            ..self
+        }
+    }
+
+    /// The look of a selected item: the [`selected`](Self::selected) tint,
+    /// or reverse video when [`plain`](Self::plain).
+    pub fn selection(&self) -> Style {
+        match self.plain {
+            true => Style::new().add_modifier(Modifier::REVERSED),
+            false => Style::new().bg(self.selected),
+        }
+    }
+
+    /// The look of a word a diff's line changed, on `tint` (such as
+    /// [`added_word`](Self::added_word)), or underlined when
+    /// [`plain`](Self::plain).
+    pub fn changed_word(&self, tint: Color) -> Style {
+        match self.plain {
+            true => Style::new().add_modifier(Modifier::UNDERLINED),
+            false => Style::new().bg(tint),
+        }
+    }
+
+    /// A panel's surface titled `title`: a flat
+    /// [`panel_surface`](Self::panel_surface) with the title in bold on its
+    /// first row, and a cell of padding left, right and below. Its
+    /// [`inner`](Block::inner) area is the one a bordered block leaves.
+    pub fn panel<'a>(&self, title: impl Into<Line<'a>>) -> Block<'a> {
+        surface(self.panel_surface, title.into(), self.plain)
+    }
+
+    /// A box over the screen titled `title`, as [`panel`](Self::panel) but
+    /// on the [`raised_surface`](Self::raised_surface).
+    pub fn raised<'a>(&self, title: impl Into<Line<'a>>) -> Block<'a> {
+        surface(self.raised_surface, title.into(), self.plain)
+    }
+
+    /// The colors on the terminal the view runs in, asking it for its
+    /// background; the dark ones when it does not answer, and none with
+    /// `NO_COLOR` set.
+    pub(crate) fn of_terminal() -> Self {
+        if no_color() {
+            return Self::default().without_color();
+        }
+        let options = terminal_colorsaurus::QueryOptions::default();
+        match terminal_colorsaurus::background_color(options) {
+            Ok(background) => Self::on(background.scale_to_8bit(), truecolor()),
+            Err(_) => Self::default(),
+        }
+    }
+}
+
+/// A flat surface of `color` titled `title`, padded to leave what a
+/// border would; with no colors, its title reversed marks its top.
+fn surface(color: Color, mut title: Line<'_>, plain: bool) -> Block<'_> {
+    title.spans.insert(0, Span::from(" "));
+    title.spans.push(Span::from(" "));
+    let title = match plain {
+        true => title.bold().reversed(),
+        false => title.bold(),
+    };
+    Block::new()
+        .bg(color)
+        .title(title)
+        .padding(Padding::new(1, 1, 0, 1))
+}
+
+/// Whether `NO_COLOR` asks for no colors: set and not empty.
+fn no_color() -> bool {
+    std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty())
+}
+
+/// Whether `COLORTERM` says the terminal shows 24-bit color.
+fn truecolor() -> bool {
+    std::env::var("COLORTERM").is_ok_and(|term| term == "truecolor" || term == "24bit")
+}
+
+/// `from` moved `by` (0 to 1) of the way to `to`.
+fn mix(from: Rgb, to: Rgb, by: f32) -> Rgb {
+    let channel = |from: u8, to: u8| {
+        let mixed = f32::from(from) + (f32::from(to) - f32::from(from)) * by;
+        mixed.round().clamp(0.0, 255.0) as u8
+    };
+    (
+        channel(from.0, to.0),
+        channel(from.1, to.1),
+        channel(from.2, to.2),
+    )
+}
+
+/// How light `rgb` looks, from 0 to 1.
+fn lightness((r, g, b): Rgb) -> f32 {
+    (0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b)) / 255.0
+}
+
+/// The bands of 256-color indices, in the order of [`Theme`]'s fields.
+const fn indexed(
+    background: Rgb,
+    [
+        user,
+        tool,
+        added,
+        added_word,
+        removed,
+        removed_word,
+        selected,
+        panel_surface,
+        raised_surface,
+        call_waiting,
+        call_running,
+        call_done,
+        call_failed,
+        input,
+        code,
+        note,
+        important,
+    ]: [u8; 17],
+) -> Theme {
+    Theme {
+        user: Color::Indexed(user),
+        tool: Color::Indexed(tool),
+        added: Color::Indexed(added),
+        added_word: Color::Indexed(added_word),
+        removed: Color::Indexed(removed),
+        removed_word: Color::Indexed(removed_word),
+        selected: Color::Indexed(selected),
+        panel_surface: Color::Indexed(panel_surface),
+        raised_surface: Color::Indexed(raised_surface),
+        call_waiting: Color::Indexed(call_waiting),
+        call_running: Color::Indexed(call_running),
+        call_done: Color::Indexed(call_done),
+        call_failed: Color::Indexed(call_failed),
+        input: Color::Indexed(input),
+        code: Color::Indexed(code),
+        note: Color::Indexed(note),
+        important: Color::Indexed(important),
+        plain: false,
+        background,
+        truecolor: false,
+    }
+}
+
+#[cfg(test)]
+mod tests;

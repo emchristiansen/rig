@@ -2,7 +2,6 @@
 
 use rig::agent::AgentBuilder;
 use rig::bedrock;
-use rig::prelude::*;
 
 use super::super::support::with_bedrock_cassette;
 use crate::support::{
@@ -22,7 +21,7 @@ async fn completion_smoke() {
             .prompt(BASIC_PROMPT)
             .await
             .expect("completion should succeed")
-            .output;
+            .output();
 
         assert_nonempty_response(&response);
     })
@@ -45,7 +44,7 @@ async fn tool_roundtrip_smoke() {
             .prompt(STREAMING_TOOLS_PROMPT)
             .await
             .expect("tool prompt should succeed")
-            .output;
+            .output();
 
         assert_mentions_expected_number(&response, -3);
     })
@@ -57,16 +56,17 @@ async fn prompt_caching_completion_smoke() {
     with_bedrock_cassette(
         "agent/prompt_caching_completion_smoke",
         |client| async move {
-            let model = client
-                .completion(bedrock::completion::AMAZON_NOVA_LITE)
-                .with_prompt_caching();
-            let agent = AgentBuilder::new(model).preamble(BASIC_PREAMBLE).build();
+            let model = client.completion(bedrock::completion::AMAZON_NOVA_LITE);
+            let agent = AgentBuilder::new(model)
+                .cache(rig::completion::CacheRetention::Short)
+                .preamble(BASIC_PREAMBLE)
+                .build();
 
             let response = agent
                 .prompt(BASIC_PROMPT)
                 .await
                 .expect("prompt-caching completion should succeed")
-                .output;
+                .output();
 
             assert_nonempty_response(&response);
         },

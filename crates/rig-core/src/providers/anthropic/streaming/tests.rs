@@ -1,80 +1,89 @@
-use super::super::completion::{
-    AnthropicCompletionRequest, AnthropicRequestParams, CLAUDE_OPUS_4_8, CacheControl, CacheTtl,
-    Message, SystemContent, apply_prompt_cache_control, build_tool_definitions,
-    resolve_top_level_cache_control,
-};
+use super::super::completion::{CLAUDE_OPUS_4_8, CLAUDE_OPUS_5_5, CLAUDE_SONNET_4_6};
 use super::*;
 use crate::completion::CompletionRequest;
 use crate::completion::Message as RigMessage;
 use crate::completion::request::Document as RigDocument;
-use crate::streaming::{BlockClose, BlockKind, Delta, StreamEvent};
-use futures::StreamExt;
+use crate::driver::{Decoded, decode_events};
+use crate::message::{
+    AssistantContent, DocumentRange, Opaque, Reasoning, Source, SourceLocation, StopReason,
+};
+use crate::providers::anthropic::wire::{AnthropicConfig, Quirks};
+use crate::wire::Mode;
+use serde_json::json;
 
-/// A fresh decoder labelled the way the [`Messages`](super::super::wire::Messages)
-/// wire labels Anthropic proper.
+mod envelope_regressions;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+mod held_open;
+
+/// A fresh decoder, for its classifier.
 fn adapter() -> MessagesDecoder {
-    MessagesDecoder::new("anthropic")
+    MessagesDecoder::new(Quirks::anthropic())
 }
 
-/// Interpret one event, returning exactly what the adapter emitted (an
-/// `Err` item fails the test — use [`interpret_items`] to inspect one).
-fn interpret(adapter: &mut MessagesDecoder, event: StreamingEvent) -> Vec<StreamEvent> {
-    interpret_items(adapter, event)
-        .into_iter()
-        .map(|item| item.expect("not an error"))
+/// Decode `events` through one decoder as one reply, then EOF.
+fn decode(events: impl IntoIterator<Item = MessagesEvent>) -> Decoded<Completion> {
+    decode_events!(
+        MessagesDecoder::new(Quirks::anthropic()),
+        "anthropic",
+        events
+    )
+}
+
+/// The event one wire frame classifies to.
+fn classified(frame: &str) -> MessagesEvent {
+    let crate::wire::WireEvent::Known(event) = adapter().classify(WireFrame::Text(frame.into()))
+    else {
+        panic!("{frame} must classify Known");
+    };
+    event
+}
+
+/// The response the stream of `frames` folds into on the Anthropic wire.
+fn streamed(frames: &[Value]) -> Result<crate::completion::CompletionResponse, ProviderError> {
+    let wire = AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6);
+    crate::test_utils::decode_reply(
+        &wire,
+        &CompletionRequest::new("hello"),
+        Mode::Streaming,
+        frames
+            .iter()
+            .map(|frame| WireFrame::Text(frame.to_string())),
+        Value::Null,
+    )
+}
+
+/// The frames of one content block: its start, its deltas and its stop.
+fn block(index: usize, start: Value, deltas: &[Value]) -> Vec<Value> {
+    std::iter::once(json!({"type": "content_block_start", "index": index, "content_block": start}))
+        .chain(
+            deltas.iter().map(
+                |delta| json!({"type": "content_block_delta", "index": index, "delta": delta}),
+            ),
+        )
+        .chain([json!({"type": "content_block_stop", "index": index})])
         .collect()
 }
 
-/// Interpret one event, returning the adapter's raw output items.
-fn interpret_items(
-    adapter: &mut MessagesDecoder,
-    event: StreamingEvent,
-) -> Vec<Result<StreamEvent, ProviderError>> {
-    let mut out = AdapterOutput::new();
-    adapter.interpret(event, &mut out);
-    out.into_items()
+/// A stream of `blocks` ending with `stop_reason`.
+fn reply(blocks: Vec<Vec<Value>>, stop_reason: &str) -> Vec<Value> {
+    std::iter::once(json!({"type": "message_start", "message": {
+        "id": "msg_1", "type": "message", "role": "assistant", "model": CLAUDE_SONNET_4_6,
+        "content": [], "stop_reason": null, "stop_sequence": null,
+        "usage": {"input_tokens": 3, "output_tokens": 1}
+    }}))
+    .chain(blocks.into_iter().flatten())
+    .chain([json!({"type": "message_delta",
+        "delta": {"stop_reason": stop_reason, "stop_sequence": null},
+        "usage": {"output_tokens": 5}})])
+    .collect()
 }
 
-/// Interpret a sequence of events through one adapter and one output
-/// buffer, so the text-block bookkeeping spans the whole sequence exactly
-/// as it does on the live driver.
-fn interpret_all(
-    adapter: &mut MessagesDecoder,
-    events: impl IntoIterator<Item = StreamingEvent>,
-) -> Vec<Result<StreamEvent, ProviderError>> {
-    let mut out = AdapterOutput::new();
-    for event in events {
-        adapter.interpret(event, &mut out);
+/// The provider item a decoded block holds.
+fn item(content: &AssistantContent) -> Option<&Value> {
+    match content {
+        AssistantContent::Opaque(Opaque { item, .. }) => Some(item),
+        content => content.native_item(),
     }
-    out.into_items()
-}
-
-/// The one terminal frame: a `message_delta` carrying `stop_reason`.
-fn message_delta(stop_reason: &str, usage: PartialUsage) -> StreamingEvent {
-    StreamingEvent::MessageDelta {
-        delta: MessageDelta {
-            stop_reason: Some(stop_reason.to_string()),
-            stop_sequence: None,
-        },
-        usage,
-    }
-}
-
-/// Wrap hand-built decoder output as the stream
-/// [`crate::streaming::StreamingCompletionResponse`] consumes, exactly as
-/// the driver would yield it.
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-fn to_stream_result(
-    items: Vec<Result<StreamEvent, ProviderError>>,
-) -> crate::streaming::StreamingResult {
-    Box::pin(futures::stream::iter(items))
-}
-
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-fn to_stream_result(
-    items: Vec<Result<StreamEvent, ProviderError>>,
-) -> crate::streaming::StreamingResult {
-    Box::pin(futures::stream::iter(items))
 }
 
 /// The streaming request body the [`Messages`](super::super::wire::Messages)
@@ -90,88 +99,89 @@ fn built_streaming_body(
 ) -> Result<Value, ProviderError> {
     use crate::wire::{Body, Mode, Wire};
 
-    let wire = crate::providers::anthropic::wire::Anthropic::new("test-key").messages(model);
+    let wire =
+        crate::providers::anthropic::wire::AnthropicConfig::new("test-key").completion(model);
     let wire = if strict_tools {
         wire.with_strict_tools()
     } else {
         wire
     };
+    let request = <Completion as crate::wire::Operation>::prepare(request, &wire.describe())?;
     let encoded = wire.encode(request, Mode::Streaming)?;
-    let request = encoded
-        .requests
-        .first()
-        .ok_or_else(|| ProviderError::Request("the wire encoded no request".into()))?;
-    match request.body() {
+    match encoded.request.body() {
         Body::Bytes(bytes) => Ok(serde_json::from_slice(bytes)?),
-        Body::Multipart(_) => Err(ProviderError::Request(
-            "the Messages endpoint takes JSON".into(),
-        )),
+        Body::Multipart(_) => Err(ProviderError::request("the Messages endpoint takes JSON")),
     }
 }
 
 #[test]
 fn test_streaming_tool_build_marks_final_combined_tool() {
-    let mut additional_params = json!({
-        "tools": [{
-            "name": "provider_tool",
-            "description": "Provider tool",
-            "input_schema": {"type": "object"}
-        }]
-    });
-
-    let mut tools = build_tool_definitions(
-        vec![crate::completion::ToolDefinition {
-            name: "rig_tool".to_string(),
+    let request = CompletionRequest::new(RigMessage::user("Hi"))
+        .max_tokens(64)
+        .tools(vec![crate::completion::ToolDefinition {
+            name: crate::message::ToolName::new("rig_tool").expect("tool name"),
             description: "Rig tool".to_string(),
             parameters: json!({"type": "object", "properties": {}}),
-        }],
-        &mut additional_params,
-        None,
-    )
-    .unwrap();
-    let mut system: Vec<SystemContent> = Vec::new();
-    let mut messages: Vec<Message> = Vec::new();
-    apply_prompt_cache_control(&mut system, &mut messages, &mut tools, true, None, None).unwrap();
-
+            annotations: Default::default(),
+        }])
+        .additional_params(json!({
+            "tools": [{
+                "name": "provider_tool",
+                "description": "Provider tool",
+                "input_schema": {"type": "object"}
+            }]
+        }));
+    let wire = AnthropicConfig::new("test-key")
+        .completion(CLAUDE_SONNET_4_6)
+        .with_prompt_caching();
+    let body = streamed_body(&wire, request);
+    let tools = body["tools"].as_array().expect("tools");
     assert_eq!(tools.len(), 2);
     assert!(tools[0].get("cache_control").is_none());
     assert_eq!(tools[1]["name"], "provider_tool");
     assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
 }
 
+/// The streaming body `wire` encodes for `request`.
+fn streamed_body(
+    wire: &crate::providers::anthropic::Messages,
+    request: CompletionRequest,
+) -> Value {
+    use crate::wire::Wire;
+    crate::test_utils::json_body(
+        &wire
+            .encode(request, Mode::Streaming)
+            .expect("the request encodes")
+            .request,
+    )
+}
+
 #[test]
 fn streaming_request_keeps_documents_after_leading_system_messages() {
-    let request = CompletionRequest {
-        model: None,
-        chat_history: vec![
-            RigMessage::system("System prompt"),
-            RigMessage::assistant("Earlier assistant turn"),
-            RigMessage::system("Mid-conversation instruction"),
-            RigMessage::user("Prompt"),
-        ],
-        documents: vec![RigDocument {
-            id: "doc1".to_string(),
-            text: "Document text.".to_string(),
-            additional_props: Default::default(),
-        }],
-        tools: vec![],
-        temperature: None,
-        max_tokens: Some(64),
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    };
+    let request = CompletionRequest::from(vec![
+        RigMessage::system("System prompt"),
+        RigMessage::assistant("Earlier assistant turn"),
+        RigMessage::system("Mid-conversation instruction"),
+        RigMessage::user("Prompt"),
+    ])
+    .max_tokens(64)
+    .documents(vec![RigDocument {
+        id: "doc1".to_string(),
+        text: "Document text.".to_string(),
+        additional_props: Default::default(),
+    }]);
 
     let body = built_streaming_body(CLAUDE_OPUS_4_8, request, false)
         .expect("streaming request body should build");
 
     assert_eq!(body["system"][0]["text"], "System prompt");
-    assert_eq!(body["system"][1]["text"], "Mid-conversation instruction");
+    assert_eq!(body["system"].as_array().map(Vec::len), Some(1));
     let messages = body["messages"]
         .as_array()
         .expect("messages should be array");
-    assert_eq!(messages.len(), 3);
+    // The misplaced mid-conversation instruction follows the user turn.
+    assert_eq!(messages.len(), 4);
+    assert_eq!(messages[3]["role"], "system");
     assert_eq!(messages[0]["role"], "user");
     assert!(
         messages[0].to_string().contains("<file id: doc1>"),
@@ -198,21 +208,13 @@ fn streaming_body_is_blocking_body_plus_stream_flag_and_carries_output_schema() 
     }))
     .expect("schema should deserialize");
 
-    let request = CompletionRequest {
-        model: None,
-        chat_history: vec![
-            RigMessage::system("You are helpful"),
-            RigMessage::user("What's the weather?"),
-        ],
-        documents: vec![],
-        tools: vec![],
-        temperature: Some(0.5),
-        max_tokens: Some(64),
-        tool_choice: None,
-        additional_params: None,
-        output_schema: Some(schema),
-        record_telemetry_content: false,
-    };
+    let request = CompletionRequest::from(vec![
+        RigMessage::system("You are helpful"),
+        RigMessage::user("What's the weather?"),
+    ])
+    .temperature(0.5)
+    .max_tokens(64)
+    .output_schema(schema);
 
     let streaming_body = built_streaming_body(CLAUDE_OPUS_4_8, request.clone(), false)
         .expect("streaming request body should build");
@@ -235,16 +237,13 @@ fn streaming_body_is_blocking_body_plus_stream_flag_and_carries_output_schema() 
     // Unification invariant: the streaming body is exactly the blocking body
     // (built via the same typed request) plus `stream: true`. Pins the two
     // wire formats together so a future edit can't reintroduce drift.
-    let blocking = AnthropicCompletionRequest::try_from(AnthropicRequestParams {
-        model: CLAUDE_OPUS_4_8,
-        request,
-        prompt_caching: false,
-        automatic_caching: false,
-        automatic_caching_ttl: None,
-        static_prefix_cache_ttl: None,
-    })
-    .expect("blocking request body should build");
-    let mut expected = serde_json::to_value(&blocking).expect("serialize blocking body");
+    let wire = crate::providers::anthropic::wire::AnthropicConfig::new("test-key")
+        .completion(CLAUDE_OPUS_4_8);
+    let mut expected = crate::test_utils::json_body(
+        &crate::wire::Wire::encode(&wire, request, Mode::Unary)
+            .expect("blocking request body should build")
+            .request,
+    );
     expected
         .as_object_mut()
         .expect("body is an object")
@@ -254,92 +253,14 @@ fn streaming_body_is_blocking_body_plus_stream_flag_and_carries_output_schema() 
 }
 
 #[test]
-fn streaming_body_keeps_explicit_tool_choice_auto_when_tools_present_but_unset() {
-    let request = CompletionRequest {
-        model: None,
-        chat_history: vec![RigMessage::user("Add 2 and 3")],
-        documents: vec![],
-        tools: vec![crate::completion::ToolDefinition {
-            name: "add".to_string(),
-            description: "Add x and y".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": { "x": { "type": "integer" } }
-            }),
-        }],
-        temperature: None,
-        max_tokens: Some(64),
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    };
-
-    let body = built_streaming_body(CLAUDE_OPUS_4_8, request, false)
-        .expect("streaming request body should build");
-
-    // Tools advertised + `tool_choice` unset must still carry the explicit
-    // `auto` the streaming wire format has always sent (parity with recorded
-    // fixtures), even though the blocking typed request omits it.
-    assert_eq!(body["tool_choice"], json!({ "type": "auto" }));
-    assert!(body["tools"].is_array());
-}
-
-#[test]
-fn streaming_body_applies_strict_tool_opt_in() {
-    let request = CompletionRequest {
-        model: None,
-        chat_history: vec![RigMessage::user("Look this up")],
-        documents: vec![],
-        tools: vec![crate::completion::ToolDefinition {
-            name: "lookup".to_string(),
-            description: "Look up a value".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": { "query": { "type": "string" } },
-                "required": ["query"]
-            }),
-        }],
-        temperature: None,
-        max_tokens: Some(64),
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    };
-
-    let body = built_streaming_body(CLAUDE_OPUS_4_8, request, true)
-        .expect("streaming request body should build");
-
-    assert_eq!(body["tools"][0]["strict"], true);
-    assert_eq!(
-        body["tools"][0]["input_schema"]["additionalProperties"],
-        false
-    );
-    assert_eq!(
-        body["tools"][0]["input_schema"]["required"],
-        json!(["query"])
-    );
-}
-
-#[test]
 fn streaming_body_drops_tool_choice_when_no_tools_are_advertised() {
     // The typed request serializes a caller-set `tool_choice` regardless of
     // whether tools are present, but the streaming path has always emitted
     // `tool_choice` *only* alongside a non-empty tool set (Anthropic rejects it
     // otherwise). A `tool_choice` set with no tools must not reach the wire.
-    let request = CompletionRequest {
-        model: None,
-        chat_history: vec![RigMessage::user("Hi")],
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: Some(64),
-        tool_choice: Some(crate::message::ToolChoice::Auto),
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    };
+    let request = CompletionRequest::new(RigMessage::user("Hi"))
+        .max_tokens(64)
+        .tool_choice(crate::message::ToolChoice::Auto);
 
     let body = built_streaming_body(CLAUDE_OPUS_4_8, request, false)
         .expect("streaming request body should build");
@@ -351,1152 +272,193 @@ fn streaming_body_drops_tool_choice_when_no_tools_are_advertised() {
     assert!(body.get("tools").is_none());
 }
 
+/// Signature fragments concatenate onto the opening signature, as pi
+/// assembles them, and the thinking item holds the whole block.
 #[test]
-fn test_streaming_prompt_cache_control_uses_raw_top_level_ttl() {
-    let mut additional_params = json!({
-        "cache_control": {"type": "ephemeral", "ttl": "1h"}
-    });
-    let top_level_cache_control =
-        resolve_top_level_cache_control(false, None, &mut additional_params).unwrap();
-    let mut tools = build_tool_definitions(
-        vec![crate::completion::ToolDefinition {
-            name: "rig_tool".to_string(),
-            description: "Rig tool".to_string(),
-            parameters: json!({"type": "object", "properties": {}}),
-        }],
-        &mut additional_params,
-        None,
-    )
-    .unwrap();
-    let mut system = vec![SystemContent::Text {
-        text: "System prompt".to_string(),
-        cache_control: None,
-    }];
-    let mut messages: Vec<Message> = Vec::new();
-
-    apply_prompt_cache_control(
-        &mut system,
-        &mut messages,
-        &mut tools,
-        true,
-        None,
-        top_level_cache_control.as_ref(),
-    )
-    .unwrap();
-
-    assert_eq!(tools[0]["cache_control"]["type"], "ephemeral");
-    assert_eq!(tools[0]["cache_control"]["ttl"], "1h");
-    match &system[0] {
-        SystemContent::Text {
-            cache_control: Some(CacheControl::Ephemeral { ttl }),
-            ..
-        } => assert_eq!(ttl.as_ref(), Some(&CacheTtl::OneHour)),
-        other => panic!("expected system cache_control, got {other:?}"),
-    }
-    assert!(additional_params.get("cache_control").is_none());
-}
-
-#[test]
-fn test_thinking_delta_deserialization() {
-    let json = r#"{"type": "thinking_delta", "thinking": "Let me think about this..."}"#;
-    let delta: ContentDelta = serde_json::from_str(json).unwrap();
-
-    match delta {
-        ContentDelta::ThinkingDelta { thinking } => {
-            assert_eq!(thinking, "Let me think about this...");
-        }
-        _ => panic!("Expected ThinkingDelta variant"),
-    }
-}
-
-#[test]
-fn test_signature_delta_deserialization() {
-    let json = r#"{"type": "signature_delta", "signature": "abc123def456"}"#;
-    let delta: ContentDelta = serde_json::from_str(json).unwrap();
-
-    match delta {
-        ContentDelta::SignatureDelta { signature } => {
-            assert_eq!(signature, "abc123def456");
-        }
-        _ => panic!("Expected SignatureDelta variant"),
-    }
-}
-
-#[test]
-fn test_thinking_delta_streaming_event_deserialization() {
-    let json = r#"{
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {
-                "type": "thinking_delta",
-                "thinking": "First, I need to understand the problem."
-            }
-        }"#;
-
-    let event: StreamingEvent = serde_json::from_str(json).unwrap();
-
-    match event {
-        StreamingEvent::ContentBlockDelta { index, delta } => {
-            assert_eq!(index, 0);
-            match delta {
-                ContentDelta::ThinkingDelta { thinking } => {
-                    assert_eq!(thinking, "First, I need to understand the problem.");
-                }
-                _ => panic!("Expected ThinkingDelta"),
-            }
-        }
-        _ => panic!("Expected ContentBlockDelta event"),
-    }
-}
-
-#[test]
-fn test_signature_delta_streaming_event_deserialization() {
-    let json = r#"{
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {
-                "type": "signature_delta",
-                "signature": "ErUBCkYICBgCIkCaGbqC85F4"
-            }
-        }"#;
-
-    let event: StreamingEvent = serde_json::from_str(json).unwrap();
-
-    match event {
-        StreamingEvent::ContentBlockDelta { index, delta } => {
-            assert_eq!(index, 0);
-            match delta {
-                ContentDelta::SignatureDelta { signature } => {
-                    assert_eq!(signature, "ErUBCkYICBgCIkCaGbqC85F4");
-                }
-                _ => panic!("Expected SignatureDelta"),
-            }
-        }
-        _ => panic!("Expected ContentBlockDelta event"),
-    }
-}
-
-#[test]
-fn test_handle_thinking_delta_event() {
-    let event = StreamingEvent::ContentBlockDelta {
-        index: 0,
-        delta: ContentDelta::ThinkingDelta {
-            thinking: "Analyzing the request...".to_string(),
-        },
-    };
-
-    let mut adapter = adapter();
-    let events = interpret(&mut adapter, event);
-
-    // An unseen reasoning id opens its block before the first delta.
-    let id = crate::streaming::MintKind::Block.for_wire_index(0);
-    assert_eq!(
-        events,
-        vec![
-            StreamEvent::BlockStart {
-                id: id.clone(),
-                source_order: None,
-                kind: BlockKind::Reasoning { provider_id: None },
-            },
-            StreamEvent::BlockDelta {
-                id,
-                delta: Delta::Reasoning {
-                    text: "Analyzing the request...".to_string(),
-                },
-            },
-        ]
+fn thinking_assembles_its_text_and_signature_into_its_item() {
+    let frames = reply(
+        vec![block(
+            0,
+            json!({"type": "thinking", "thinking": "", "signature": "open-"}),
+            &[
+                json!({"type": "thinking_delta", "thinking": "Let me "}),
+                json!({"type": "thinking_delta", "thinking": "think."}),
+                json!({"type": "signature_delta", "signature": "sig_"}),
+                json!({"type": "signature_delta", "signature": "end"}),
+            ],
+        )],
+        "end_turn",
     );
-
-    // The block is tracked (its signature may still arrive); the text
-    // itself accumulates in the shared accumulator, not here.
-    assert!(adapter.current_thinking.is_some());
-}
-
-#[test]
-fn test_handle_signature_delta_event() {
-    let event = StreamingEvent::ContentBlockDelta {
-        index: 0,
-        delta: ContentDelta::SignatureDelta {
-            signature: "test_signature".to_string(),
-        },
+    let response = streamed(&frames).expect("the reply folds");
+    let [AssistantContent::Reasoning(reasoning)] = response.choice.as_slice() else {
+        panic!("one reasoning block: {:?}", response.choice);
     };
-
-    let mut adapter = adapter();
-    let events = interpret(&mut adapter, event);
-
-    // SignatureDelta should not yield anything
-    assert!(events.is_empty());
-
-    // But signature should be captured in thinking state
-    assert!(adapter.current_thinking.is_some());
+    assert_eq!(reasoning.text, "Let me think.");
+    assert!(!reasoning.redacted);
     assert_eq!(
-        adapter.current_thinking.unwrap().signature,
-        "test_signature"
+        item(&response.choice[0]),
+        Some(
+            &json!({"type": "thinking", "thinking": "Let me think.", "signature": "open-sig_end"})
+        )
     );
 }
 
 #[test]
-fn test_handle_redacted_thinking_content_block_start_event() {
-    let event = StreamingEvent::ContentBlockStart {
-        index: 0,
-        content_block: Content::RedactedThinking {
-            data: "redacted_blob".to_string(),
-        },
-    };
-    let mut adapter = adapter();
-    let events = interpret(&mut adapter, event);
-
-    // A whole reasoning block is its start and its authoritative end.
-    let id = crate::streaming::MintKind::Block.for_wire_index(0);
-    assert_eq!(events.len(), 2);
-    assert_eq!(
-        events[0],
-        StreamEvent::BlockStart {
-            id: id.clone(),
-            source_order: None,
-            kind: BlockKind::Reasoning { provider_id: None },
-        }
+fn redacted_thinking_is_a_redacted_block_holding_its_payload() {
+    let frames = reply(
+        vec![block(
+            0,
+            json!({"type": "redacted_thinking", "data": "redacted_blob"}),
+            &[],
+        )],
+        "end_turn",
     );
-    match &events[1] {
-        StreamEvent::BlockEnd {
-            id: end_id,
-            end:
-                BlockClose::Reasoning {
-                    reasoning: Some(reasoning),
-                    signature: None,
-                    wire_sent: true,
-                },
-            ..
-        } => {
-            assert_eq!(*end_id, id);
-            assert_eq!(
-                reasoning.content,
-                vec![ReasoningContent::Redacted {
-                    data: "redacted_blob".to_string()
-                }]
-            );
-        }
-        other => panic!("Expected Redacted reasoning block end, got {other:?}"),
-    }
+    let response = streamed(&frames).expect("the reply folds");
+    let [AssistantContent::Reasoning(Reasoning { text, redacted, .. })] =
+        response.choice.as_slice()
+    else {
+        panic!("one reasoning block: {:?}", response.choice);
+    };
+    assert!(text.is_empty() && *redacted);
+    assert_eq!(
+        item(&response.choice[0]),
+        Some(&json!({"type": "redacted_thinking", "data": "redacted_blob"}))
+    );
 }
 
-/// The adaptive-thinking wire shape, exactly as recorded in
-/// `crates/rig-cassette/fixtures/cassettes/anthropic/opus_4_7/messages_adaptive_thinking_streaming_smoke.yaml`:
-/// `content_block_start` opens the block with an EMPTY `thinking` and an
-/// EMPTY `signature`, a `signature_delta` carries the whole signature, and
-/// no `thinking_delta` ever arrives. The block's only content is its
-/// signature, and it must survive `content_block_stop`.
+/// A call's item holds the input its fragments assembled, and keeps every
+/// field the provider sent, `caller` included.
 #[test]
-fn signature_only_thinking_block_survives_content_block_stop() {
-    let mut adapter = adapter();
-
-    let start = StreamingEvent::ContentBlockStart {
-        index: 0,
-        content_block: Content::Thinking {
-            thinking: String::new(),
-            signature: Some(String::new()),
-        },
+fn a_call_assembles_its_input_into_its_item() {
+    let frames = reply(
+        vec![block(
+            0,
+            json!({"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {},
+                "caller": {"type": "direct"}}),
+            &[
+                json!({"type": "input_json_delta", "partial_json": "{\"location\":"}),
+                json!({"type": "input_json_delta", "partial_json": "\"Paris\"}"}),
+            ],
+        )],
+        "tool_use",
+    );
+    let response = streamed(&frames).expect("the reply folds");
+    let [AssistantContent::ToolCall(call)] = response.choice.as_slice() else {
+        panic!("one call: {:?}", response.choice);
     };
-    assert!(interpret(&mut adapter, start).is_empty());
-
-    let signature = StreamingEvent::ContentBlockDelta {
-        index: 0,
-        delta: ContentDelta::SignatureDelta {
-            signature: "the_whole_signature".to_string(),
-        },
-    };
-    assert!(interpret(&mut adapter, signature).is_empty());
-
-    let stop = StreamingEvent::ContentBlockStop { index: 0 };
-    let events = interpret(&mut adapter, stop);
-    let end = events
-        .last()
-        .expect("signature-only thinking block must not be dropped");
-
-    match end {
-        StreamEvent::BlockEnd {
-            id,
-            end: BlockClose::Reasoning { signature, .. },
-            ..
-        } => {
-            assert_eq!(*id, crate::streaming::MintKind::Block.for_wire_index(0));
-            assert_eq!(signature.as_deref(), Some("the_whole_signature"));
-        }
-        other => panic!("Expected a signed lifecycle end, got {other:?}"),
-    }
+    assert_eq!(call.id.to_string(), "toolu_1");
+    assert_eq!(
+        call.function.arguments_value(),
+        json!({"location": "Paris"})
+    );
+    assert_eq!(
+        item(&response.choice[0]),
+        Some(
+            &json!({"type": "tool_use", "id": "toolu_1", "name": "lookup",
+            "input": {"location": "Paris"}, "caller": {"type": "direct"}})
+        )
+    );
+    assert_eq!(response.stop(), StopReason::ToolUse);
 }
 
-/// Forward compat: a block that delivers its whole signature on
-/// `content_block_start` and sends no `signature_delta` keeps it.
+/// A stream that never states its stop reason is truncated, whatever else
+/// it ended with: a `message_delta` without one, or `message_stop` alone.
 #[test]
-fn signature_delivered_only_on_content_block_start_is_kept() {
-    let mut adapter = adapter();
-
-    let start = StreamingEvent::ContentBlockStart {
-        index: 0,
-        content_block: Content::Thinking {
-            thinking: String::new(),
-            signature: Some("up_front_signature".to_string()),
-        },
-    };
-    assert!(interpret(&mut adapter, start).is_empty());
-
-    let stop = StreamingEvent::ContentBlockStop { index: 0 };
-    let events = interpret(&mut adapter, stop);
-    match events
-        .last()
-        .expect("an up-front signature must not be dropped")
-    {
-        StreamEvent::BlockEnd {
-            end: BlockClose::Reasoning { signature, .. },
-            ..
-        } => {
-            assert_eq!(signature.as_deref(), Some("up_front_signature"));
-        }
-        other => panic!("Expected a signed lifecycle end, got {other:?}"),
+fn a_stream_without_its_stop_reason_never_ends_successfully() {
+    let mut frames = reply(
+        vec![block(0, json!({"type": "text", "text": "partial"}), &[])],
+        "end_turn",
+    );
+    if let Some(delta) = frames.last_mut() {
+        delta["delta"]["stop_reason"] = Value::Null;
     }
+    frames.push(json!({"type": "message_stop"}));
+    assert!(matches!(streamed(&frames), Err(ProviderError::Truncated)));
 }
 
-/// The opening `signature` is a fallback, never a prefix the deltas
-/// extend: a delta-bearing block must publish exactly what the deltas
-/// assembled, or the value replayed to Anthropic is corrupt.
 #[test]
-fn signature_deltas_supersede_the_opening_signature() {
-    let mut adapter = adapter();
+fn input_to_a_text_block_fails_the_reply() {
+    let frames = reply(
+        vec![block(
+            0,
+            json!({"type": "text", "text": ""}),
+            &[json!({"type": "input_json_delta", "partial_json": "{}"})],
+        )],
+        "end_turn",
+    );
+    assert!(streamed(&frames).is_err());
+}
 
-    let start = StreamingEvent::ContentBlockStart {
-        index: 0,
-        content_block: Content::Thinking {
-            thinking: String::new(),
-            signature: Some("opening".to_string()),
-        },
-    };
-    assert!(interpret(&mut adapter, start).is_empty());
-
-    for fragment in ["delta_", "assembled"] {
-        let signature = StreamingEvent::ContentBlockDelta {
-            index: 0,
-            delta: ContentDelta::SignatureDelta {
-                signature: fragment.to_string(),
-            },
+/// Citations arrive as deltas onto a text block that opened with `null` or
+/// an empty list, and land on its item in order.
+#[test]
+fn citation_deltas_land_on_the_text_item() {
+    let citation = json!({"type": "char_location", "cited_text": "The grass is green.",
+        "document_index": 0, "document_title": "Example", "start_char_index": 0,
+        "end_char_index": 20});
+    for opening in [json!(null), json!([])] {
+        let frames = reply(
+            vec![block(
+                0,
+                json!({"type": "text", "text": "", "citations": opening}),
+                &[
+                    json!({"type": "citations_delta", "citation": citation}),
+                    json!({"type": "text_delta", "text": "the grass is green"}),
+                ],
+            )],
+            "end_turn",
+        );
+        let response = streamed(&frames).expect("the reply folds");
+        let [AssistantContent::Text(text)] = response.choice.as_slice() else {
+            panic!("one text block: {:?}", response.choice);
         };
-        assert!(interpret(&mut adapter, signature).is_empty());
-    }
-
-    let stop = StreamingEvent::ContentBlockStop { index: 0 };
-    let events = interpret(&mut adapter, stop);
-    match events.last().expect("thinking block should be closed") {
-        StreamEvent::BlockEnd {
-            end: BlockClose::Reasoning { signature, .. },
-            ..
-        } => {
-            assert_eq!(signature.as_deref(), Some("delta_assembled"));
-        }
-        other => panic!("Expected a signed lifecycle end, got {other:?}"),
+        assert_eq!(text.text, "the grass is green");
+        assert_eq!(
+            response.choice[0]
+                .native_item()
+                .and_then(|item| item.get("citations")),
+            Some(&json!([citation]))
+        );
     }
 }
 
-/// `content_block_start` can carry the block's opening text; discarding it
-/// would truncate the block the accumulator assembles from deltas.
+/// pi's fallback rule: a leading `fallback` block marks the model that
+/// took over and never replays; one after output began fails the reply.
 #[test]
-fn thinking_block_start_text_streams_as_the_first_delta() {
-    let mut adapter = adapter();
-    let id = crate::streaming::MintKind::Block.for_wire_index(2);
-
-    let start = StreamingEvent::ContentBlockStart {
-        index: 2,
-        content_block: Content::Thinking {
-            thinking: "opening ".to_string(),
-            signature: None,
-        },
-    };
-    // The opening payload's text is a delta like any other; the shared
-    // accumulator owns the block's text — no adapter-side restatement
-    // buffer exists to seed.
-    assert_eq!(
-        interpret(&mut adapter, start),
+fn a_fallback_block_is_kept_first_and_an_error_after_output() {
+    let fallback = json!({"type": "fallback", "model": "claude-opus-4-8"});
+    let text = json!({"type": "text", "text": ""});
+    let leading = streamed(&reply(
         vec![
-            StreamEvent::BlockStart {
-                id: id.clone(),
-                source_order: None,
-                kind: BlockKind::Reasoning { provider_id: None },
-            },
-            StreamEvent::BlockDelta {
-                id: id.clone(),
-                delta: Delta::Reasoning {
-                    text: "opening ".to_string(),
-                },
-            },
-        ]
-    );
-
-    let delta = StreamingEvent::ContentBlockDelta {
-        index: 2,
-        delta: ContentDelta::ThinkingDelta {
-            thinking: "rest".to_string(),
-        },
-    };
-    assert!(!interpret(&mut adapter, delta).is_empty());
-
-    let stop = StreamingEvent::ContentBlockStop { index: 2 };
-    match interpret(&mut adapter, stop)
-        .last()
-        .expect("the stop emits the lifecycle end")
-    {
-        StreamEvent::BlockEnd {
-            id: end_id,
-            end:
-                BlockClose::Reasoning {
-                    reasoning: None,
-                    signature: None,
-                    wire_sent: true,
-                },
-            ..
-        } => {
-            assert_eq!(*end_id, id);
-        }
-        other => panic!("Expected a bare lifecycle end, got {other:?}"),
-    }
-}
-
-/// A block with neither text nor signature carries nothing to replay.
-#[test]
-fn wholly_empty_thinking_block_is_dropped() {
-    let mut adapter = adapter();
-
-    let start = StreamingEvent::ContentBlockStart {
-        index: 0,
-        content_block: Content::Thinking {
-            thinking: String::new(),
-            signature: None,
-        },
-    };
-    assert!(interpret(&mut adapter, start).is_empty());
-
-    let stop = StreamingEvent::ContentBlockStop { index: 0 };
-    // The stop emits a bare lifecycle end; with nothing streamed and no
-    // signature, the shared accumulator records no part (a bare end for
-    // a never-opened key is a no-op).
-    match interpret(&mut adapter, stop)
-        .last()
-        .expect("the stop emits the lifecycle end")
-    {
-        StreamEvent::BlockEnd {
-            end:
-                BlockClose::Reasoning {
-                    reasoning: None,
-                    signature: None,
-                    ..
-                },
-            ..
-        } => {}
-        other => panic!("Expected a bare lifecycle end, got {other:?}"),
-    }
-}
-
-#[test]
-fn test_handle_text_delta_event() {
-    let event = StreamingEvent::ContentBlockDelta {
-        index: 0,
-        delta: ContentDelta::TextDelta {
-            text: "Hello, world!".to_string(),
-        },
-    };
-
-    let mut adapter = adapter();
-    let events = interpret(&mut adapter, event);
-
-    // A bare text delta with no open text block opens a minted one first.
-    assert_eq!(events.len(), 2);
-    assert!(matches!(
-        &events[0],
-        StreamEvent::BlockStart {
-            kind: BlockKind::Text {
-                additional_params: None
-            },
-            ..
-        }
-    ));
-    match &events[1] {
-        StreamEvent::BlockDelta {
-            delta: Delta::Text { text },
-            ..
-        } => {
-            assert_eq!(text, "Hello, world!");
-        }
-        other => panic!("Expected a text delta, got {other:?}"),
-    }
-}
-
-#[test]
-fn test_handle_text_block_start_event() {
-    let event = StreamingEvent::ContentBlockStart {
-        index: 0,
-        content_block: Content::Text {
-            text: String::new(),
-            citations: Vec::new(),
-            cache_control: None,
-        },
-    };
-
-    let mut adapter = adapter();
-    let events = interpret(&mut adapter, event);
-
-    assert_eq!(
-        events,
-        vec![StreamEvent::BlockStart {
-            id: crate::streaming::MintKind::Block.for_wire_index(0),
-            source_order: None,
-            kind: BlockKind::Text {
-                additional_params: None
-            },
-        }]
-    );
-}
-
-#[test]
-fn test_thinking_delta_does_not_interfere_with_tool_calls() {
-    // Thinking deltas should still be processed even if a tool call is in progress
-    let event = StreamingEvent::ContentBlockDelta {
-        index: 0,
-        delta: ContentDelta::ThinkingDelta {
-            thinking: "Thinking while tool is active...".to_string(),
-        },
-    };
-
-    let mut adapter = adapter();
-    adapter.current_tool_call = Some(BlockId::wire("tool_123"));
-
-    let events = interpret(&mut adapter, event);
-
-    match events.last() {
-        Some(StreamEvent::BlockDelta {
-            delta: Delta::Reasoning { text },
-            ..
-        }) => {
-            assert_eq!(text, "Thinking while tool is active...");
-        }
-        other => panic!("Expected a reasoning delta, got {other:?}"),
-    }
-
-    // Tool call state should remain unchanged
-    assert!(adapter.current_tool_call.is_some());
-}
-
-#[test]
-fn test_handle_input_json_delta_event() {
-    let event = StreamingEvent::ContentBlockDelta {
-        index: 0,
-        delta: ContentDelta::InputJsonDelta {
-            partial_json: "{\"arg\":\"value".to_string(),
-        },
-    };
-
-    let mut adapter = adapter();
-    adapter.current_tool_call = Some(BlockId::wire("tool_123"));
-
-    let events = interpret(&mut adapter, event);
-
-    // Should emit an arguments delta for the open call (the helper opens
-    // the block first, since this adapter never saw its start).
-    let id = crate::streaming::BlockId::wire("tool_123");
-    assert_eq!(
-        events,
-        vec![
-            StreamEvent::BlockStart {
-                id: id.clone(),
-                source_order: None,
-                kind: BlockKind::ToolCall,
-            },
-            StreamEvent::BlockDelta {
-                id,
-                delta: Delta::ToolArguments {
-                    arguments: "{\"arg\":\"value".to_string(),
-                },
-            },
-        ]
-    );
-
-    // The open block stays open; assembly of the fragment happens in the
-    // shared accumulator.
-    assert!(adapter.current_tool_call.is_some());
-}
-
-#[test]
-fn test_tool_call_accumulation_with_multiple_deltas() {
-    let mut adapter = adapter();
-    adapter.current_tool_call = Some(BlockId::wire("tool_123"));
-
-    // First delta
-    let event1 = StreamingEvent::ContentBlockDelta {
-        index: 0,
-        delta: ContentDelta::InputJsonDelta {
-            partial_json: "{\"location\":".to_string(),
-        },
-    };
-    assert!(!interpret(&mut adapter, event1).is_empty());
-
-    // Second delta
-    let event2 = StreamingEvent::ContentBlockDelta {
-        index: 0,
-        delta: ContentDelta::InputJsonDelta {
-            partial_json: "\"Paris\",".to_string(),
-        },
-    };
-    assert!(!interpret(&mut adapter, event2).is_empty());
-
-    // Third delta
-    let event3 = StreamingEvent::ContentBlockDelta {
-        index: 0,
-        delta: ContentDelta::InputJsonDelta {
-            partial_json: "\"temp\":\"20C\"}".to_string(),
-        },
-    };
-    assert!(!interpret(&mut adapter, event3).is_empty());
-
-    assert!(adapter.current_tool_call.is_some());
-
-    // Final ContentBlockStop hands the block to the shared accumulator,
-    // which finalizes the assembled fragments (`Error` policy: a stopped
-    // block promised complete input). End-to-end assembly of exactly this
-    // fragment sequence is pinned in `streaming::accumulator` unit tests.
-    let stop_event = StreamingEvent::ContentBlockStop { index: 0 };
-    let events = interpret(&mut adapter, stop_event);
-
-    match events.last() {
-        Some(StreamEvent::BlockEnd {
-            id,
-            end: BlockClose::ToolCall(end),
-            ..
-        }) => {
-            assert_eq!(*id, crate::streaming::BlockId::wire("tool_123"));
-            assert!(matches!(
-                end.on_unparseable,
-                crate::streaming::UnparseableToolInput::Error
-            ));
-        }
-        other => panic!("Expected a tool-call end, got {other:?}"),
-    }
-
-    // Tool call state should be taken
-    assert!(adapter.current_tool_call.is_none());
-}
-
-#[test]
-fn test_citations_delta_streaming_event_deserialization() {
-    let json = r#"{
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {
-                "type": "citations_delta",
-                "citation": {
-                    "type": "char_location",
-                    "cited_text": "The grass is green.",
-                    "document_index": 0,
-                    "document_title": "Example",
-                    "start_char_index": 0,
-                    "end_char_index": 20
-                }
-            }
-        }"#;
-
-    let event: StreamingEvent = serde_json::from_str(json).unwrap();
-    let StreamingEvent::ContentBlockDelta { index, delta } = event else {
-        panic!("expected ContentBlockDelta");
-    };
-    assert_eq!(index, 0);
-    let ContentDelta::CitationsDelta { citation } = delta else {
-        panic!("expected CitationsDelta");
-    };
-    let crate::providers::anthropic::completion::Citation::CharLocation(citation) = citation else {
-        panic!("expected CharLocation");
-    };
-    assert_eq!(citation.start_char_index, 0);
-    assert_eq!(citation.end_char_index, 20);
-}
-
-#[test]
-fn test_search_result_citations_delta_streaming_event_deserialization() {
-    let json = r#"{
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {
-                "type": "citations_delta",
-                "citation": {
-                    "type": "search_result_location",
-                    "cited_text": "API requests require a key.",
-                    "source": "https://docs.example.com/api-reference",
-                    "title": "API Reference",
-                    "search_result_index": 0,
-                    "start_block_index": 0,
-                    "end_block_index": 1
-                }
-            }
-        }"#;
-
-    let event: StreamingEvent = serde_json::from_str(json).unwrap();
-    let StreamingEvent::ContentBlockDelta { delta, .. } = event else {
-        panic!("expected ContentBlockDelta");
-    };
-    let ContentDelta::CitationsDelta { citation } = delta else {
-        panic!("expected CitationsDelta");
-    };
-    assert!(matches!(
-        citation,
-        crate::providers::anthropic::completion::Citation::SearchResultLocation(
-            crate::providers::anthropic::completion::SearchResultLocationCitation {
-                search_result_index: 0,
-                start_block_index: 0,
-                end_block_index: 1,
-                ..
-            }
-        )
-    ));
-}
-
-#[test]
-fn test_web_search_result_citations_delta_streaming_event_deserialization() {
-    let json = r#"{
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {
-                "type": "citations_delta",
-                "citation": {
-                    "type": "web_search_result_location",
-                    "cited_text": "Claude Shannon was a mathematician.",
-                    "url": "https://example.com/shannon",
-                    "title": "Claude Shannon",
-                    "encrypted_index": "encrypted-reference"
-                }
-            }
-        }"#;
-
-    let event: StreamingEvent = serde_json::from_str(json).unwrap();
-    let StreamingEvent::ContentBlockDelta { delta, .. } = event else {
-        panic!("expected ContentBlockDelta");
-    };
-    let ContentDelta::CitationsDelta { citation } = delta else {
-        panic!("expected CitationsDelta");
-    };
-    assert!(matches!(
-        citation,
-        crate::providers::anthropic::completion::Citation::WebSearchResultLocation(ref citation)
-            if citation.url == "https://example.com/shannon"
-                && citation.encrypted_index == "encrypted-reference"
-    ));
-}
-
-#[test]
-fn test_web_search_result_citations_delta_allows_null_title() {
-    let json = r#"{
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {
-                "type": "citations_delta",
-                "citation": {
-                    "type": "web_search_result_location",
-                    "cited_text": "Claude Shannon was a mathematician.",
-                    "url": "https://example.com/shannon",
-                    "title": null,
-                    "encrypted_index": "encrypted-reference"
-                }
-            }
-        }"#;
-
-    let event: StreamingEvent = serde_json::from_str(json).unwrap();
-    let StreamingEvent::ContentBlockDelta { delta, .. } = event else {
-        panic!("expected ContentBlockDelta");
-    };
-    let ContentDelta::CitationsDelta { citation } = delta else {
-        panic!("expected CitationsDelta");
-    };
-    assert!(matches!(
-        citation,
-        crate::providers::anthropic::completion::Citation::WebSearchResultLocation(
-            crate::providers::anthropic::completion::WebSearchResultLocationCitation {
-                title: None,
-                ..
-            }
-        )
-    ));
-}
-
-#[test]
-fn test_text_content_block_start_allows_null_citations() {
-    // The Anthropic Messages API emits an explicit `"citations": null` on the
-    // first text `content_block_start` event. `#[serde(default)]` alone covers
-    // a missing field but not an explicit null, so this must deserialize to an
-    // empty citation list rather than failing the whole stream (see #1971).
-    let json = r#"{
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {
-                "type": "text",
-                "text": "",
-                "citations": null
-            }
-        }"#;
-
-    let event: StreamingEvent = serde_json::from_str(json).unwrap();
-    let StreamingEvent::ContentBlockStart { content_block, .. } = event else {
-        panic!("expected ContentBlockStart");
-    };
-    let Content::Text {
-        text, citations, ..
-    } = content_block
-    else {
-        panic!("expected text content block");
-    };
-    assert_eq!(text, "");
-    assert!(citations.is_empty());
-}
-
-#[test]
-fn test_web_search_content_block_start_events_deserialize() {
-    let server_tool_use = r#"{
-            "type": "content_block_start",
-            "index": 1,
-            "content_block": {
-                "type": "server_tool_use",
-                "id": "srvtoolu_01",
-                "name": "web_search",
-                "input": {
-                    "query": "claude shannon birth date"
-                }
-            }
-        }"#;
-    let event: StreamingEvent = serde_json::from_str(server_tool_use).unwrap();
-    assert!(matches!(
-        event,
-        StreamingEvent::ContentBlockStart {
-            content_block: Content::ServerToolUse {
-                ref id,
-                ref name,
-                ref input
-            },
-            ..
-        } if id == "srvtoolu_01"
-            && name == "web_search"
-            && input["query"] == "claude shannon birth date"
-    ));
-
-    let web_search_tool_result = r#"{
-            "type": "content_block_start",
-            "index": 2,
-            "content_block": {
-                "type": "web_search_tool_result",
-                "tool_use_id": "srvtoolu_01",
-                "content": [{
-                    "type": "web_search_result",
-                    "url": "https://example.com/shannon",
-                    "title": "Claude Shannon",
-                    "encrypted_content": "encrypted-content"
-                }]
-            }
-        }"#;
-    let event: StreamingEvent = serde_json::from_str(web_search_tool_result).unwrap();
-    assert!(matches!(
-        event,
-        StreamingEvent::ContentBlockStart {
-            content_block: Content::WebSearchToolResult {
-                ref tool_use_id,
-                ref content
-            },
-            ..
-        } if tool_use_id == "srvtoolu_01"
-            && content[0]["encrypted_content"] == "encrypted-content"
-    ));
-}
-
-#[test]
-fn test_code_execution_tool_result_block_is_preserved() {
-    let event: StreamingEvent = serde_json::from_value(serde_json::json!({
-        "type": "content_block_start",
-        "index": 1,
-        "content_block": {
-            "type": "code_execution_tool_result",
-            "tool_use_id": "srvtoolu_01",
-            "content": {
-                "type": "code_execution_result",
-                "return_code": 0,
-                "stdout": "42\n",
-                "stderr": "",
-                "content": []
-            }
-        }
-    }))
-    .unwrap();
-    let mut adapter = adapter();
-
-    let events = interpret(&mut adapter, event);
-    let Some(StreamEvent::BlockStart {
-        id,
-        kind: BlockKind::Text {
-            additional_params: Some(additional_params),
-        },
-        ..
-    }) = events.first()
-    else {
-        panic!("expected text-start metadata for code_execution_tool_result");
-    };
-    assert_eq!(*id, crate::streaming::MintKind::Block.for_wire_index(1));
-    assert_eq!(
-        additional_params[crate::providers::anthropic::completion::ANTHROPIC_RAW_CONTENT_KEY]["type"],
-        "code_execution_tool_result"
-    );
-    assert_eq!(
-        additional_params[crate::providers::anthropic::completion::ANTHROPIC_RAW_CONTENT_KEY]["content"]
-            ["stdout"],
-        "42\n"
-    );
-}
-
-#[tokio::test]
-async fn test_streaming_web_search_blocks_are_preserved_on_final_choice() {
-    let mut adapter = adapter();
-    let mut out = AdapterOutput::new();
-
-    adapter.interpret(
-        StreamingEvent::ContentBlockStart {
-            index: 0,
-            content_block: Content::ServerToolUse {
-                id: "srvtoolu_01".to_string(),
-                name: "web_search".to_string(),
-                input: serde_json::Value::Null,
-            },
-        },
-        &mut out,
-    );
-    assert!(
-        out.is_empty(),
-        "server_tool_use start should be accumulated until its input JSON is complete"
-    );
-
-    adapter.interpret(
-        StreamingEvent::ContentBlockDelta {
-            index: 0,
-            delta: ContentDelta::InputJsonDelta {
-                partial_json: r#"{"query":"claude shannon birth date"}"#.to_string(),
-            },
-        },
-        &mut out,
-    );
-    assert!(
-        out.is_empty(),
-        "server_tool_use input JSON should not be emitted as a Rig tool-call delta"
-    );
-
-    adapter.interpret(StreamingEvent::ContentBlockStop { index: 0 }, &mut out);
-    assert_eq!(
-        out.len(),
-        1,
-        "server_tool_use stop should produce completed raw metadata"
-    );
-
-    adapter.interpret(
-        StreamingEvent::ContentBlockStart {
-            index: 1,
-            content_block: Content::WebSearchToolResult {
-                tool_use_id: "srvtoolu_01".to_string(),
-                content: serde_json::json!([{
-                    "type": "web_search_result",
-                    "url": "https://example.com/shannon",
-                    "title": "Claude Shannon",
-                    "encrypted_content": "encrypted-content"
-                }]),
-            },
-        },
-        &mut out,
-    );
-    assert_eq!(
-        out.len(),
-        2,
-        "web_search_tool_result block should produce raw metadata"
-    );
-
-    adapter.interpret(
-        StreamingEvent::ContentBlockStart {
-            index: 2,
-            content_block: Content::Text {
-                text: String::new(),
-                citations: Vec::new(),
-                cache_control: None,
-            },
-        },
-        &mut out,
-    );
-    adapter.interpret(
-        StreamingEvent::ContentBlockDelta {
-            index: 2,
-            delta: ContentDelta::TextDelta {
-                text: "Claude Shannon was born on April 30, 1916.".to_string(),
-            },
-        },
-        &mut out,
-    );
-    adapter.interpret(
-        StreamingEvent::ContentBlockDelta {
-            index: 2,
-            delta: ContentDelta::CitationsDelta {
-                citation:
-                    crate::providers::anthropic::completion::Citation::WebSearchResultLocation(
-                        crate::providers::anthropic::completion::WebSearchResultLocationCitation {
-                            cited_text: "Claude Shannon was born on April 30, 1916.".to_string(),
-                            url: "https://example.com/shannon".to_string(),
-                            title: Some("Claude Shannon".to_string()),
-                            encrypted_index: "encrypted-index".to_string(),
-                        },
-                    ),
-            },
-        },
-        &mut out,
-    );
-    adapter.interpret(message_delta("end_turn", PartialUsage::default()), &mut out);
-
-    let mut stream = crate::streaming::StreamingCompletionResponse::stream(
-        "anthropic",
-        to_stream_result(out.into_items()),
-    );
-    while stream.next().await.is_some() {}
-
-    let choice_items = stream.snapshot();
-    assert_eq!(choice_items.len(), 3);
-    assert!(
-        choice_items
-            .iter()
-            .all(|item| !matches!(item, crate::message::AssistantContent::ToolCall(_))),
-        "provider-owned web-search blocks must not become Rig client tool calls"
-    );
-
-    let Some(crate::message::AssistantContent::Text(server_tool_use)) = choice_items.first() else {
-        panic!("expected raw server_tool_use metadata");
-    };
-    assert_eq!(
-        server_tool_use.additional_params.as_ref().unwrap()
-            [crate::providers::anthropic::completion::ANTHROPIC_RAW_CONTENT_KEY]["type"],
-        "server_tool_use"
-    );
-    assert_eq!(
-        server_tool_use.additional_params.as_ref().unwrap()
-            [crate::providers::anthropic::completion::ANTHROPIC_RAW_CONTENT_KEY]["input"]["query"],
-        "claude shannon birth date"
-    );
-
-    let Some(crate::message::AssistantContent::Text(web_search_result)) = choice_items.get(1)
-    else {
-        panic!("expected raw web_search_tool_result metadata");
-    };
-    assert_eq!(
-        web_search_result.additional_params.as_ref().unwrap()
-            [crate::providers::anthropic::completion::ANTHROPIC_RAW_CONTENT_KEY]["content"][0]["encrypted_content"],
-        "encrypted-content"
-    );
-
-    let Some(crate::message::AssistantContent::Text(answer)) = choice_items.get(2) else {
-        panic!("expected answer text");
-    };
-    assert_eq!(answer.text, "Claude Shannon was born on April 30, 1916.");
-    let citations = crate::providers::anthropic::completion::anthropic_citations(answer)
-        .expect("expected preserved citations");
-    assert!(matches!(
-        citations.first(),
-        Some(crate::providers::anthropic::completion::Citation::WebSearchResultLocation(citation))
-            if citation.encrypted_index == "encrypted-index"
-    ));
-}
-
-#[test]
-fn test_handle_citations_delta_event_preserves_metadata() {
-    let event = StreamingEvent::ContentBlockDelta {
-        index: 0,
-        delta: ContentDelta::CitationsDelta {
-            citation: crate::providers::anthropic::completion::Citation::CharLocation(
-                crate::providers::anthropic::completion::CharLocationCitation {
-                    cited_text: "The grass is green.".to_string(),
-                    document_index: 0,
-                    document_title: Some("Example".to_string()),
-                    start_char_index: 0,
-                    end_char_index: 20,
-                },
+            block(0, fallback.clone(), &[]),
+            block(
+                1,
+                text.clone(),
+                &[json!({"type": "text_delta", "text": "hi"})],
             ),
-        },
-    };
-
-    let mut adapter = adapter();
-    let events = interpret(&mut adapter, event);
-
-    let Some(StreamEvent::BlockDelta {
-        delta: Delta::TextMeta { additional_params },
-        ..
-    }) = events.last()
-    else {
-        panic!("expected a text-metadata delta, got {events:?}");
-    };
-    assert_eq!(additional_params["citations"][0]["type"], "char_location");
-}
-
-#[tokio::test]
-async fn test_streaming_citation_deltas_are_preserved_on_final_text() {
-    let citation = crate::providers::anthropic::completion::Citation::CharLocation(
-        crate::providers::anthropic::completion::CharLocationCitation {
-            cited_text: "The grass is green.".to_string(),
-            document_index: 0,
-            document_title: Some("Example".to_string()),
-            start_char_index: 0,
-            end_char_index: 20,
-        },
-    );
-
-    let mut adapter = adapter();
-    let items = interpret_all(
-        &mut adapter,
-        [
-            StreamingEvent::ContentBlockStart {
-                index: 0,
-                content_block: Content::Text {
-                    text: String::new(),
-                    citations: Vec::new(),
-                    cache_control: None,
-                },
-            },
-            StreamingEvent::ContentBlockDelta {
-                index: 0,
-                delta: ContentDelta::TextDelta {
-                    text: "the grass is green".to_string(),
-                },
-            },
-            StreamingEvent::ContentBlockDelta {
-                index: 0,
-                delta: ContentDelta::CitationsDelta {
-                    citation: citation.clone(),
-                },
-            },
-            message_delta("end_turn", PartialUsage::default()),
         ],
-    );
-
-    let mut stream =
-        crate::streaming::StreamingCompletionResponse::stream("anthropic", to_stream_result(items));
-    while stream.next().await.is_some() {}
-
-    let choice_items = stream.snapshot();
-    let Some(crate::message::AssistantContent::Text(text)) = choice_items.first() else {
-        panic!("expected accumulated text item");
-    };
-
-    assert_eq!(text.text, "the grass is green");
-    let citations = crate::providers::anthropic::completion::anthropic_citations(text).unwrap();
-    assert_eq!(citations, vec![citation]);
+        "end_turn",
+    ))
+    .expect("a leading fallback is legal");
+    assert!(matches!(
+        leading.choice.first(),
+        Some(AssistantContent::Opaque(Opaque { replay: false, .. }))
+    ));
+    let late = streamed(&reply(
+        vec![
+            block(0, text, &[json!({"type": "text_delta", "text": "hi"})]),
+            block(1, fallback, &[]),
+        ],
+        "end_turn",
+    ));
+    assert!(late.is_err(), "{late:?}");
 }
 
-/// The `#[serde(other)]` policy fallbacks are gone: classification is the
-/// only policy site. An unmodeled *top-level* event type is `Unknown`
-/// (driver: warn + skip); a `ping` is Known; and a known tag whose payload
-/// this client cannot decode is `Corrupt`, never silently demoted to an
-/// ignorable unknown. An unmodeled *nested* delta type is the one carved
-/// exception (Anthropic's versioning policy reserves the right to add
-/// them): it decodes to [`ContentDelta::Unknown`] and stays a Known
-/// no-op — see the dedicated tests below.
+/// Classification is the only policy site. An unmodeled *top-level* event
+/// type is `Unknown` (driver: warn + skip); a `ping` is Known; and a known
+/// tag whose payload this client cannot decode is `Corrupt`, never silently
+/// demoted to an ignorable unknown. An unmodeled *nested* delta type is
+/// Known and lands in its item.
 #[test]
 fn classify_dispatches_on_the_known_event_list() {
     let adapter = adapter();
@@ -1504,270 +466,90 @@ fn classify_dispatches_on_the_known_event_list() {
     let frame = WireFrame::Text(r#"{"type":"something_new_from_anthropic","field":"x"}"#.into());
     assert!(matches!(
         adapter.classify(frame),
-        crate::providers::internal::wire::WireEvent::Unknown { event_type, .. }
+        crate::wire::WireEvent::Unknown { event_type, .. }
             if event_type == "something_new_from_anthropic"
     ));
 
     let frame = WireFrame::Text(r#"{"type":"ping"}"#.into());
     assert!(matches!(
         adapter.classify(frame),
-        crate::providers::internal::wire::WireEvent::Known(StreamingEvent::Ping)
+        crate::wire::WireEvent::Known(event) if event.kind() == "ping"
     ));
 
     let frame = WireFrame::Text("{not json".into());
     assert!(matches!(
         adapter.classify(frame),
-        crate::providers::internal::wire::WireEvent::Corrupt(_)
+        crate::wire::WireEvent::Corrupt(_)
     ));
 }
 
-/// Forward compat: a novel nested delta type Anthropic ships tomorrow
-/// must not corrupt the whole `content_block_delta` frame — it decodes
-/// to [`ContentDelta::Unknown`] and interprets as a warned no-op, so the
-/// stream continues.
+/// A terminal `message_delta` carrying only the output count (Anthropic's
+/// older shape, and Messages gateways) keeps `message_start`'s cache
+/// counters, so input still counts the cached prefix: 10 uncached, 6 read
+/// and 4 written.
 #[test]
-fn novel_nested_delta_type_is_a_known_noop() {
-    let classifier = adapter();
-    let frame = WireFrame::Text(
-        r#"{"type":"content_block_delta","index":0,"delta":{"type":"banana_delta","x":1}}"#.into(),
+fn cache_usage_from_message_start_survives_output_only_terminal_delta() {
+    let frames = [
+        r#"{"type":"message_start","message":{"id":"msg_1","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0,"cache_creation_input_tokens":4,"cache_read_input_tokens":6,"cache_creation":{"ephemeral_1h_input_tokens":3,"ephemeral_5m_input_tokens":1}}}}"#,
+        r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}"#,
+    ];
+    let decoded = crate::driver::feed_frames!(
+        MessagesDecoder::new(Quirks::anthropic()),
+        document::Message::default(),
+        "anthropic",
+        frames.map(|frame| WireFrame::Text(frame.to_owned()))
     );
-    let crate::providers::internal::wire::WireEvent::Known(event) = classifier.classify(frame)
-    else {
-        panic!("a novel nested delta type must stay a Known event");
-    };
-
-    let mut adapter = adapter();
-    let mut out = AdapterOutput::new();
-    adapter.interpret(event, &mut out);
-    assert!(out.is_empty(), "an unmodeled nested delta is a no-op");
-}
-
-/// Anthropic reports the per-TTL `cache_creation` split on
-/// `message_start` only; the terminal `message_delta` usage omits it. The
-/// adapter must carry it onto the terminal record. Unit-tested (not a
-/// cassette) because the carry-forward is internal adapter state — the
-/// wire evidence lives in the recorded `prompt_caching/matrix_*` streaming
-/// cassettes, whose `message_start` frames hold the split.
-#[test]
-fn per_ttl_cache_creation_split_carries_from_message_start_to_terminal() {
-    let mut adapter = adapter();
-    let mut out = AdapterOutput::new();
-
-    let start = WireFrame::Text(
-        r#"{"type":"message_start","message":{"id":"msg_1","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":3,"output_tokens":1,"cache_creation_input_tokens":9702,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_1h_input_tokens":9366,"ephemeral_5m_input_tokens":336}}}}"#
-            .into(),
-    );
-    let crate::providers::internal::wire::WireEvent::Known(event) = adapter.classify(start) else {
-        panic!("message_start must classify Known");
-    };
-    adapter.interpret(event, &mut out);
-
-    let delta = WireFrame::Text(
-        r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":7,"input_tokens":3,"cache_creation_input_tokens":9702,"cache_read_input_tokens":0}}"#
-            .into(),
-    );
-    let crate::providers::internal::wire::WireEvent::Known(event) = adapter.classify(delta) else {
-        panic!("message_delta must classify Known");
-    };
-    adapter.interpret(event, &mut out);
-
-    let terminal = out
-        .iter()
-        .find_map(|item| match item {
-            Ok(StreamEvent::Final(record)) => Some(record.clone()),
-            _ => None,
-        })
-        .expect("terminal message_delta must yield a final record");
-    // The native record rides on `raw`; the split is Anthropic-specific, so
-    // it is readable only there.
-    let native: StreamingCompletionResponse =
-        serde_json::from_value(terminal.raw).expect("raw must be the native terminal");
-    let split = native
-        .usage
-        .cache_creation
-        .expect("terminal usage must carry the message_start cache_creation split");
-    assert_eq!(split.ephemeral_1h_input_tokens, 9366);
-    assert_eq!(split.ephemeral_5m_input_tokens, 336);
-    assert_eq!(native.usage.cache_creation_input_tokens, Some(9702));
+    let response = decoded.outcome.expect("the message_delta ends the reply");
+    assert_eq!(response.usage.input_tokens, Some(10 + 6 + 4));
+    assert_eq!(response.usage.cache_creation_input_tokens, Some(4));
+    assert_eq!(response.usage.cached_input_tokens, Some(6));
+    assert_eq!(response.usage.output_tokens, Some(3));
+    assert_eq!(response.usage.total_tokens, Some(23));
+    let usage = &response.raw["usage"];
+    assert_eq!(usage["cache_creation_input_tokens"], 4);
+    assert_eq!(usage["cache_read_input_tokens"], 6);
+    assert_eq!(usage["cache_creation"]["ephemeral_1h_input_tokens"], 3);
 }
 
 /// A `content_block_delta` whose `delta` omits `type` is malformed, not
 /// novel: silently skipping it would turn a compat gateway's untagged
-/// text delta into a successful *empty* completion. It classifies
-/// `Corrupt`, surfacing in-band while the stream keeps consuming
-/// (#2258 B5).
+/// text delta into a successful *empty* completion, so it fails the reply
+/// (#2258 B5). So does a known delta whose text is not text, since the
+/// block is built from it.
 #[test]
-fn delta_missing_its_type_is_corrupt_not_skipped() {
-    let adapter = adapter();
-    let frame = WireFrame::Text(
-        r#"{"type":"content_block_delta","index":0,"delta":{"text":"hello"}}"#.into(),
-    );
-    assert!(matches!(
-        adapter.classify(frame),
-        crate::providers::internal::wire::WireEvent::Corrupt(_)
-    ));
-}
-
-/// Policy preserved: a *known* nested delta tag with a defective payload
-/// is a data-level defect, not an unmodeled delta — the frame classifies
-/// `Corrupt` instead of degrading to an `Unknown` no-op.
-#[test]
-fn known_nested_delta_tag_with_defective_payload_is_corrupt() {
-    let adapter = adapter();
-    let frame = WireFrame::Text(
-        r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":42}}"#
-            .into(),
-    );
-    assert!(matches!(
-        adapter.classify(frame),
-        crate::providers::internal::wire::WireEvent::Corrupt(_)
-    ));
-}
-
-/// Anthropic's top-level `{"type":"error"}` envelope (e.g.
-/// `overloaded_error`) is a Known event that surfaces as a provider error
-/// carrying the envelope verbatim — never a warn-skipped unknown — and,
-/// since no `message_delta` follows, the stream ends with no terminal
-/// record.
-///
-/// Byte-equality is the assertion, and the frame carries the top-level
-/// `request_id` recorded replies carry: an envelope re-encoded from the
-/// fields this client models loses every sibling key and normalizes the
-/// order, which is the provider's body rendered rather than preserved.
-#[test]
-fn top_level_error_event_surfaces_as_a_provider_error() {
-    const ENVELOPE: &str = r#"{"error":{"message":"Overloaded","type":"overloaded_error"},"request_id":"req_011CXYZ","type":"error"}"#;
-    let classifier = adapter();
-    let crate::providers::internal::wire::WireEvent::Known(event) =
-        classifier.classify(WireFrame::Text(ENVELOPE.into()))
-    else {
-        panic!("the error envelope must classify as a Known event");
-    };
-
-    let mut adapter = adapter();
-    let mut out = AdapterOutput::new();
-    adapter.interpret(event, &mut out);
-
-    assert_eq!(out.len(), 1, "the error envelope maps to one error item");
-    let Some(Err(error)) = out.into_items().pop() else {
-        panic!("the error envelope must surface as an Err item");
-    };
-    assert_eq!(error.provider_response_body(), Some(ENVELOPE));
+fn a_delta_without_its_type_or_text_fails_the_reply() {
+    for delta in [
+        json!({"text": "hello"}),
+        json!({"type": "text_delta", "text": 42}),
+    ] {
+        let frames = reply(
+            vec![block(
+                0,
+                json!({"type": "text", "text": ""}),
+                std::slice::from_ref(&delta),
+            )],
+            "end_turn",
+        );
+        assert!(streamed(&frames).is_err(), "{delta}");
+    }
 }
 
 /// Bedrock-compat quirk: `message_start` without a message body is a
 /// Known no-op, not a corrupt frame.
 #[test]
 fn message_start_with_null_message_is_a_known_noop() {
-    let classifier = adapter();
-    let frame = WireFrame::Text(r#"{"type":"message_start","message":null}"#.into());
-    let crate::providers::internal::wire::WireEvent::Known(event) = classifier.classify(frame)
-    else {
-        panic!("null-message message_start must stay a known event");
-    };
-
-    let mut adapter = adapter();
-    let mut out = AdapterOutput::new();
-    adapter.interpret(event, &mut out);
-    assert!(out.is_empty(), "a message-less message_start is a no-op");
-}
-
-#[tokio::test]
-async fn terminal_record_normalizes_stop_reason_usage_and_metadata() {
-    let mut adapter = adapter();
-    let mut out = AdapterOutput::new();
-    adapter.message_id = Some("msg_1".to_string());
-    adapter.response_model = Some(CLAUDE_OPUS_4_8.to_string());
-    out.text("hi");
-    adapter.interpret(
-        message_delta(
-            "max_tokens",
-            PartialUsage {
-                output_tokens: 5,
-                input_tokens: Some(3),
-                cache_creation_input_tokens: None,
-                cache_creation: None,
-                cache_read_input_tokens: Some(2),
-                output_tokens_details: None,
-            },
-        ),
-        &mut out,
-    );
-
-    let mut stream = crate::streaming::StreamingCompletionResponse::stream(
-        "anthropic",
-        to_stream_result(out.into_items()),
-    );
-    while stream.next().await.is_some() {}
-
-    let terminal = stream.response.expect("expected a terminal record");
-    assert_eq!(terminal.provider, "anthropic");
-    assert_eq!(terminal.message_id.as_deref(), Some("msg_1"));
-    assert_eq!(terminal.model.as_deref(), Some(CLAUDE_OPUS_4_8));
-    assert_eq!(
-        terminal.finish_reason,
-        Some(crate::completion::FinishReason::Length)
-    );
-    assert_eq!(terminal.usage.input_tokens, Some(3));
-    assert_eq!(terminal.usage.output_tokens, Some(5));
-    assert_eq!(terminal.usage.cached_input_tokens, Some(2));
-    assert_eq!(terminal.usage.total_tokens, Some(10));
-}
-
-#[tokio::test]
-async fn terminal_record_upgrades_end_turn_to_tool_calls_after_a_streamed_tool_call() {
-    // Anthropic normally reports `tool_use`, but the reconciliation
-    // `StreamingCompletionResponse` applies must hold whenever the turn
-    // actually emitted a tool call.
-    let mut adapter = adapter();
-    let mut out = AdapterOutput::new();
-    out.tool_call(
-        crate::streaming::BlockId::wire("toolu_1"),
-        ToolCallEnd::whole("add", json!({"x": 1})).with_tool_id("toolu_1"),
-    );
-    adapter.interpret(message_delta("end_turn", PartialUsage::default()), &mut out);
-
-    let mut stream = crate::streaming::StreamingCompletionResponse::stream(
-        "anthropic",
-        to_stream_result(out.into_items()),
-    );
-    while stream.next().await.is_some() {}
-
-    let terminal = stream.response.expect("expected a terminal record");
-    assert_eq!(
-        terminal.finish_reason,
-        Some(crate::completion::FinishReason::ToolCalls)
-    );
-}
-
-#[tokio::test]
-async fn unknown_stop_reason_survives_onto_the_terminal_record() {
-    let mut adapter = adapter();
-    let items = interpret_all(
-        &mut adapter,
-        [message_delta("pause_turn", PartialUsage::default())],
-    );
-
-    let mut stream =
-        crate::streaming::StreamingCompletionResponse::stream("anthropic", to_stream_result(items));
-    while stream.next().await.is_some() {}
-
-    let terminal = stream.response.expect("expected a terminal record");
-    assert_eq!(
-        terminal.finish_reason,
-        Some(crate::completion::FinishReason::Other(
-            "pause_turn".to_owned()
-        ))
+    let decoded = decode([classified(r#"{"type":"message_start","message":null}"#)]);
+    assert!(
+        decoded.events().is_empty(),
+        "a message-less message_start is a no-op"
     );
 }
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod terminal_emission {
     use super::super::super::completion::CLAUDE_SONNET_4_6;
-    use crate::completion::CompletionModel as _;
-    use crate::driver::Bind;
-    use crate::providers::anthropic::wire::Anthropic;
-    use crate::streaming::{Delta, StreamEvent};
+    use crate::providers::anthropic::wire::AnthropicConfig;
+    use crate::streaming::{Item, StreamEvent};
     use crate::test_utils::MockStreamingClient;
     use futures::StreamExt;
 
@@ -1787,61 +569,52 @@ mod terminal_emission {
         )
     }
 
+    /// The texts the stream yielded, whether an error item came, and what
+    /// it finished with.
     async fn collect(
         sse_bytes: bytes::Bytes,
     ) -> (
         Vec<String>,
         bool,
-        bool,
-        crate::streaming::StreamingCompletionResponse,
+        Result<crate::completion::CompletionResponse, crate::error::ProviderError>,
     ) {
-        let bound = Anthropic::new("test-key")
-            .messages(CLAUDE_SONNET_4_6)
-            .bind(MockStreamingClient { sse_bytes });
-        let request = bound.completion_request("hello").build();
-        let mut stream = crate::completion::CompletionModel::stream(&bound, request)
-            .await
-            .expect("stream should open");
+        let bound = crate::driver::Model::new(
+            AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6),
+            MockStreamingClient { sse_bytes },
+        );
+        let request = crate::completion::CompletionRequest::new("hello");
+        let stream = bound.stream(request).expect("stream should open");
+        drain(stream).await
+    }
 
+    async fn drain(
+        mut stream: crate::streaming::CompletionStream,
+    ) -> (
+        Vec<String>,
+        bool,
+        Result<crate::completion::CompletionResponse, crate::error::ProviderError>,
+    ) {
         let mut texts = Vec::new();
         let mut saw_error = false;
-        let mut saw_terminal = false;
         while let Some(item) = stream.next().await {
             match item {
-                Ok(StreamEvent::BlockDelta {
-                    delta: Delta::Text { text },
-                    ..
-                }) => texts.push(text),
-                Ok(StreamEvent::Final(_)) => saw_terminal = true,
+                Ok(Item::Event(StreamEvent::Text { text, .. })) => texts.push(text),
                 Ok(_) => {}
                 Err(_) => saw_error = true,
             }
         }
-        (texts, saw_error, saw_terminal, stream)
+        (texts, saw_error, stream.finish().await)
     }
 
     #[tokio::test]
-    async fn truncated_stream_yields_content_but_no_terminal_record() {
-        let (texts, saw_error, saw_terminal, stream) =
-            collect(sse(&[MESSAGE_START, TEXT_START, TEXT_DELTA])).await;
-
-        assert_eq!(texts, ["hi"]);
-        assert!(!saw_error);
-        assert!(
-            !saw_terminal,
-            "EOF without message_delta must not synthesize a terminal record"
-        );
-        assert!(stream.response.is_none());
-    }
-
-    #[tokio::test]
-    async fn errored_stream_forwards_the_error_and_no_terminal_record() {
+    async fn errored_stream_forwards_the_error_and_no_end() {
         use crate::test_utils::SequencedStreamingHttpClient;
 
         // A transport failure injected into the byte stream after some
-        // content must be forwarded (via `from_stream_transport`) and must
-        // not be papered over with a synthesized terminal record.
-        let bound = Anthropic::new("test-key").messages(CLAUDE_SONNET_4_6).bind(
+        // content must be forwarded and must not be papered over with a
+        // synthesized end.
+        let bound = crate::driver::Model::new(
+            AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6),
             SequencedStreamingHttpClient::new(vec![
                 Ok(sse(&[MESSAGE_START, TEXT_START, TEXT_DELTA])),
                 Err(crate::http_client::Error::non_success_with_details(
@@ -1851,97 +624,13 @@ mod terminal_emission {
                 )),
             ]),
         );
-        let request = bound.completion_request("hello").build();
-        let mut stream = crate::completion::CompletionModel::stream(&bound, request)
-            .await
-            .expect("stream should open");
-
-        let mut texts = Vec::new();
-        let mut saw_error = false;
-        let mut saw_terminal = false;
-        while let Some(item) = stream.next().await {
-            match item {
-                Ok(StreamEvent::BlockDelta {
-                    delta: Delta::Text { text },
-                    ..
-                }) => texts.push(text),
-                Ok(StreamEvent::Final(_)) => saw_terminal = true,
-                Ok(_) => {}
-                Err(_) => saw_error = true,
-            }
-        }
+        let request = crate::completion::CompletionRequest::new("hello");
+        let stream = bound.stream(request).expect("stream should open");
+        let (texts, saw_error, finished) = drain(stream).await;
 
         assert_eq!(texts, ["hi"]);
         assert!(saw_error, "the transport failure must reach the consumer");
-        assert!(
-            !saw_terminal,
-            "a failed stream must not synthesize a terminal record"
-        );
-        assert!(stream.response.is_none());
-    }
-
-    #[tokio::test]
-    async fn provider_error_event_stops_the_stream_before_a_later_terminal() {
-        // The findings-file probe: an in-band provider `error` event
-        // followed by a well-formed `message_delta`. The error must reach
-        // the consumer and NOTHING may follow it — the adapter is
-        // finished, so the later terminal frame must not be interpreted
-        // into a successful FinalResponse.
-        const ERROR_EVENT: &str =
-            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
-        let (texts, saw_error, saw_terminal, stream) = collect(sse(&[
-            MESSAGE_START,
-            TEXT_START,
-            TEXT_DELTA,
-            ERROR_EVENT,
-            MESSAGE_DELTA,
-        ]))
-        .await;
-
-        assert_eq!(texts, ["hi"]);
-        assert!(saw_error, "the provider error must reach the consumer");
-        assert!(
-            !saw_terminal,
-            "a message_delta after an in-band provider error must not read as a completed turn"
-        );
-        assert!(stream.response.is_none());
-    }
-
-    /// The streamed surface preserves the in-band envelope with the same
-    /// fidelity as the unary one: the provider's own bytes, `request_id`
-    /// and key order included.
-    ///
-    /// No status is asserted, and none is stamped. A preserved in-band
-    /// error's `status` is the *classification* the wire read off the body
-    /// — Gemini's `error.code` is the case that made the rule, and
-    /// `gemini::streaming::tests::in_band_opaque_or_invalid_codes_do_not_invent_http_status`
-    /// pins it — so stamping the transport's 200 over every streamed frame
-    /// would overwrite that meaning and flip a refusal's retry verdict.
-    /// The unary driver's fold-failure decoration is scoped to one reply
-    /// and is where [`crate::driver::call`] supplies it.
-    #[tokio::test]
-    async fn streamed_error_envelope_preserves_the_verbatim_body() {
-        const ENVELOPE: &str = r#"{"error":{"message":"Overloaded","type":"overloaded_error"},"request_id":"req_011CXYZ","type":"error"}"#;
-        let bound =
-            Anthropic::new("test-key")
-                .messages(CLAUDE_SONNET_4_6)
-                .bind(MockStreamingClient {
-                    sse_bytes: sse(&[MESSAGE_START, ENVELOPE]),
-                });
-        let request = bound.completion_request("hello").build();
-        let mut stream = crate::completion::CompletionModel::stream(&bound, request)
-            .await
-            .expect("stream should open");
-
-        let error = loop {
-            match stream.next().await {
-                Some(Ok(_)) => continue,
-                Some(Err(error)) => break error,
-                None => panic!("the stream ended without the in-band error"),
-            }
-        };
-
-        assert_eq!(error.provider_response_body(), Some(ENVELOPE));
+        assert!(finished.is_err(), "a failed stream has no response");
     }
 
     /// `input_tokens` precedence between `message_start` and the terminal
@@ -2004,152 +693,101 @@ mod terminal_emission {
                 "a zero on the delta must not erase the message_start count",
             ),
         ] {
-            let (_texts, _saw_error, saw_terminal, stream) =
+            let (_texts, _saw_error, finished) =
                 collect(sse(&[&start, TEXT_START, TEXT_DELTA, &delta])).await;
 
-            assert!(saw_terminal, "{case}: the turn must complete");
-            let terminal = stream.response.expect("terminal record");
-            assert_eq!(terminal.usage.input_tokens, Some(expected), "{case}");
+            let response = finished.expect("the turn must complete");
+            assert_eq!(response.usage.input_tokens, Some(expected), "{case}");
         }
     }
 
+    /// A gateway that zeroes the input on the terminal `message_delta` has
+    /// the `message_start` count observed, as the response reports it: the
+    /// observation is the decoder's end, not each frame's raw snapshot.
     #[tokio::test]
-    async fn malformed_frame_then_eof_yields_error_and_no_terminal_record() {
-        let (texts, saw_error, saw_terminal, stream) =
-            collect(sse(&[MESSAGE_START, TEXT_START, TEXT_DELTA, "{not json"])).await;
-
-        assert_eq!(texts, ["hi"]);
-        assert!(saw_error, "the malformed frame must reach the consumer");
-        assert!(
-            !saw_terminal,
-            "a parse error followed by EOF must not read as a completed turn"
-        );
-        assert!(stream.response.is_none());
-    }
-
-    #[tokio::test]
-    async fn malformed_frame_then_real_terminal_still_completes_the_stream() {
-        let (texts, saw_error, saw_terminal, stream) = collect(sse(&[
-            MESSAGE_START,
-            TEXT_START,
-            TEXT_DELTA,
-            "{not json",
-            MESSAGE_DELTA,
-        ]))
+    async fn a_zeroed_terminal_input_is_observed_as_the_response_reports_it() {
+        const ZEROED_DELTA: &str = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":3}}"#;
+        let (observed, usage) = crate::driver::tests::observed_usage(
+            AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6),
+            MockStreamingClient {
+                sse_bytes: sse(&[
+                    MESSAGE_START,
+                    TEXT_START,
+                    TEXT_DELTA,
+                    ZEROED_DELTA,
+                    r#"{"type":"message_stop"}"#,
+                ]),
+            },
+            crate::wire::Mode::Streaming,
+        )
         .await;
-
-        assert_eq!(texts, ["hi"]);
-        assert!(saw_error, "the malformed frame must reach the consumer");
-        assert!(
-            saw_terminal,
-            "a genuine message_delta after a parse error still completes the stream"
-        );
-        let terminal = stream.response.expect("terminal record");
-        assert_eq!(
-            terminal.finish_reason,
-            Some(crate::completion::FinishReason::Stop)
-        );
-        assert_eq!(terminal.message_id.as_deref(), Some("msg_1"));
+        assert_eq!(usage.input_tokens, Some(5));
+        assert_eq!(observed, [crate::wire::AdapterUsage::from(&usage)]);
     }
 
-    /// Raw capture on the streaming terminal, through the real
-    /// `CompletionModel::stream` seam on `Bound` over the mock transport:
-    /// the decoder serializes the native terminal onto the record it maps,
-    /// so the terminal `StreamFinal.raw` is Anthropic's own
-    /// `StreamingCompletionResponse`. A `message_delta` with
-    /// `stop_sequence` set is used because the normalized terminal folds
-    /// it into `FinishReason::Stop` and keeps neither Anthropic's spelling
-    /// nor which sequence fired — both are readable only off the capture.
-    #[tokio::test]
-    async fn terminal_raw_round_trips_into_the_terminal_type() {
-        const STOP_SEQUENCE_DELTA: &str = r#"{"type":"message_delta","delta":{"stop_reason":"stop_sequence","stop_sequence":"alpha"},"usage":{"output_tokens":3}}"#;
-
-        let bound =
-            Anthropic::new("test-key")
-                .messages(CLAUDE_SONNET_4_6)
-                .bind(MockStreamingClient {
-                    sse_bytes: sse(&[MESSAGE_START, TEXT_START, TEXT_DELTA, STOP_SEQUENCE_DELTA]),
-                });
-        let request = bound.completion_request("hello").build();
-        let mut stream = crate::completion::CompletionModel::stream(&bound, request)
-            .await
-            .expect("stream should open");
-        while let Some(item) = stream.next().await {
-            item.expect("stream item");
-        }
-        let terminal = stream.response.expect("terminal record");
-
-        let raw = &terminal.raw;
-        let typed: super::super::StreamingCompletionResponse =
-            serde_json::from_value(raw.clone()).expect("raw must deserialize");
-        assert_eq!(
-            serde_json::to_value(&typed).expect("re-serialize"),
-            *raw,
-            "the capture must be exactly what the terminal type serializes to"
+    /// The first error a 200 stream carrying `frames` yields, with
+    /// `request-id: req_stream` on the reply.
+    async fn in_band_error(frames: &[&str]) -> anyhow::Result<crate::error::ProviderError> {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("text/event-stream"),
         );
-        assert_eq!(typed.stop_reason.as_deref(), Some("stop_sequence"));
-        assert_eq!(typed.stop_sequence.as_deref(), Some("alpha"));
-        assert_eq!(typed.message_id.as_deref(), Some("msg_1"));
-
-        // Re-normalizing the capture tells the same story as the terminal
-        // the stream produced.
-        let renormalized =
-            super::super::terminal_record("anthropic", &typed).expect("re-normalize the capture");
-        assert_eq!(terminal.identity(), renormalized.identity());
-        assert_eq!(terminal.finish_reason, renormalized.finish_reason);
-        assert_eq!(terminal.model, renormalized.model);
-        assert_eq!(terminal.usage, renormalized.usage);
-        assert_eq!(
-            terminal.finish_reason,
-            Some(crate::completion::FinishReason::Stop)
-        );
-        assert_eq!(terminal.usage.output_tokens, Some(3));
-    }
-}
-
-/// A `tool_use` block whose wire id is empty is keyed by a minted key, not
-/// the empty string: two such blocks in one stream stay distinct, their
-/// deltas and stops follow the same key, and nothing panics.
-#[test]
-fn an_empty_tool_use_id_is_minted_not_keyed_on_the_empty_string() {
-    let mut adapter = adapter();
-    let mut keys = Vec::new();
-    for index in 0..2 {
-        let events = interpret(
-            &mut adapter,
-            StreamingEvent::ContentBlockStart {
-                index,
-                content_block: Content::ToolUse {
-                    id: String::new(),
-                    name: "add".to_string(),
-                    input: serde_json::json!({}),
-                },
+        headers.insert("request-id", http::HeaderValue::from_static("req_stream"));
+        let bound = crate::driver::Model::new(
+            AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6),
+            crate::test_utils::NonSuccessStreamingClient {
+                status: http::StatusCode::OK,
+                headers,
+                body: sse(frames),
             },
         );
-        let key = adapter.current_tool_call.clone().expect("an open call");
-        assert!(key.is_minted(), "{key:?}");
-        assert!(
-            events.iter().all(|event| match event {
-                StreamEvent::BlockStart { id, .. } | StreamEvent::BlockDelta { id, .. } =>
-                    id == &key,
-                _ => true,
-            }),
-            "{events:?}"
-        );
-        let stop = interpret(&mut adapter, StreamingEvent::ContentBlockStop { index });
-        assert!(
-            stop.iter()
-                .any(|event| matches!(event, StreamEvent::BlockEnd { id, .. } if id == &key))
-        );
-        keys.push(key);
+        let mut stream = bound.stream(crate::completion::CompletionRequest::new("hello"))?;
+        while let Some(item) = stream.next().await {
+            if let Err(error) = item {
+                return Ok(error);
+            }
+        }
+        anyhow::bail!("the stream yielded no error")
     }
-    assert_ne!(keys[0], keys[1], "each id-less call is its own block");
+
+    const OVERLOADED: &str =
+        r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+
+    /// An `overloaded_error` event mid-stream is the same transient
+    /// condition as the same envelope on an HTTP 529 or 503, so it gets the
+    /// same retry verdict.
+    ///
+    /// Not a cassette test: an overload is a transient server condition that
+    /// cannot be recorded on demand, and the defect is the verdict the
+    /// envelope gets, which a hand-written frame pins exactly.
+    #[tokio::test]
+    async fn an_in_band_overloaded_event_is_retryable_like_its_http_rejection() -> anyhow::Result<()>
+    {
+        let error = in_band_error(&[MESSAGE_START, TEXT_START, TEXT_DELTA, OVERLOADED]).await?;
+        let rejected = crate::error::ProviderError::from_http_response(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            OVERLOADED,
+        );
+        anyhow::ensure!(rejected.is_retryable(), "the HTTP rejection is retryable");
+        anyhow::ensure!(
+            error.is_retryable(),
+            "the same envelope in-band must be retryable too: {error:?}"
+        );
+        let report = error.report();
+        anyhow::ensure!(report.retryable, "the report must agree: {report:?}");
+        anyhow::ensure!(
+            report.code.as_deref() == Some("overloaded_error"),
+            "the envelope's code is reported: {report:?}"
+        );
+        Ok(())
+    }
 }
 
 /// The Messages projection, driven through [`crate::driver`].
 ///
-/// The projector is reached as [`crate::wire::Decoder::project`], which the
-/// driver calls on every raw payload — the rejection body included — so
+/// The projector rides on the wire's [`crate::wire::Encoded`], and the HTTP
+/// transport calls it on every raw payload — the rejection body included — so
 /// these cells exercise the wire and the driver together rather than the
 /// projector in isolation. That is the only way the *closure* facts
 /// (`Started`, `Response`, `Finished`) are observable at all: they belong to
@@ -2161,11 +799,10 @@ mod projection {
     use crate::completion::CompletionRequest;
     use crate::observe::{
         Action, AdapterContext, AdapterEnding, AdapterErrorBoundary, AdapterErrorEnvelope,
-        AdapterEvent, AdapterUsage, AdapterVerdict, ObservationLog, Subject,
+        AdapterEvent, ObservationLog, Subject,
     };
-    use crate::providers::anthropic::wire::{Anthropic, Messages};
-    use crate::test_utils::{MockStreamingClient, RecordingHttpClient};
-    use futures::StreamExt;
+    use crate::providers::anthropic::wire::{AnthropicConfig, Messages};
+    use crate::test_utils::RecordingHttpClient;
 
     fn adapter_events(log: &ObservationLog) -> Vec<AdapterEvent> {
         log.trace()
@@ -2178,27 +815,16 @@ mod projection {
             .collect()
     }
 
-    fn context(log: &Arc<ObservationLog>) -> Option<AdapterContext> {
-        Some(AdapterContext::new(log.clone(), Subject::default(), "call"))
+    fn context(log: &Arc<ObservationLog>) -> AdapterContext {
+        AdapterContext::new(log.clone(), Subject::default(), "call")
     }
 
     fn wire() -> Messages {
-        Anthropic::new("test-key").messages("claude-test")
+        AnthropicConfig::new("test-key").completion("claude-test")
     }
 
     fn request() -> CompletionRequest {
-        CompletionRequest {
-            model: None,
-            chat_history: vec![crate::message::Message::user("hello")],
-            documents: Vec::new(),
-            tools: Vec::new(),
-            temperature: None,
-            max_tokens: Some(64),
-            tool_choice: None,
-            additional_params: None,
-            output_schema: None,
-            record_telemetry_content: false,
-        }
+        CompletionRequest::new("hello").max_tokens(64)
     }
 
     /// A rejected Messages call: the envelope's type and message, and the
@@ -2210,7 +836,8 @@ mod projection {
             r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
         );
         let log = Arc::new(ObservationLog::default());
-        let error = crate::driver::call(&wire(), &http, request(), context(&log))
+        let error = crate::driver::Model::new(wire(), http.clone())
+            .call_observed(request(), context(&log))
             .await
             .expect_err("the transport rejects the call");
         assert!(error.is_retryable());
@@ -2238,62 +865,802 @@ mod projection {
             })
         );
     }
+}
+/// One sample per known Messages event: a new event fails here until it
+/// has a sample.
+#[test]
+fn every_messages_event_has_a_sample() {
+    let samples: Vec<MessagesEvent> = [
+        r#"{"type":"message_start","message":null}"#,
+        r#"{"type":"message","id":"msg_1","role":"assistant","model":"m","content":[],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}"#,
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x"}}"#,
+        r#"{"type":"content_block_stop","index":0}"#,
+        r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}"#,
+        r#"{"type":"message_stop"}"#,
+        r#"{"type":"ping"}"#,
+        r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+    ]
+    .into_iter()
+    .map(classified)
+    .collect();
+    let index = |event: &MessagesEvent| {
+        KNOWN_EVENT_TYPES
+            .iter()
+            .position(|kind| *kind == event.kind())
+            .unwrap_or(usize::MAX)
+    };
+    crate::test_utils::history::assert_every_variant(&samples, index, KNOWN_EVENT_TYPES.len());
+}
 
-    /// A Messages stream: `message_start` carries the id, the model and the
-    /// prompt usage; `message_delta` carries the stop reason and the answer's
-    /// usage; the terminal closes the attempt.
-    #[tokio::test]
-    async fn messages_stream_projects_usage_stop_reason_and_model() {
-        let sse = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":9,\"output_tokens\":1,\"cache_read_input_tokens\":0}}}\n\n\
-    event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
-    event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n\
-    event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
-    event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":3,\"output_tokens_details\":{\"thinking_tokens\":2}}}\n\n\
-    event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
-        let http = MockStreamingClient {
-            sse_bytes: bytes::Bytes::from(sse),
-        };
-        let log = Arc::new(ObservationLog::default());
-        let stream = crate::driver::stream(&wire(), &http, request(), context(&log))
-            .expect("the streamed request encodes");
-        let mut stream = Box::pin(stream);
-        while let Some(item) = stream.next().await {
-            item.expect("the recorded stream decodes without an in-band error");
-        }
-        drop(stream);
+/// An item type rig has never seen, and a field it has never seen on a
+/// known item, survive decoding whole and streamed, and go back verbatim
+/// to the model that produced them.
+#[test]
+fn an_invented_item_and_field_survive_decode_and_same_model_replay() {
+    use crate::wire::{Operation, Wire};
 
-        let events = adapter_events(&log);
-        assert!(events.contains(&AdapterEvent::Usage {
-            usage: AdapterUsage {
-                input_tokens: Some(9),
-                output_tokens: Some(1),
-                cached_input_tokens: Some(0),
-                ..AdapterUsage::default()
-            }
-        }));
-        // The witnessed reasoning count is the one the response reports.
-        assert!(events.contains(&AdapterEvent::Usage {
-            usage: AdapterUsage {
-                output_tokens: Some(3),
-                reasoning_tokens: Some(2),
-                ..AdapterUsage::default()
-            }
-        }));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AdapterEvent::Provider { verdict: AdapterVerdict { model: Some(model), finish_reason: None, .. } }
-                if model == "claude-sonnet-4-6"
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AdapterEvent::Provider { verdict: AdapterVerdict { finish_reason: Some(reason), .. } }
-                if reason == "end_turn"
-        )));
+    let invented = json!({"type": "frobnicate", "payload": {"x": 1}});
+    let text = json!({"type": "text", "text": "hi", "sparkle": true});
+    let wire = AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6);
+    let whole = json!({
+        "type": "message", "id": "msg_1", "role": "assistant", "model": CLAUDE_SONNET_4_6,
+        "content": [invented, text], "stop_reason": "end_turn", "stop_sequence": null,
+        "usage": {"input_tokens": 3, "output_tokens": 1}
+    });
+    let unary = crate::test_utils::decode_reply(
+        &wire,
+        &CompletionRequest::new("hello"),
+        Mode::Unary,
+        [WireFrame::Text(whole.to_string())],
+        whole.clone(),
+    )
+    .expect("the whole reply folds");
+    let stream = streamed(&reply(
+        vec![
+            block(0, invented.clone(), &[]),
+            block(
+                1,
+                json!({"type": "text", "text": "", "sparkle": true}),
+                &[json!({"type": "text_delta", "text": "hi"})],
+            ),
+        ],
+        "end_turn",
+    ))
+    .expect("the stream folds");
+    assert_eq!(unary.message(), stream.message());
+
+    for response in [unary, stream] {
+        let turn = response.message().expect("an assistant turn");
+        let request = CompletionRequest::from(vec![
+            RigMessage::user("hello"),
+            turn,
+            RigMessage::user("again"),
+        ]);
+        let request = Completion::prepare(request, &wire.describe()).expect("the history adapts");
+        let encoded = wire
+            .encode(request, Mode::Unary)
+            .expect("the request encodes");
+        let body = crate::test_utils::json_body(&encoded.request);
+        assert_eq!(body["messages"][1]["content"], json!([invented, text]));
+    }
+}
+
+/// The response the whole message `message` folds into on the Anthropic
+/// wire.
+fn whole(message: Value) -> Result<crate::completion::CompletionResponse, ProviderError> {
+    let wire = AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6);
+    crate::test_utils::decode_reply(
+        &wire,
+        &CompletionRequest::new("hello"),
+        Mode::Unary,
+        [WireFrame::Text(message.to_string())],
+        Value::Null,
+    )
+}
+
+/// A reply with no content folds the same whole or streamed, whatever its
+/// stop reason: pi accepts empty content, and the stop reason decides how
+/// the turn ends.
+#[test]
+fn an_empty_reply_folds_the_same_whole_or_streamed() {
+    for reason in [
+        "end_turn",
+        "stop_sequence",
+        "max_tokens",
+        "model_context_window_exceeded",
+        "tool_use",
+        "pause_turn",
+        "refusal",
+        "sensitive",
+    ] {
+        let streamed = streamed(&reply(vec![], reason)).map(|response| response.stop());
+        let whole = whole(json!({
+            "type": "message", "id": "msg_1", "role": "assistant", "model": CLAUDE_SONNET_4_6,
+            "content": [], "stop_reason": reason, "stop_sequence": null,
+            "usage": {"input_tokens": 3, "output_tokens": 5}
+        }))
+        .map(|response| response.stop());
+        assert!(streamed.is_ok(), "{reason}: {streamed:?}");
         assert_eq!(
-            events.last(),
-            Some(&AdapterEvent::Finished {
-                ending: AdapterEnding::Terminal
-            })
+            whole.as_ref().ok(),
+            streamed.as_ref().ok(),
+            "{reason}: {whole:?}"
         );
     }
+}
+
+/// Anthropic A6: a stop reason states every block still open complete, as
+/// pi keeps a signature whatever `content_block_stop` did: thinking whose
+/// stop never came keeps its signed item, and so does a call whose input is
+/// whole. A call whose input is still cut stays open, and the end of the
+/// reply closes it unfinished.
+#[test]
+fn a_stop_reason_states_every_open_block_complete() {
+    let without_stops = |reason: &str, input: &str| {
+        let mut frames = reply(Vec::new(), reason);
+        let end = frames.pop().expect("the message_delta");
+        frames.extend([
+            json!({"type": "content_block_start", "index": 0,
+                "content_block": {"type": "thinking", "thinking": "", "signature": ""}}),
+            json!({"type": "content_block_delta", "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "plan"}}),
+            json!({"type": "content_block_delta", "index": 0,
+                "delta": {"type": "signature_delta", "signature": "sig"}}),
+            json!({"type": "content_block_start", "index": 1,
+                "content_block": {"type": "tool_use", "id": "toolu_a", "name": "f", "input": {}}}),
+            json!({"type": "content_block_delta", "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": input}}),
+            end,
+        ]);
+        frames
+    };
+    let response = streamed(&without_stops("tool_use", "{\"x\":1}")).expect("the reply folds");
+    assert_eq!(response.stop(), StopReason::ToolUse);
+    assert_eq!(
+        item(&response.choice[0]),
+        Some(&json!({"type": "thinking", "thinking": "plan", "signature": "sig"}))
+    );
+    assert_eq!(
+        item(&response.choice[1]),
+        Some(&json!({"type": "tool_use", "id": "toolu_a", "name": "f", "input": {"x": 1}}))
+    );
+
+    let cut = streamed(&without_stops("max_tokens", "{\"x\":")).expect("the reply folds");
+    assert_eq!(cut.stop(), StopReason::Length);
+    assert!(item(&cut.choice[0]).is_some(), "{:?}", cut.choice);
+    assert!(item(&cut.choice[1]).is_none(), "{:?}", cut.choice);
+    let unfinished = streamed(&without_stops("tool_use", "{\"x\":")).expect("the reply folds");
+    assert!(unfinished.stop().is_failure(), "{:?}", unfinished.stop());
+}
+
+/// A gateway that skips `content_block_start` (seen on Anthropic-format
+/// dialects) still streams the block: its first delta opens it.
+#[test]
+fn a_delta_for_a_block_that_never_started_opens_it() {
+    let frames = reply(
+        vec![vec![
+            json!({"type": "content_block_delta", "index": 0,
+                "delta": {"type": "text_delta", "text": "hi"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+        ]],
+        "end_turn",
+    );
+    let response = streamed(&frames).expect("the reply decodes");
+    assert!(
+        matches!(response.choice.as_slice(), [AssistantContent::Text(text)] if text.text == "hi"),
+        "{:?}",
+        response.choice
+    );
+}
+
+// Progress-update thinking blocks, in the documented shape of a turn that
+// answers a `tool_result` on Claude Opus 5.5: a reasoning block, a
+// progress-update block, then the `tool_use` it introduces. Both thinking
+// blocks are empty unless the display shows updates. No recording holds a
+// progress-update block, so the shapes are built here.
+// Source: <https://platform.claude.com/docs/en/build-with-claude/thinking#progress-updates>
+
+const PROGRESS_UPDATE_TEXT: &str = "Confirmed the retry path never refreshes the expired token. Editing auth.py to add the refresh call.";
+
+fn progress_update_content(update_text: &str) -> Value {
+    json!([
+        {"type": "thinking", "thinking": "", "signature": "EqMBCkYICxIM-reasoning"},
+        {"type": "thinking", "thinking": update_text, "signature": "Es8CCkYICxIM-update"},
+        {
+            "type": "tool_use",
+            "id": "toolu_01D7FLrfh4GYq7yT1ULFeyMV",
+            "name": "edit_file",
+            "input": {"path": "auth.py", "content": "..."}
+        }
+    ])
+}
+
+/// The turn decoded from the whole message or its stream on Opus 5.5.
+fn progress_update_reply(update_text: &str, mode: Mode) -> crate::completion::CompletionResponse {
+    let wire = AnthropicConfig::new("test-key").completion(CLAUDE_OPUS_5_5);
+    let frames: Vec<Value> = match mode {
+        Mode::Unary => vec![json!({
+            "type": "message", "id": "msg_progress", "model": CLAUDE_OPUS_5_5,
+            "role": "assistant", "content": progress_update_content(update_text),
+            "stop_reason": "tool_use", "stop_sequence": null,
+            "usage": {"input_tokens": 120, "output_tokens": 80}
+        })],
+        _ => {
+            let thinking = |index, text: &str, signature: &str| {
+                block(
+                    index,
+                    json!({"type": "thinking", "thinking": "", "signature": ""}),
+                    &[
+                        json!({"type": "thinking_delta", "thinking": text}),
+                        json!({"type": "signature_delta", "signature": signature}),
+                    ],
+                )
+            };
+            std::iter::once(json!({"type": "message_start", "message": {
+                "type": "message", "id": "msg_progress", "model": CLAUDE_OPUS_5_5,
+                "role": "assistant", "content": [], "stop_reason": null, "stop_sequence": null,
+                "usage": {"input_tokens": 120, "output_tokens": 1}
+            }}))
+            .chain(thinking(0, "", "EqMBCkYICxIM-reasoning"))
+            .chain(thinking(1, update_text, "Es8CCkYICxIM-update"))
+            .chain(block(
+                2,
+                json!({"type": "tool_use", "id": "toolu_01D7FLrfh4GYq7yT1ULFeyMV",
+                    "name": "edit_file", "input": {}}),
+                &[json!({"type": "input_json_delta",
+                    "partial_json": "{\"path\": \"auth.py\", \"content\": \"...\"}"})],
+            ))
+            .chain([
+                json!({"type": "message_delta",
+                    "delta": {"stop_reason": "tool_use", "stop_sequence": null},
+                    "usage": {"output_tokens": 80}}),
+                json!({"type": "message_stop"}),
+            ])
+            .collect()
+        }
+    };
+    crate::test_utils::decode_reply(
+        &wire,
+        &CompletionRequest::new("hello"),
+        mode,
+        frames
+            .iter()
+            .map(|frame| WireFrame::Text(frame.to_string())),
+        Value::Null,
+    )
+    .expect("the reply folds")
+}
+
+/// Ported from #2616: both thinking blocks survive decoding unmerged and in
+/// order, whole and streamed, under either display, and the turn replays to
+/// its model exactly as received.
+#[test]
+fn progress_update_blocks_survive_decoding_and_replay_under_every_display() {
+    use crate::wire::{Operation, Wire};
+
+    let wire = AnthropicConfig::new("test-key").completion(CLAUDE_OPUS_5_5);
+    for update_text in ["", PROGRESS_UPDATE_TEXT] {
+        for mode in [Mode::Unary, Mode::Streaming] {
+            let response = progress_update_reply(update_text, mode);
+            let items: Vec<Value> = response.choice.iter().filter_map(item).cloned().collect();
+            assert_eq!(
+                Value::Array(items),
+                progress_update_content(update_text),
+                "{mode:?}: each block decodes as received"
+            );
+            let turn = response.message().expect("an assistant turn");
+            let mut request = CompletionRequest::from(vec![
+                RigMessage::user("The login test fails after an hour of uptime."),
+                turn,
+            ]);
+            request.chat_history.push(
+                RigMessage::tool_result(
+                    crate::message::CallId::from_wire("toolu_01D7FLrfh4GYq7yT1ULFeyMV"),
+                    crate::message::ToolName::new("edit_file").expect("a tool name"),
+                    "saved",
+                )
+                .into(),
+            );
+            request.tools = vec![
+                crate::completion::ToolDefinition {
+                    name: crate::message::ToolName::new("edit_file").expect("a tool name"),
+                    description: "Edit a file.".to_owned(),
+                    parameters: json!({"type": "object", "properties": {}}),
+                    annotations: Default::default(),
+                }
+                .into(),
+            ];
+            let request =
+                Completion::prepare(request, &wire.describe()).expect("the history adapts");
+            let encoded = wire
+                .encode(request, Mode::Unary)
+                .expect("the request encodes");
+            let body = crate::test_utils::json_body(&encoded.request);
+            assert_eq!(
+                body["messages"][1]["content"],
+                progress_update_content(update_text),
+                "the {mode:?} turn replays exactly as received"
+            );
+        }
+    }
+}
+
+/// One cited claim per text block, one block per location kind Anthropic
+/// documents, plus a kind rig does not know. Hand-built: the recordings
+/// carry only the character, page and web search kinds.
+fn cited_blocks() -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "The grass is green.",
+            json!({"type": "char_location", "cited_text": "The grass is green.",
+                "document_index": 0, "document_title": "Lawn", "start_char_index": 0,
+                "end_char_index": 20, "file_id": "file_1"}),
+        ),
+        (
+            "Pages two and three.",
+            json!({"type": "page_location", "cited_text": "Two. Three.",
+                "document_index": 1, "document_title": null, "start_page_number": 2,
+                "end_page_number": 4}),
+        ),
+        (
+            "Block one.",
+            json!({"type": "content_block_location", "cited_text": "One.",
+                "document_index": 2, "document_title": "Blocks", "start_block_index": 1,
+                "end_block_index": 2}),
+        ),
+        (
+            "Café opens at nine.",
+            json!({"type": "search_result_location", "cited_text": "Opens 9am.",
+                "source": "https://example.com/cafe", "title": "Café", "search_result_index": 3,
+                "start_block_index": 0, "end_block_index": 1}),
+        ),
+        (
+            "Rust 2.0 shipped.",
+            json!({"type": "web_search_result_location", "cited_text": "Rust 2.0 is out.",
+                "url": "https://example.com/rust", "title": "Rust", "encrypted_index": "Eo8B"}),
+        ),
+        (
+            "Unknown.",
+            json!({"type": "frobnicate_location", "cited_text": "?"}),
+        ),
+    ]
+}
+
+/// The sources [`cited_blocks`] resolve to, block by block.
+fn expected_sources() -> Vec<Vec<Source>> {
+    let document = |index, within| SourceLocation::Document {
+        index: Some(index),
+        id: None,
+        within: Some(within),
+    };
+    vec![
+        vec![
+            Source::new(SourceLocation::Document {
+                index: Some(0),
+                id: Some("file_1".to_owned()),
+                within: Some(DocumentRange::Chars(0..20)),
+            })
+            .title("Lawn")
+            .cited_text("The grass is green."),
+        ],
+        vec![Source::new(document(1, DocumentRange::Pages(2..4))).cited_text("Two. Three.")],
+        vec![
+            Source::new(document(2, DocumentRange::Blocks(1..2)))
+                .title("Blocks")
+                .cited_text("One."),
+        ],
+        vec![
+            Source::new(SourceLocation::SearchResult {
+                index: 3,
+                source: "https://example.com/cafe".to_owned(),
+                blocks: Some(0..1),
+            })
+            .title("Café")
+            .cited_text("Opens 9am."),
+        ],
+        vec![
+            Source::new(SourceLocation::Url {
+                url: "https://example.com/rust".to_owned(),
+            })
+            .title("Rust")
+            .cited_text("Rust 2.0 is out."),
+        ],
+        vec![],
+    ]
+}
+
+/// Each block's text and its citations' sources and spans.
+fn citations_of(
+    response: &crate::completion::CompletionResponse,
+) -> Vec<(String, Vec<(Option<std::ops::Range<usize>>, Vec<Source>)>)> {
+    response
+        .choice
+        .iter()
+        .filter_map(|content| match content {
+            AssistantContent::Text(text) => Some((
+                text.text.clone(),
+                text.citations()
+                    .iter()
+                    .map(|citation| {
+                        (
+                            citation.span.map(|span| span.range()),
+                            citation.sources.clone(),
+                        )
+                    })
+                    .collect(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every documented location kind decodes to a whole-block citation with
+/// its source, title and quoted passage, the same unary and streamed on
+/// every dialect, with the citations streamed before the text they cite.
+/// The provider's JSON stays in the native item, `encrypted_index`
+/// included.
+#[test]
+fn every_citation_kind_resolves_the_same_unary_and_streamed() {
+    use crate::providers::anthropic::wire::{ANTHROPIC, MINIMAX, MOONSHOT, XIAOMIMIMO, ZAI};
+
+    let blocks = cited_blocks();
+    let expected: Vec<_> = blocks
+        .iter()
+        .zip(expected_sources())
+        .map(|((text, _), sources)| {
+            let cited = (!sources.is_empty()).then_some((None, sources));
+            ((*text).to_owned(), cited.into_iter().collect::<Vec<_>>())
+        })
+        .collect();
+    let frames = reply(
+        blocks
+            .iter()
+            .enumerate()
+            .map(|(index, (text, citation))| {
+                block(
+                    index,
+                    json!({"type": "text", "text": "", "citations": null}),
+                    &[
+                        json!({"type": "citations_delta", "citation": citation}),
+                        json!({"type": "text_delta", "text": text}),
+                    ],
+                )
+            })
+            .collect(),
+        "end_turn",
+    );
+    for (dialect, model) in [
+        (&ANTHROPIC, CLAUDE_SONNET_4_6),
+        (&ZAI, "glm-5"),
+        (&MINIMAX, "MiniMax-M2.7"),
+        (&MOONSHOT, "kimi-k3"),
+        (&XIAOMIMIMO, "mimo-v2.5"),
+    ] {
+        let whole = json!({
+            "type": "message", "id": "msg_1", "role": "assistant", "model": model,
+            "content": blocks.iter().map(|(text, citation)| json!({
+                "type": "text", "text": text, "citations": [citation]
+            })).collect::<Vec<_>>(),
+            "stop_reason": "end_turn", "stop_sequence": null,
+            "usage": {"input_tokens": 3, "output_tokens": 1}
+        });
+        let wire = AnthropicConfig::with_key(dialect, "test-key").completion(model);
+        let decoded = |mode, frames: Vec<WireFrame>| {
+            crate::test_utils::decode_reply(
+                &wire,
+                &CompletionRequest::new("hello"),
+                mode,
+                frames,
+                whole.clone(),
+            )
+            .expect("the reply folds")
+        };
+        let unary = decoded(Mode::Unary, vec![WireFrame::Text(whole.to_string())]);
+        let stream = decoded(
+            Mode::Streaming,
+            frames
+                .iter()
+                .map(|frame| WireFrame::Text(frame.to_string()))
+                .collect(),
+        );
+        assert_eq!(citations_of(&unary), expected, "{}", dialect.name);
+        assert_eq!(citations_of(&stream), expected, "{}", dialect.name);
+        for response in [&unary, &stream] {
+            for (content, (_, citation)) in response.choice.iter().zip(&blocks) {
+                assert_eq!(
+                    content.native_item().and_then(|item| item.get("citations")),
+                    Some(&json!([citation])),
+                    "{}",
+                    dialect.name
+                );
+            }
+        }
+    }
+}
+
+/// A citation missing the field that names its source is left to the
+/// native item; the reply still decodes.
+#[test]
+fn a_citation_without_its_source_stays_native() {
+    for citation in [
+        json!({"type": "web_search_result_location", "cited_text": "x"}),
+        json!({"type": "search_result_location", "cited_text": "x", "search_result_index": 0}),
+        json!("not an object"),
+    ] {
+        let response = streamed(&reply(
+            vec![block(
+                0,
+                json!({"type": "text", "text": "Claim."}),
+                &[json!({"type": "citations_delta", "citation": citation})],
+            )],
+            "end_turn",
+        ))
+        .expect("the stream folds");
+        let [AssistantContent::Text(text)] = response.choice.as_slice() else {
+            panic!("one text block: {:?}", response.choice);
+        };
+        assert!(text.citations().is_empty(), "{citation}");
+        assert_eq!(
+            response.choice[0]
+                .native_item()
+                .and_then(|item| item.get("citations")),
+            Some(&json!([citation]))
+        );
+    }
+}
+
+/// A citation without a quoted passage or a title still resolves to its
+/// source, with neither set, whether it opens with its text block or
+/// streams in after it.
+#[test]
+fn a_citation_without_its_passage_or_title_still_cites_its_source() {
+    let citation = json!({"type": "web_search_result_location",
+        "url": "https://example.com/rust"});
+    let expected = vec![(
+        "Rust 2.0 shipped.".to_owned(),
+        vec![(
+            None,
+            vec![Source::new(SourceLocation::Url {
+                url: "https://example.com/rust".to_owned(),
+            })],
+        )],
+    )];
+    let opened = reply(
+        vec![block(
+            0,
+            json!({"type": "text", "text": "", "citations": [citation]}),
+            &[json!({"type": "text_delta", "text": "Rust 2.0 shipped."})],
+        )],
+        "end_turn",
+    );
+    let delta = reply(
+        vec![block(
+            0,
+            json!({"type": "text", "text": ""}),
+            &[
+                json!({"type": "citations_delta", "citation": citation}),
+                json!({"type": "text_delta", "text": "Rust 2.0 shipped."}),
+            ],
+        )],
+        "end_turn",
+    );
+    for frames in [opened, delta] {
+        let response = streamed(&frames).expect("the stream folds");
+        assert_eq!(citations_of(&response), expected);
+    }
+}
+
+/// Each block of a whole reply must name its `type`, as each streamed one
+/// does; one that does not fails the reply.
+#[test]
+fn a_whole_reply_block_without_a_type_fails_the_reply() {
+    let wire = AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6);
+    let whole = json!({
+        "type": "message", "id": "msg_1", "role": "assistant", "model": CLAUDE_SONNET_4_6,
+        "content": [{"text": "hi"}], "stop_reason": "end_turn", "stop_sequence": null,
+        "usage": {"input_tokens": 3, "output_tokens": 1}
+    });
+    let decoded = crate::test_utils::decode_reply(
+        &wire,
+        &CompletionRequest::new("hello"),
+        Mode::Unary,
+        [WireFrame::Text(whole.to_string())],
+        whole.clone(),
+    );
+    assert!(
+        matches!(&decoded, Err(ProviderError::Response(message)) if message.contains("block 0 has no string `type`")),
+        "{decoded:?}"
+    );
+}
+
+/// The cost of the reply `frames` stream on a dialect with `quirks`, for
+/// a request naming `requested`.
+fn cost_of(quirks: Quirks, requested: &str, frames: &[Value]) -> Option<crate::completion::Cost> {
+    let origin = crate::message::Origin::new(
+        crate::providers::anthropic::wire::MESSAGES_API,
+        "anthropic",
+        requested,
+    );
+    let fold = crate::operation::ReplyFold::new(origin);
+    let decoded = crate::driver::decode_with(fold, "anthropic", |reply| {
+        reply.feed(
+            &mut MessagesDecoder::new(quirks),
+            Some(document::Message::default()),
+            frames
+                .iter()
+                .map(|frame| WireFrame::Text(frame.to_string())),
+        )
+    });
+    let response = match decoded.outcome {
+        Ok(response) => response,
+        Err(error) => panic!("the reply ends: {error}"),
+    };
+    response.usage.cost
+}
+
+/// The cost of a whole Claude Opus 5.5 message reporting `usage`, decoded
+/// on a dialect with `quirks`.
+fn priced(quirks: Quirks, usage: Value) -> Option<crate::completion::Cost> {
+    let message = json!({"type": "message", "id": "msg", "role": "assistant", "content": [],
+        "model": CLAUDE_OPUS_5_5, "stop_reason": "end_turn", "usage": usage});
+    cost_of(quirks, CLAUDE_OPUS_5_5, &[message])
+}
+
+/// The default decoder is Anthropic's own, which prices each write
+/// lifetime.
+#[test]
+fn the_default_decoder_prices_each_cache_lifetime() {
+    let split = json!({"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 22_002});
+    let message = json!({"type": "message", "id": "msg", "role": "assistant", "content": [],
+        "model": CLAUDE_OPUS_5_5, "stop_reason": "end_turn", "usage": written(22_002, split)});
+    let origin = crate::message::Origin::new(
+        crate::providers::anthropic::wire::MESSAGES_API,
+        "anthropic",
+        CLAUDE_OPUS_5_5,
+    );
+    let decoded = crate::driver::decode_with(
+        crate::operation::ReplyFold::new(origin),
+        "anthropic",
+        |reply| {
+            reply.feed(
+                &mut MessagesDecoder::default(),
+                Some(document::Message::default()),
+                [WireFrame::Text(message.to_string())],
+            )
+        },
+    );
+    let cost = match decoded.outcome {
+        Ok(response) => response.usage.cost,
+        Err(error) => panic!("the reply ends: {error}"),
+    };
+    let Some(cost) = cost else {
+        panic!("the catalog prices Opus 5.5");
+    };
+    assert!((cost.total - 0.176192).abs() < 1e-9, "{cost:?}");
+}
+
+/// A request that names no model is priced, write lifetimes included, as
+/// the model the reply names.
+#[test]
+fn a_reply_without_a_requested_model_is_priced_as_the_model_it_names() {
+    let split = json!({"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 22_002});
+    let message = json!({"type": "message", "id": "msg", "role": "assistant", "content": [],
+        "model": CLAUDE_OPUS_5_5, "stop_reason": "end_turn", "usage": written(22_002, split)});
+    let Some(cost) = cost_of(Quirks::anthropic(), "", &[message]) else {
+        panic!("the catalog prices Opus 5.5");
+    };
+    assert!((cost.total - 0.176192).abs() < 1e-9, "{cost:?}");
+}
+
+/// A split in a `message_delta` before the last is priced, as the
+/// reassembled reply holds it.
+#[test]
+fn a_split_from_an_earlier_message_delta_is_priced() {
+    let frames = [
+        json!({"type": "message_start", "message": {"id": "msg", "role": "assistant",
+            "content": [], "model": CLAUDE_OPUS_5_5, "stop_reason": null,
+            "usage": {"input_tokens": 4, "output_tokens": 0, "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 22_002}}}),
+        json!({"type": "message_delta", "delta": {"stop_reason": null},
+            "usage": {"cache_creation":
+                {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 22_002}}}),
+        json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 8}}),
+    ];
+    let Some(cost) = cost_of(Quirks::anthropic(), CLAUDE_OPUS_5_5, &frames) else {
+        panic!("the catalog prices Opus 5.5");
+    };
+    assert!(cost.is_complete(), "{cost:?}");
+    assert!((cost.total - 0.176192).abs() < 1e-9, "{cost:?}");
+}
+
+/// A malformed split in the terminal `message_delta` replaces a valid one
+/// from `message_start`, so the writes stay unpriced.
+#[test]
+fn a_malformed_terminal_split_leaves_the_writes_unpriced() {
+    let split = json!({"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 100});
+    let frames = [
+        json!({"type": "message_start", "message": {"id": "msg", "role": "assistant",
+            "content": [], "model": CLAUDE_OPUS_5_5, "stop_reason": null,
+            "usage": written(100, split)}}),
+        json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 8, "cache_creation": "invalid"}}),
+    ];
+    let Some(cost) = cost_of(Quirks::anthropic(), CLAUDE_OPUS_5_5, &frames) else {
+        panic!("the known parts still have prices");
+    };
+    assert_eq!(cost.cache_write, None);
+    assert!(!cost.is_complete(), "{cost:?}");
+}
+
+/// Synthetic Messages usage: 4 uncached input and 8 output tokens, with
+/// `written` cache writes split as `split` states.
+fn written(written: u64, split: Value) -> Value {
+    json!({"input_tokens": 4, "output_tokens": 8, "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": written, "cache_creation": split})
+}
+
+/// Each cache lifetime has its price. The one-hour sample matches the
+/// sanitized acceptance capture.
+#[test]
+fn anthropic_prices_each_cache_lifetime() {
+    for (short, long, expected) in [
+        (22_002, 0, 0.110186),
+        (0, 22_002, 0.176192),
+        (11_001, 11_001, 0.143189),
+        (0, 0, 0.000176),
+    ] {
+        let split = json!({"ephemeral_5m_input_tokens": short, "ephemeral_1h_input_tokens": long});
+        let cost = priced(Quirks::anthropic(), written(short + long, split));
+        let Some(cost) = cost else {
+            panic!("the catalog prices Opus 5.5");
+        };
+        assert!(cost.is_complete(), "{cost:?}");
+        assert!(
+            (cost.total - expected).abs() < 1e-9,
+            "{short}/{long}: {cost:?}"
+        );
+    }
+}
+
+/// A missing or contradictory split leaves the writes unpriced rather than
+/// passing as a complete estimate. The malformed values are synthetic.
+#[test]
+fn anthropic_requires_a_complete_consistent_cache_split() {
+    for split in [
+        Value::Null,
+        json!({}),
+        json!({"ephemeral_5m_input_tokens": 100}),
+        json!({"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": "100"}),
+        json!({"ephemeral_5m_input_tokens": -1, "ephemeral_1h_input_tokens": 101}),
+        json!({"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 99}),
+        json!({"ephemeral_5m_input_tokens": u64::MAX, "ephemeral_1h_input_tokens": 101}),
+    ] {
+        let Some(cost) = priced(Quirks::anthropic(), written(100, split.clone())) else {
+            panic!("the known parts still have prices");
+        };
+        assert_eq!(cost.cache_write, None, "{split}");
+        assert!(!cost.is_complete(), "{split}");
+        assert!((cost.total - 0.000176).abs() < 1e-9, "{split}: {cost:?}");
+    }
+}
+
+/// A gateway's writes keep the catalog's one write price, whatever split
+/// it reports.
+#[test]
+fn cache_lifetime_pricing_does_not_apply_to_gateways() {
+    let split = json!({"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 100});
+    let pricing = crate::catalog::Catalog::builtin()
+        .get_vendor("anthropic", CLAUDE_OPUS_5_5)
+        .and_then(|resolved| resolved.spec.pricing);
+    let usage = crate::completion::Usage::new()
+        .input_tokens(104)
+        .output_tokens(8)
+        .cached_input_tokens(0)
+        .cache_creation_input_tokens(100);
+    assert_eq!(
+        priced(Quirks::gateway(), written(100, split)),
+        pricing.and_then(|pricing| pricing.cost(&usage))
+    );
 }

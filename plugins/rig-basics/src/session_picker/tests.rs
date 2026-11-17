@@ -1,0 +1,261 @@
+use std::collections::BTreeMap;
+use std::fs;
+use std::time::{Duration, Instant};
+
+use bevy_app::TaskPoolPlugin;
+use rig_core::completion::Message;
+use rig_core::conversation::Conversation;
+use rig_ecs::AgentPlugin;
+use rig_harness_test_support::scratch_home;
+use rig_memory::{DirStore, SessionMeta, save};
+use serde_json::json;
+
+use super::*;
+use rig_harness::pick::{Chosen, Pick, PickPlugin, Picked};
+
+/// What the pickers' entities named when picked.
+#[derive(Resource, Default)]
+struct Seen(Vec<SessionPicked>);
+
+/// Saves session `n` of `home`: one message, listed as `session n`,
+/// changed at `n` ms, with `data` as its listed values.
+fn saved(home: &Home, n: u64, data: &[(&str, &str)]) -> SessionId {
+    let id: SessionId = format!("{}-{n}", 1_700_000_000 + n)
+        .parse()
+        .unwrap_or_else(|_| SessionId::generate());
+    let dir = home.session(&id);
+    fs::create_dir_all(dir.path()).ok();
+    let store = DirStore::open(dir.path());
+    assert!(store.is_ok());
+    let Ok(store) = store else { return id };
+    let mut conversation = Conversation::from_messages([Message::user(format!("hello {n}"))]);
+    assert!(save(&store, "agent", &mut conversation).is_ok());
+    let meta = SessionMeta {
+        title: format!("session {n}"),
+        updated: n,
+        listed: data
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), json!(value)))
+            .collect::<BTreeMap<_, _>>(),
+        ..SessionMeta::default()
+    };
+    assert!(meta.write(&store).is_ok());
+    assert!(dir.mark_saved().is_ok());
+    id
+}
+
+/// Updates `app` until `done` holds, for at most ten seconds.
+fn until(app: &mut App, done: impl Fn(&mut World) -> bool) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(10) {
+        app.update();
+        if done(app.world_mut()) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    false
+}
+
+/// A session picker over a home of more sessions than one task reads fills
+/// its picker newest first, without the running session; previews the
+/// highlighted session's line; shows and filters on a plugin's listed
+/// value, an empty one adding nothing to the label; and names the session
+/// picked.
+#[test]
+fn a_session_picker_fills_previews_filters_on_listed_values_and_names_the_pick() {
+    let home = scratch_home("rig-harness-session-picker");
+    let goal = [("goals.goal", "ship the parser")];
+    let unset = [("goals.goal", "")];
+    let ids: Vec<SessionId> = (1..=20)
+        .map(|n| match n {
+            7 => saved(&home, n, &goal),
+            8 => saved(&home, n, &unset),
+            _ => saved(&home, n, &[]),
+        })
+        .collect();
+    let (Some(running), Some(newest), Some(goal_id)) = (ids.first(), ids.last(), ids.get(6)) else {
+        return;
+    };
+    let mut app = App::new();
+    app.add_plugins((TaskPoolPlugin::default(), AgentPlugin, PickPlugin))
+        .add_plugins(SessionPickerPlugin)
+        .insert_resource(RigHome(home.clone()))
+        .insert_resource(SessionPaths(home.session(running)))
+        .init_resource::<Seen>()
+        .add_observer(
+            |picked: On<Picked>, named: Query<&SessionPicked>, mut seen: ResMut<Seen>| {
+                seen.0.extend(named.get(picked.entity).cloned());
+            },
+        );
+    let picker = app
+        .world_mut()
+        .spawn((
+            Picker::new("Resume"),
+            SessionPicker::default(),
+            Highlighted(0),
+        ))
+        .id();
+
+    let filled = until(&mut app, |world| {
+        world
+            .get::<Picker>(picker)
+            .is_some_and(|it| it.items.len() == 19)
+    });
+    let labels = |world: &World| -> Vec<String> {
+        let items = world.get::<Picker>(picker).map(|it| it.items.clone());
+        items
+            .unwrap_or_default()
+            .into_iter()
+            .map(|it| it.label)
+            .collect()
+    };
+    assert!(filled, "{:?}", labels(app.world()));
+    let shown = labels(app.world());
+    assert_eq!(shown.first().map(String::as_str), Some("session 20"));
+    assert!(
+        !shown.contains(&"session 1".to_owned()),
+        "the running one is left out"
+    );
+    assert!(
+        shown.contains(&"session 8".to_owned()),
+        "an empty listed value adds nothing: {shown:?}"
+    );
+    let previewed = until(&mut app, |world| world.get::<PickPreview>(picker).is_some());
+    assert!(previewed);
+    let preview = app.world().get::<PickPreview>(picker).cloned();
+    let line = match &preview {
+        Some(PickPreview::Conversation {
+            conversation,
+            at: None,
+        }) => conversation.messages(),
+        _ => &[],
+    };
+    assert_eq!(
+        line,
+        [Message::user("hello 20")].map(std::sync::Arc::new),
+        "{preview:?}"
+    );
+
+    if let Some(mut session) = app.world_mut().get_mut::<SessionPicker>(picker) {
+        session.filter.text = "SHIP the".to_owned();
+    }
+    app.update();
+    let shown = labels(app.world());
+    assert_eq!(shown, ["session 7  · ship the parser"]);
+
+    app.world_mut()
+        .trigger(Pick::person(picker, Some(Chosen::item(0))));
+    app.update();
+    let seen = &app.world().resource::<Seen>().0;
+    assert_eq!(
+        seen.first().and_then(|it| it.session.as_ref()),
+        Some(goal_id)
+    );
+    assert_ne!(goal_id, newest);
+    fs::remove_dir_all(home.root()).ok();
+}
+
+/// Marks every session picker item, as a plugin that labels them would.
+fn mark(mut pickers: Query<&mut Picker, Changed<Picker>>) {
+    for mut picker in &mut pickers {
+        for item in &mut picker.items {
+            if !item.label.ends_with(" *") {
+                item.label.push_str(" *");
+            }
+        }
+    }
+}
+
+/// A system after the fill changes the items' labels, which stay as it
+/// left them, and a pick still names the session at the item's position.
+#[test]
+fn a_system_after_the_fill_relabels_the_items() {
+    let home = scratch_home("rig-harness-session-picker-labels");
+    let ids: Vec<SessionId> = (1..=3).map(|n| saved(&home, n, &[])).collect();
+    let mut app = App::new();
+    app.add_plugins((TaskPoolPlugin::default(), AgentPlugin, PickPlugin))
+        .add_plugins(SessionPickerPlugin)
+        .add_systems(Update, mark.after(SessionPickerSystems))
+        .insert_resource(RigHome(home.clone()))
+        .init_resource::<Seen>()
+        .add_observer(
+            |picked: On<Picked>, named: Query<&SessionPicked>, mut seen: ResMut<Seen>| {
+                seen.0.extend(named.get(picked.entity).cloned());
+            },
+        );
+    let picker = app
+        .world_mut()
+        .spawn((Picker::new("Resume"), SessionPicker::default()))
+        .id();
+    let labels = |world: &World| -> Vec<String> {
+        let items = world.get::<Picker>(picker).map(|it| it.items.clone());
+        let items = items.unwrap_or_default().into_iter();
+        items.map(|it| it.label).collect()
+    };
+    let filled = until(&mut app, |world| labels(world).len() == 3);
+    assert!(filled, "{:?}", labels(app.world()));
+    app.update();
+    assert_eq!(
+        labels(app.world()),
+        ["session 3 *", "session 2 *", "session 1 *"]
+    );
+
+    app.world_mut()
+        .trigger(Pick::person(picker, Some(Chosen::item(1))));
+    app.update();
+    let seen = &app.world().resource::<Seen>().0;
+    assert_eq!(seen.first().and_then(|it| it.session.as_ref()), ids.get(1));
+    fs::remove_dir_all(home.root()).ok();
+}
+
+/// A session shows the last two parts of its folder beside its label, so
+/// two `work` folders differ, and its whole folder when asked for more,
+/// which the filter matches too.
+#[test]
+fn a_sessions_folder_is_in_its_detail_and_whole_in_its_more() {
+    let entry = |folder: &str| SessionEntry {
+        id: SessionId::generate(),
+        name: Some("fix the parser".to_owned()),
+        meta: SessionMeta::default(),
+        directory: Some(PathBuf::from(folder)),
+        updated: SystemTime::now(),
+        running: false,
+    };
+    let (a, b) = (entry("/x/a/work"), entry("/x/b/work"));
+    let compact = |parent: &str| format!("…{0}{parent}{0}work · ", std::path::MAIN_SEPARATOR);
+    assert!(a.detail().starts_with(&compact("a")), "{}", a.detail());
+    assert!(b.detail().starts_with(&compact("b")), "{}", b.detail());
+    assert_eq!(a.label(), "fix the parser");
+    assert_eq!(a.more(), "fix the parser\n/x/a/work");
+    assert!(entry("/x").detail().starts_with("/x · "));
+    // Cut only where that is shorter.
+    assert!(entry("/ab/c").detail().starts_with("/ab/c · "));
+    let shown = |entry: &SessionEntry| (entry.label(), Some(entry.detail()), Some(entry.more()));
+    let filter = SessionFilter {
+        text: "x/a".to_owned(),
+        ..SessionFilter::default()
+    };
+    assert!(filter.passes(&a, &shown(&a)));
+    assert!(!filter.passes(&b, &shown(&b)));
+}
+
+/// On Windows a share or a drive is the path's prefix, not one of its
+/// parts; the folder's end is still what shows.
+#[cfg(windows)]
+#[test]
+fn a_windows_folder_shows_its_end() {
+    let detail = |folder: &str| {
+        let entry = SessionEntry {
+            id: SessionId::generate(),
+            name: None,
+            meta: SessionMeta::default(),
+            directory: Some(PathBuf::from(folder)),
+            updated: SystemTime::now(),
+            running: false,
+        };
+        entry.detail()
+    };
+    assert!(detail(r"\\server\share\repo\work").starts_with(r"…\repo\work · "));
+    assert!(detail(r"C:\code\repo\work").starts_with(r"…\repo\work · "));
+}

@@ -1,11 +1,11 @@
 //! Matrix O's mock cells: a rerank through a mock `RerankModel` behind a
-//! `RerankAdapter` on a host's bus (no keyed provider in the tree has a
+//! `ModelAdapter` on a host's bus (no keyed provider in the tree has a
 //! rerank cassette suite), and a `Prompted` answer the run returns
 //! unvalidated.
 
 use rig::agent::AgentBuilder;
-use rig::bus::Bus;
 use rig::effect::{EffectFamily, HandlerKey};
+use rig::handlers::Handlers;
 use rig::run::OutputMode;
 use rig::test_utils::MockCompletionModel;
 use rig_cassette::agent::AgentReplayExt;
@@ -19,29 +19,29 @@ const PROMPT: &str = "Reply with the single word: ready.";
 /// the completion: `[Rerank, Completion]`.
 #[tokio::test]
 async fn oracle_rerank_effect_log_is_the_golden_fixture() {
-    let (dispatcher, registrar, mut driver) = Bus::channel();
+    let handlers = Handlers::default();
     let model_key = HandlerKey::from("golden/model:default");
-    driver
+    handlers
         .register_erased(
             model_key.clone(),
-            rig::serve::ErasedHandler::new(rig::serve::adapters::CompletionAdapter::new(
+            rig::serve::ErasedHandler::new(rig::serve::adapters::ModelAdapter::new(
                 "default",
                 MockCompletionModel::text("ready"),
             )),
         )
         .expect("a fresh key");
-    driver
+    handlers
         .register_erased(
             HandlerKey::from(RERANK_KEY),
-            rig::serve::ErasedHandler::new(rig::serve::adapters::RerankAdapter::new(
-                "host", MockRerank,
+            rig::serve::ErasedHandler::new(rig::serve::adapters::ModelAdapter::new(
+                "host",
+                MockRerank::model(),
             )),
         )
         .expect("a fresh key");
-    let recorder = rig::cassette::effect_log::EffectLogRecorder::new();
-    driver.record_to(recorder.clone());
-    let driver = tokio::spawn(driver);
-    let agent = AgentBuilder::over_bus(dispatcher.clone(), registrar.clone(), "golden", model_key)
+    let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
+    handlers.record_to(recorder.clone());
+    let agent = AgentBuilder::over_handlers(handlers.clone(), "golden", model_key)
         .name("golden")
         .preamble(PREAMBLE)
         .add_hook(RerankDocs)
@@ -50,11 +50,10 @@ async fn oracle_rerank_effect_log_is_the_golden_fixture() {
         .prompt(PROMPT)
         .await
         .expect("the agent answers")
-        .output;
+        .output();
     assert_eq!(output, "ready");
     let log = agent.stamp(recorder.take());
-    drop((agent, dispatcher, registrar));
-    driver.await.expect("the host's driver");
+    drop(agent);
     assert_eq!(
         families(&log),
         [EffectFamily::Rerank, EffectFamily::Completion]
@@ -85,7 +84,7 @@ async fn oracle_prompted_unvalidated_effect_log_is_the_golden_fixture() {
         .prompt("Return a concise event object for a local Rust meetup in Seattle.")
         .await
         .expect("the run does not validate a prompted answer")
-        .output;
+        .output();
     assert_eq!(output, "not an object");
     let log = agent.stamp(recorder.take());
     assert_eq!(families(&log), [EffectFamily::Completion]);

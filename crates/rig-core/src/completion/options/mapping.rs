@@ -1,0 +1,212 @@
+//! What a completion wire answers for each option: [`OptionFields`] is the
+//! request's options as a wire reads them, and [`OptionMap`] holds one
+//! [`Mapping`] per option. Neither has `..` or a default, so a new option
+//! fails to compile in every wire until it answers for it.
+
+use serde_json::Value;
+
+use super::{CacheRetention, Reasoning, ServiceTier, Verbosity};
+use crate::completion::CompletionRequest;
+
+/// Every option but the policy, borrowed, as a wire's
+/// [`map_options`](crate::completion::ReplayTarget::map_options) reads it.
+/// Not `#[non_exhaustive]`, so wires in companion crates destructure it
+/// whole, which `#[non_exhaustive]` forbids for
+/// [`GenerationOptions`](super::GenerationOptions).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OptionFields<'a> {
+    /// How much the model reasons.
+    pub reasoning: Option<&'a Reasoning>,
+    /// How long the prompt prefix stays cached.
+    pub cache: Option<&'a CacheRetention>,
+    /// The processing tier.
+    pub service_tier: Option<&'a ServiceTier>,
+    /// How long the answer should be.
+    pub verbosity: Option<&'a Verbosity>,
+    /// Whether several tool calls may come in one turn.
+    pub parallel_tool_calls: Option<bool>,
+    /// Nucleus sampling probability mass.
+    pub top_p: Option<f64>,
+    /// Sampling seed.
+    pub seed: Option<u64>,
+    /// Stop sequences; empty means unset.
+    pub stop: &'a [String],
+    /// The key the provider routes prompt-cache lookups by.
+    pub cache_key: Option<&'a str>,
+}
+
+impl OptionFields<'_> {
+    /// Whether `option` is set. The request's `temperature` is not one of
+    /// these fields, so it reads as unset.
+    pub(crate) fn is_set(&self, option: OptionName) -> bool {
+        match option {
+            OptionName::Reasoning => self.reasoning.is_some(),
+            OptionName::Cache => self.cache.is_some(),
+            OptionName::ServiceTier => self.service_tier.is_some(),
+            OptionName::Verbosity => self.verbosity.is_some(),
+            OptionName::ParallelToolCalls => self.parallel_tool_calls.is_some(),
+            OptionName::TopP => self.top_p.is_some(),
+            OptionName::Seed => self.seed.is_some(),
+            OptionName::Stop => !self.stop.is_empty(),
+            OptionName::CacheKey => self.cache_key.is_some(),
+            OptionName::Temperature => false,
+        }
+    }
+}
+
+/// A generation option, or the request's `temperature`, which the catalog
+/// also refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OptionName {
+    Reasoning,
+    Cache,
+    ServiceTier,
+    Verbosity,
+    ParallelToolCalls,
+    TopP,
+    Seed,
+    Stop,
+    CacheKey,
+    Temperature,
+}
+
+impl OptionName {
+    /// The field name errors and logs give the option.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Reasoning => "reasoning",
+            Self::Cache => "cache",
+            Self::ServiceTier => "service_tier",
+            Self::Verbosity => "verbosity",
+            Self::ParallelToolCalls => "parallel_tool_calls",
+            Self::TopP => "top_p",
+            Self::Seed => "seed",
+            Self::Stop => "stop",
+            Self::CacheKey => "cache_key",
+            Self::Temperature => "temperature",
+        }
+    }
+
+    /// Unset the option on `request`.
+    pub(crate) fn clear(self, request: &mut CompletionRequest) {
+        let options = &mut request.options;
+        match self {
+            Self::Reasoning => options.reasoning = None,
+            Self::Cache => options.cache = None,
+            Self::ServiceTier => options.service_tier = None,
+            Self::Verbosity => options.verbosity = None,
+            Self::ParallelToolCalls => options.parallel_tool_calls = None,
+            Self::TopP => options.top_p = None,
+            Self::Seed => options.seed = None,
+            Self::Stop => options.stop.clear(),
+            Self::CacheKey => options.cache_key = None,
+            Self::Temperature => request.temperature = None,
+        }
+    }
+}
+
+/// What a wire does with one option.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq)]
+pub enum Mapping {
+    /// The option is unset. For a set option this is an encode error.
+    Nothing,
+    /// Deep-merge this JSON object into the body, above the wire's own
+    /// encoding of the request and below `additional_params`.
+    Send(Value),
+    /// Honour the option by sending nothing: the provider default already
+    /// does what was asked. Logged at `debug` with the reason.
+    Omit(&'static str),
+    /// Honour the option through markers the wire's base builder writes
+    /// inside the body's arrays. Valid for `cache` only.
+    Place,
+    /// The wire or model cannot honour it: an error under
+    /// [`OnUnsupported::Error`](super::OnUnsupported::Error), a warning
+    /// under [`OnUnsupported::Ignore`](super::OnUnsupported::Ignore).
+    Unsupported(String),
+}
+
+impl Mapping {
+    /// `Nothing` for an unset option, otherwise what `map` answers for it.
+    pub fn of<T>(value: Option<T>, map: impl FnOnce(T) -> Mapping) -> Mapping {
+        value.map_or(Mapping::Nothing, map)
+    }
+
+    /// `Nothing` for an empty stop list, otherwise what `map` answers.
+    pub fn of_stop(stop: &[String], map: impl FnOnce(&[String]) -> Mapping) -> Mapping {
+        if stop.is_empty() {
+            Mapping::Nothing
+        } else {
+            map(stop)
+        }
+    }
+
+    /// The refusal for `reason`. Answer it only for a set option, through
+    /// [`Mapping::of`] or [`Mapping::of_stop`]: an unset option answers
+    /// [`Mapping::Nothing`].
+    pub fn unsupported(reason: impl Into<String>) -> Mapping {
+        Mapping::Unsupported(reason.into())
+    }
+
+    /// The answer for [`cache_key`](super::GenerationOptions::cache_key) of
+    /// a wire whose provider routes its prompt cache without a key:
+    /// `Nothing` when unset, else honoured by sending nothing, as the key
+    /// is only a routing hint.
+    pub fn unrouted(cache_key: Option<&str>) -> Mapping {
+        Mapping::of(cache_key, |_| {
+            Mapping::Omit("the provider routes its prompt cache without a key")
+        })
+    }
+}
+
+/// One [`Mapping`] per option, by field name. Not `#[non_exhaustive]` and no
+/// `Default`, so a wire writes every field.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OptionMap {
+    /// [`GenerationOptions::reasoning`](super::GenerationOptions::reasoning).
+    pub reasoning: Mapping,
+    /// [`GenerationOptions::cache`](super::GenerationOptions::cache).
+    pub cache: Mapping,
+    /// [`GenerationOptions::service_tier`](super::GenerationOptions::service_tier).
+    pub service_tier: Mapping,
+    /// [`GenerationOptions::verbosity`](super::GenerationOptions::verbosity).
+    pub verbosity: Mapping,
+    /// [`GenerationOptions::parallel_tool_calls`](super::GenerationOptions::parallel_tool_calls).
+    pub parallel_tool_calls: Mapping,
+    /// [`GenerationOptions::top_p`](super::GenerationOptions::top_p).
+    pub top_p: Mapping,
+    /// [`GenerationOptions::seed`](super::GenerationOptions::seed).
+    pub seed: Mapping,
+    /// [`GenerationOptions::stop`](super::GenerationOptions::stop).
+    pub stop: Mapping,
+    /// [`GenerationOptions::cache_key`](super::GenerationOptions::cache_key).
+    pub cache_key: Mapping,
+}
+
+impl OptionMap {
+    /// Every option's name and answer, in field order.
+    pub(super) fn into_slots(self) -> [(OptionName, Mapping); 9] {
+        let OptionMap {
+            reasoning,
+            cache,
+            service_tier,
+            verbosity,
+            parallel_tool_calls,
+            top_p,
+            seed,
+            stop,
+            cache_key,
+        } = self;
+        [
+            (OptionName::Reasoning, reasoning),
+            (OptionName::Cache, cache),
+            (OptionName::ServiceTier, service_tier),
+            (OptionName::Verbosity, verbosity),
+            (OptionName::ParallelToolCalls, parallel_tool_calls),
+            (OptionName::TopP, top_p),
+            (OptionName::Seed, seed),
+            (OptionName::Stop, stop),
+            (OptionName::CacheKey, cache_key),
+        ]
+    }
+}

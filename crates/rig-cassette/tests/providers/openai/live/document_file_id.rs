@@ -7,9 +7,9 @@ use futures::FutureExt;
 use rig::message::{
     Document, DocumentMediaType, DocumentSourceKind, Message, Text, UserContent as RigUserContent,
 };
-use rig::prelude::*;
 use rig::providers::openai;
-use rig::providers::openai::wire::{OpenAI, Route};
+use rig::providers::openai::wire::Route;
+use rig_test_support::cassette_models::OpenAiModels;
 use serde::Deserialize;
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, resume_unwind};
@@ -107,7 +107,7 @@ where
 
 fn file_id_document(file_id: &str) -> Document {
     Document {
-        data: DocumentSourceKind::file_id(file_id),
+        data: DocumentSourceKind::file_id(file_id).into(),
         media_type: Some(DocumentMediaType::PDF),
         additional_params: None,
     }
@@ -115,7 +115,7 @@ fn file_id_document(file_id: &str) -> Document {
 
 fn provider_file_content_as_generic_document(file_id: &str) -> RigUserContent {
     let content = RigUserContent::Document(Document {
-        data: DocumentSourceKind::file_id(file_id),
+        data: DocumentSourceKind::file_id(file_id).into(),
         media_type: None,
         additional_params: None,
     });
@@ -147,7 +147,7 @@ fn assert_file_id_user_content(content: &RigUserContent, expected_file_id: &str)
     };
 
     assert!(
-        matches!(data, DocumentSourceKind::FileId(file_id) if file_id == expected_file_id),
+        matches!(data, rig::message::DocumentData::File(DocumentSourceKind::FileId(file_id)) if file_id == expected_file_id),
         "expected file ID document source {expected_file_id}, got {data:?}"
     );
 }
@@ -162,7 +162,7 @@ fn assert_history_contains_file_id(history: &[Message], expected_file_id: &str) 
             matches!(
                 content,
                 RigUserContent::Document(Document {
-                    data: DocumentSourceKind::FileId(file_id),
+                    data: rig::message::DocumentData::File(DocumentSourceKind::FileId(file_id)),
                     ..
                 }) if file_id == expected_file_id
             )
@@ -184,12 +184,9 @@ fn assert_page_label(response: &str, page_number: u8) {
 #[ignore = "requires OPENAI_API_KEY"]
 async fn responses_document_file_id_roundtrip_live() {
     with_uploaded_pdf(|file_id| async move {
-        let client = OpenAI::from_env()
-            .expect("config should build from env")
-            .bound()
-            .expect("transport should build");
-        let agent = client
-            .agent(openai::GPT_5_5)
+        let client = OpenAiModels::from_env()
+            .expect("config should build from env");
+        let agent = rig::AgentBuilder::new(client.completion(openai::GPT_5_5))
             .preamble(DOCUMENT_PREAMBLE)
             .build();
         let mut history = Vec::new();
@@ -198,7 +195,7 @@ async fn responses_document_file_id_roundtrip_live() {
         let response = agent
             .chat(document_question(provider_native_content, 2), &mut history)
             .await
-            .expect("Responses API should read uploaded PDF by file_id").output;
+            .expect("Responses API should read uploaded PDF by file_id").output();
         assert_page_label(&response, 2);
         assert_history_contains_file_id(&history, &file_id);
 
@@ -208,14 +205,14 @@ async fn responses_document_file_id_roundtrip_live() {
                 &mut history,
             )
             .await
-            .expect("Responses API should reuse file_id document from chat history").output;
+            .expect("Responses API should reuse file_id document from chat history").output();
         assert_page_label(&follow_up, 3);
         assert_history_contains_file_id(&history, &file_id);
 
         let direct_response = agent
             .prompt(direct_file_id_document_question(&file_id, 1))
             .await
-            .expect("Responses API should read direct generic file_id document").output;
+            .expect("Responses API should read direct generic file_id document").output();
         assert_page_label(&direct_response, 1);
     })
     .await;
@@ -225,12 +222,10 @@ async fn responses_document_file_id_roundtrip_live() {
 #[ignore = "requires OPENAI_API_KEY"]
 async fn chat_completions_document_file_id_roundtrip_live() {
     with_uploaded_pdf(|file_id| async move {
-        let client = OpenAI::from_env()
+        let client = OpenAiModels::from_env()
             .expect("config should build from env")
-            .with_route(Route::Chat)
-            .bound()
-            .expect("transport should build");
-        let agent = client.agent(openai::GPT_5_5)
+            .map_config(|config| config.with_route(Route::Chat));
+        let agent = rig::AgentBuilder::new(client.completion(openai::GPT_5_5))
             .preamble(DOCUMENT_PREAMBLE)
             .build();
         let mut history = Vec::new();
@@ -238,7 +233,7 @@ async fn chat_completions_document_file_id_roundtrip_live() {
         let response = agent
             .chat(direct_file_id_document_question(&file_id, 2), &mut history)
             .await
-            .expect("Chat Completions API should read uploaded PDF by file_id").output;
+            .expect("Chat Completions API should read uploaded PDF by file_id").output();
         assert_page_label(&response, 2);
         assert_history_contains_file_id(&history, &file_id);
 
@@ -248,7 +243,7 @@ async fn chat_completions_document_file_id_roundtrip_live() {
                 &mut history,
             )
             .await
-            .expect("Chat Completions API should reuse file_id document from chat history").output;
+            .expect("Chat Completions API should reuse file_id document from chat history").output();
         assert_page_label(&follow_up, 3);
         assert_history_contains_file_id(&history, &file_id);
 
@@ -256,7 +251,7 @@ async fn chat_completions_document_file_id_roundtrip_live() {
         let native_roundtrip_response = agent
             .prompt(document_question(provider_native_content, 1))
             .await
-            .expect("Chat Completions API should read provider-native file_id round-tripped through Rig").output;
+            .expect("Chat Completions API should read provider-native file_id round-tripped through Rig").output();
         assert_page_label(&native_roundtrip_response, 1);
     })
     .await;

@@ -19,14 +19,13 @@
 //! | `serial_per_handler` | false · true |
 //! | `tool_concurrency` | 1 · 2 |
 //! | buffers | default · `command_capacity: 1, stream_capacity: 1` |
-//! | keys served | model + 2 tools · model + memory + tool |
 //! | tool wire | anthropic (two calls in one turn) · gemini (two turns, id-less) · openai (two turns, dual ids) |
 //! | events | dropped · kept |
 //! | routing | one model · a route selected after the first turn · a route registered, never selected |
 //! | bus ownership | own · a host's (unary · streamed with events) |
 //!
-//! Full cross-product: 2 × 2 × 2 × 2 × 3 × 2 × 3 × 3 = 864. Recorded:
-//! the 12 cells below. Pruned: the serving axes are crossed only on the
+//! Full cross-product: 2 × 2 × 2 × 3 × 2 × 3 × 3 = 432. Recorded:
+//! the 11 cells below. Pruned: the serving axes are crossed only on the
 //! program that can show them (anthropic's two calls in one turn, the one
 //! provider that emits them); a two-turn program has nothing for
 //! concurrency to overlap, so it gets one serial cell (gemini) and one
@@ -44,7 +43,6 @@
 //! | `anthropic_serving_concurrent_concurrency_two` | `concurrent_concurrency_two_…` | concurrent, 2 slots | the same |
 //! | `anthropic_serving_concurrent_concurrency_two_events` | `concurrent_concurrency_two_events_…` | concurrent, 2 slots, events kept | the same |
 //! | `anthropic_serving_capacity_one` | `capacity_one_…` | concurrent, 2 slots, every buffer at 1 | the same |
-//! | `anthropic_serving_serial_memory_tools` | `serial_memory_tools_…` | serial over memory + tool | `corpus_hooks/observe_everything` |
 //! | `gemini_serving_two_turns_serial` | gemini `corpus_serving.rs` `two_turns_serial_…` | serial, two turns, id-less calls | `hook_stress/…` |
 //! | `openai_serving_two_turns_concurrency_two` | openai `corpus_serving.rs` `two_turns_concurrency_two_…` | 2 slots, two turns, dual ids | `effect_corpus/tool_call_turns` |
 //! | `anthropic_serving_model_route` | `model_route_…` | route `fast` (Haiku 4.5) selected after the first turn | recorded: `corpus_serving/model_route` |
@@ -59,16 +57,12 @@
 //!   whose route was selected named it only in the signature. Fixed in
 //!   `rig-agent` (`route_keys`); the replay registers a route from the
 //!   log through `model_route_handler`, added for it.
-//! - A required key of the completion, memory or retrieval family that the
+//! - A required key of the completion or retrieval family that the
 //!   record never dispatched to could not be replayed at all
 //!   (`describe_required` knew tools only), so the unselected-route golden
 //!   was unreplayable. The log replayer now describes every required family.
 //! - An agent over a host's bus stamps the host's recording through
 //!   `rig_cassette::agent::AgentReplayExt::stamp`.
-//! - The bus-policy check is one-sided by design: a host-bus golden names
-//!   no policy and is accepted by any program, an own-bus golden is
-//!   accepted by a host-bus program. `the_policy_check_is_one_sided` pins
-//!   that contract.
 
 use crate::corpus;
 use rig_cassette::agent::AgentReplayExt;
@@ -161,11 +155,6 @@ const CAPACITY_ONE: Program = Program {
     tool_concurrency: Some(2),
     ..TWO_TOOLS
 };
-const SERIAL_MEMORY_TOOLS: Program = Program {
-    fixture: "anthropic_serving_serial_memory_tools",
-    conversation: Some("golden-conversation"),
-    ..TOOL_TURN
-};
 const GEMINI_TWO_TURNS_SERIAL: Program = Program {
     fixture: "gemini_serving_two_turns_serial",
     owner: "stress-agent",
@@ -212,7 +201,6 @@ both_interpreters! {
     concurrent_concurrency_two: CONCURRENT_CONCURRENCY_TWO,
     concurrent_concurrency_two_events: CONCURRENT_CONCURRENCY_TWO_EVENTS,
     capacity_one: CAPACITY_ONE,
-    serial_memory_tools: SERIAL_MEMORY_TOOLS,
     gemini_two_turns_serial: GEMINI_TWO_TURNS_SERIAL,
     openai_two_turns_concurrency_two: OPENAI_TWO_TURNS_CONCURRENCY_TWO,
     model_route: MODEL_ROUTE,
@@ -242,13 +230,10 @@ fn the_trace_is_independent_of_the_serving_policy() {
             })
             .collect::<Vec<_>>()
     };
-    let mut policies = std::collections::BTreeSet::new();
     for cell in cells {
         let log = corpus::golden(cell.fixture);
         assert_eq!(shape(&log), shape(&reference), "{}", cell.fixture);
-        policies.insert(format!("{:?}", log.header.bus.expect("an own bus")));
     }
-    assert_eq!(policies.len(), 3, "three distinct policies: {policies:?}");
 }
 
 /// A program named otherwise mints other keys for its own tools, so its
@@ -266,10 +251,9 @@ async fn a_relabelled_owner_is_refused_with_both_rows() {
     // The golden's tool is served too, so the refusal is the row's, not
     // the signature's.
     let served = replay.tool_server();
-    served.attach(&replay.registrar);
-    let agent = AgentBuilder::over_bus(
-        replay.dispatcher.clone(),
-        replay.registrar.clone(),
+    served.attach(&replay.handlers);
+    let agent = AgentBuilder::over_handlers(
+        replay.handlers.clone(),
         program.owner,
         replay.model_key.clone(),
     )
@@ -287,36 +271,5 @@ async fn a_relabelled_owner_is_refused_with_both_rows() {
         "{refusal}"
     );
     drop(agent);
-    replay.close().await;
-}
-
-/// The policy check compares two policies only when both sides name one:
-/// a host-bus golden (no policy) is accepted by an own-bus program, and
-/// an own-bus golden by a host-bus program. The policy is the host's.
-#[tokio::test]
-async fn the_policy_check_is_one_sided() {
-    // An own-bus program over the host-bus golden.
-    let host = corpus::golden(HOST_BUS.fixture);
-    assert_eq!(host.header.bus, None);
-    let own = corpus::golden(MODEL_ROUTE_UNSELECTED.fixture);
-    assert!(own.header.bus.is_some());
-
-    let replay = corpus::Replay::open(&HOST_BUS);
-    let server = replay.tool_server();
-    // Never dispatched: the check reads headers and descriptors only.
-    let owned = AgentBuilder::named_model(
-        "default",
-        rig_core::test_utils::MockCompletionModel::text("unused"),
-    )
-    .name("golden")
-    .preamble(TOOLS_PREAMBLE)
-    .temperature(0.0)
-    .tool_server_handle(server)
-    .build();
-    assert!(owned.bus_config().is_some(), "an own bus names its policy");
-    owned
-        .check_replayable(&replay.log)
-        .expect("a host-bus golden names no policy to compare");
-    drop(owned);
     replay.close().await;
 }

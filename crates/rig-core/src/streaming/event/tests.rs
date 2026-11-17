@@ -1,240 +1,180 @@
 use super::*;
-use crate::{completion::Usage, message::ReasoningContent, streaming::MintKind};
+use serde_json::json;
 
-#[test]
-fn every_event_round_trips_through_serde() {
-    let events = vec![
-        StreamEvent::BlockStart {
-            id: BlockId::wire("msg_1"),
-            source_order: None,
-            kind: BlockKind::Message,
-        },
-        StreamEvent::BlockStart {
-            id: BlockId::minted(MintKind::Text, 0),
-            source_order: None,
-            kind: BlockKind::Text {
-                additional_params: AdditionalParams::from_entries([("k", serde_json::json!(1))]),
-            },
-        },
-        StreamEvent::text(BlockId::minted(MintKind::Text, 0), "hi"),
-        StreamEvent::BlockDelta {
-            id: BlockId::wire("rs_1"),
-            delta: Delta::Reasoning {
-                text: "think".into(),
-            },
-        },
-        StreamEvent::BlockStart {
-            id: BlockId::wire("call_1"),
-            source_order: Some(SourceOrder::new(3, 1)),
-            kind: BlockKind::ToolCall,
-        },
-        StreamEvent::BlockDelta {
-            id: BlockId::wire("call_1"),
-            delta: Delta::ToolName { name: "add".into() },
-        },
-        StreamEvent::BlockDelta {
-            id: BlockId::wire("call_1"),
-            delta: Delta::ToolArguments {
-                arguments: "{\"x\":1}".into(),
-            },
-        },
-        StreamEvent::BlockEnd {
-            id: BlockId::wire("call_1"),
-            end: BlockClose::ToolCall(
-                ToolCallEnd::new(UnparseableToolInput::Drop).with_call_id("c1"),
-            ),
-            block: None,
-        },
-        StreamEvent::BlockEnd {
-            id: BlockId::wire("rs_1"),
-            end: BlockClose::Reasoning {
-                reasoning: Some(Reasoning {
-                    provider: None,
-                    id: Some("rs_1".into()),
-                    content: vec![ReasoningContent::Text {
-                        text: "think".into(),
-                        signature: Some("sig".into()),
-                    }],
-                }),
-                signature: None,
-                wire_sent: true,
-            },
-            block: None,
-        },
-        StreamEvent::BlockEnd {
-            id: BlockId::minted(MintKind::Text, 0),
-            end: BlockClose::Text,
-            block: None,
-        },
-        StreamEvent::Final(StreamFinal::new(
-            "mock",
-            Usage::default(),
-            serde_json::json!({}),
-        )),
-        StreamEvent::Unknown(UnknownPayload::new(
-            serde_json::json!({"type": "web_search_call"}),
-        )),
-    ];
-    for event in events {
-        let json = serde_json::to_string(&event).expect("serialize");
-        let back: StreamEvent = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back, event, "{json}");
-    }
+fn text_end(part: u32, text: &str) -> serde_json::Value {
+    json!({"item": "event", "value": {"event": "end", "part": part, "content": {"type": "text", "text": text}}})
 }
 
 #[test]
-fn legacy_block_starts_decode_without_source_order() {
-    let event: StreamEvent = serde_json::from_str(
-        r#"{"event":"block_start","id":"wire:t","kind":{"kind":"tool_call"}}"#,
-    )
-    .expect("legacy start");
-    assert!(matches!(
-        event,
-        StreamEvent::BlockStart {
-            source_order: None,
-            ..
-        }
-    ));
-}
-
-#[test]
-fn unknown_event_wraps_every_json_shape_in_a_required_payload() {
-    let values = [
-        serde_json::json!({
-            "event": "provider_future",
-            "payload": {
-                "event": "nested_future",
-                "payload": [true, null],
-            },
-        }),
-        serde_json::json!([1, "two", null]),
-        serde_json::json!("text"),
-        serde_json::json!(42),
-        serde_json::json!(true),
-        serde_json::Value::Null,
-    ];
-
-    for value in values {
-        let event = StreamEvent::Unknown(UnknownPayload::new(value.clone()));
-        let encoded = serde_json::to_value(&event).expect("serialize unknown event");
-        assert_eq!(
-            encoded,
-            serde_json::json!({"event": "unknown_v2", "payload": value}),
-        );
-        assert_eq!(
-            serde_json::from_value::<StreamEvent>(encoded).expect("deserialize unknown event"),
-            event,
-        );
-    }
-}
-
-#[test]
-fn unknown_event_requires_payload_but_accepts_explicit_null() {
-    assert!(serde_json::from_str::<StreamEvent>(r#"{"event":"unknown_v2"}"#).is_err());
-
-    let decoded = serde_json::from_str::<StreamEvent>(r#"{"event":"unknown_v2","payload":null}"#)
-        .expect("explicit null is an unknown payload");
+fn a_writer_sequence_round_trips_through_serde() {
+    let value = json!([
+        {"item": "event", "value": {"event": "start", "part": 0, "kind": "text"}},
+        {"item": "event", "value": {"event": "text", "part": 0, "text": "hi"}},
+        {"item": "unknown", "value": {"type": "web_search_call"}},
+        text_end(0, "hi"),
+    ]);
+    let transcript = StreamRecord::parse(value.clone()).expect("a writer sequence");
+    assert_eq!(transcript.len(), 4);
     assert_eq!(
-        decoded,
-        StreamEvent::Unknown(UnknownPayload::new(serde_json::Value::Null)),
+        serde_json::to_value(&transcript).expect("serializes"),
+        value
+    );
+    let back: StreamRecord = serde_json::from_value(value).expect("deserializes");
+    assert_eq!(back, transcript);
+}
+
+#[test]
+fn an_event_for_a_part_that_never_started_is_refused() {
+    let value = json!([{"item": "event", "value": {"event": "text", "part": 0, "text": "hi"}}]);
+    assert_eq!(
+        StreamRecord::parse(value),
+        Err(SequenceError::UnknownPart(0))
     );
 }
 
 #[test]
-fn legacy_unknown_event_encoding_is_rejected() {
-    let legacy_encodings = [
-        r#"{"event":"unknown","type":"provider_future"}"#,
-        r#"{"event":"unknown","payload":null}"#,
-        r#"{"event":"unknown","event":"provider_future","payload":{"nested":true}}"#,
-    ];
-
-    for encoded in legacy_encodings {
-        assert!(
-            serde_json::from_str::<StreamEvent>(encoded).is_err(),
-            "legacy encoding unexpectedly decoded: {encoded}",
-        );
-    }
+fn a_start_that_reuses_a_position_is_refused() {
+    let start = json!({"item": "event", "value": {"event": "start", "part": 1, "kind": "text"}});
+    let value = json!([start.clone(), start]);
+    assert_eq!(
+        StreamRecord::parse(value),
+        Err(SequenceError::UnknownPart(1))
+    );
 }
 
 #[test]
-fn standalone_unknown_payload_encoding_stays_transparent() {
-    let values = [
-        serde_json::json!({"event": "provider_future", "payload": {"nested": true}}),
-        serde_json::json!([1, "two", null]),
-        serde_json::json!("text"),
-        serde_json::json!(42),
-        serde_json::json!(true),
-        serde_json::Value::Null,
-    ];
-
-    for value in values {
-        let payload = UnknownPayload::new(value.clone());
-        assert_eq!(
-            serde_json::to_value(&payload).expect("serialize standalone payload"),
-            value,
-        );
-        assert_eq!(
-            serde_json::from_value::<UnknownPayload>(value)
-                .expect("deserialize standalone payload"),
-            payload,
-        );
-    }
+fn a_part_that_grows_after_its_end_is_refused() {
+    let value = json!([
+        {"item": "event", "value": {"event": "start", "part": 0, "kind": "text"}},
+        text_end(0, ""),
+        {"item": "event", "value": {"event": "text", "part": 0, "text": "late"}},
+    ]);
+    assert_eq!(
+        StreamRecord::parse(value),
+        Err(SequenceError::EndedTwice(2))
+    );
 }
 
 #[test]
-fn unchanged_event_variants_keep_their_wire_bytes() {
-    let events = [
-        (
-            StreamEvent::BlockStart {
-                id: BlockId::wire("msg_1"),
-                kind: BlockKind::Message,
-                source_order: None,
-            },
-            r#"{"event":"block_start","id":"wire:msg_1","kind":{"kind":"message"}}"#,
-        ),
-        (
-            StreamEvent::text(BlockId::wire("text_1"), "hello"),
-            r#"{"event":"block_delta","id":"wire:text_1","delta":{"delta":"text","text":"hello"}}"#,
-        ),
-        (
-            StreamEvent::BlockEnd {
-                id: BlockId::wire("text_1"),
-                end: BlockClose::Text,
-                block: None,
-            },
-            r#"{"event":"block_end","id":"wire:text_1","end":{"close":"text"}}"#,
-        ),
-        (
-            StreamEvent::Final(StreamFinal::new(
-                "mock",
-                Usage::default(),
-                serde_json::json!({}),
-            )),
-            r#"{"event":"final","usage":{},"finish_reason":null,"message_id":null,"response_id":null,"provider":"mock","model":null,"raw":{}}"#,
-        ),
-    ];
-
-    for (event, expected) in events {
-        assert_eq!(
-            serde_json::to_string(&event).expect("serialize event"),
-            expected
-        );
-    }
+fn a_fragment_of_another_kind_is_refused() {
+    let value = json!([
+        {"item": "event", "value": {"event": "start", "part": 0, "kind": "text"}},
+        {"item": "event", "value": {"event": "reasoning", "part": 0, "text": "no"}},
+    ]);
+    assert_eq!(StreamRecord::parse(value), Err(SequenceError::WrongKind(1)));
 }
 
 #[test]
-fn empty_additional_params_are_a_decode_error() {
-    let json =
-        r#"{"event":"block_start","id":"wire:t","kind":{"kind":"text","additional_params":{}}}"#;
-    assert!(serde_json::from_str::<StreamEvent>(json).is_err());
-    let json = r#"{"event":"block_start","id":"wire:t","kind":{"kind":"text"}}"#;
-    assert!(matches!(
-        serde_json::from_str::<StreamEvent>(json).unwrap(),
-        StreamEvent::BlockStart {
-            kind: BlockKind::Text {
-                additional_params: None
-            },
-            ..
+fn an_open_part_is_a_prefix_but_not_a_transcript() {
+    let value = json!([
+        {"item": "event", "value": {"event": "start", "part": 0, "kind": "text"}},
+        {"item": "event", "value": {"event": "text", "part": 0, "text": "cut"}},
+    ]);
+    assert_eq!(
+        StreamRecord::parse(value.clone()),
+        Err(SequenceError::Unclosed(0))
+    );
+    let prefix = StreamRecord::parse_prefix(value).expect("a stream cut short");
+    assert_eq!(prefix.events().count(), 2);
+}
+
+/// A tool call's start names its tool, and no other part's start names one.
+#[test]
+fn only_a_tool_call_start_names_a_tool() {
+    let start = |kind: &str, name: Option<&str>| {
+        let mut value = json!({"event": "start", "part": 0, "kind": kind});
+        if let Some(name) = name {
+            value["name"] = json!(name);
         }
+        json!([{"item": "event", "value": value}])
+    };
+    assert!(StreamRecord::parse_prefix(start("tool_call", Some("add"))).is_ok());
+    assert_eq!(
+        StreamRecord::parse_prefix(start("tool_call", None)).err(),
+        Some(SequenceError::WrongKind(0))
+    );
+    assert_eq!(
+        StreamRecord::parse_prefix(start("text", Some("add"))).err(),
+        Some(SequenceError::WrongKind(0))
+    );
+}
+
+#[test]
+fn a_part_reads_back_from_its_serialized_form() {
+    let part: Part = serde_json::from_value(json!(7)).expect("a part");
+    assert_eq!(part.index(), 7);
+    assert_eq!(serde_json::to_value(part).expect("serializes"), json!(7));
+}
+
+#[test]
+fn a_tool_call_start_names_its_tool_and_no_other_start_does() {
+    let call = json!({"event": "start", "part": 0, "kind": "tool_call", "name": "add"});
+    let text = json!({"event": "start", "part": 1, "kind": "text"});
+    let event: StreamEvent = serde_json::from_value(call.clone()).expect("a call start");
+    assert!(matches!(
+        &event,
+        StreamEvent::Start { kind: PartKind::ToolCall, name: Some(name), .. } if name.as_str() == "add"
     ));
+    assert_eq!(serde_json::to_value(&event).expect("serializes"), call);
+    let event: StreamEvent = serde_json::from_value(text.clone()).expect("a text start");
+    assert!(matches!(event, StreamEvent::Start { name: None, .. }));
+    assert_eq!(serde_json::to_value(&event).expect("serializes"), text);
+}
+
+#[test]
+fn an_item_reads_back_without_its_order_being_checked() {
+    let late = json!({"item": "event", "value": {"event": "text", "part": 3, "text": "late"}});
+    assert_eq!(
+        StreamRecord::parse(json!([late.clone()])),
+        Err(SequenceError::UnknownPart(0))
+    );
+    let item: Item<StreamEvent> = serde_json::from_value(late.clone()).expect("an item");
+    assert_eq!(serde_json::to_value(&item).expect("serializes"), late);
+}
+
+#[test]
+fn a_misshapen_item_is_refused() {
+    let value = json!({"item": "event", "value": {"event": "text", "part": -1, "text": "x"}});
+    assert!(serde_json::from_value::<Item<StreamEvent>>(value).is_err());
+}
+
+/// An image part reads back, checks against its kind, and hands its items
+/// back in order; each event names its variant without its payload.
+#[test]
+fn an_image_part_reads_back_and_names_its_events() {
+    use crate::message::{DocumentSourceKind, Image, ImageMediaType};
+
+    let image = AssistantContent::Image(Image {
+        data: DocumentSourceKind::base64("aGk="),
+        media_type: Some(ImageMediaType::PNG),
+        ..Image::default()
+    });
+    let end = json!({"item": "event", "value": {
+        "event": "end",
+        "part": 1,
+        "content": serde_json::to_value(&image).expect("an image serializes"),
+    }});
+    let value = json!([
+        {"item": "event", "value": {"event": "start", "part": 0, "kind": "reasoning"}},
+        {"item": "event", "value": {"event": "reasoning", "part": 0, "text": "hm"}},
+        {"item": "event", "value": {"event": "start", "part": 1, "kind": "image"}},
+        end,
+    ]);
+    let transcript = StreamRecord::parse_prefix(value.clone()).expect("an image part");
+    assert_eq!(
+        transcript
+            .events()
+            .map(StreamEvent::name)
+            .collect::<Vec<_>>(),
+        ["Start", "Reasoning", "Start", "End"]
+    );
+    assert!(matches!(
+        transcript.events().last(),
+        Some(StreamEvent::End {
+            content: AssistantContent::Image(_),
+            ..
+        })
+    ));
+    let items: Vec<Item<StreamEvent>> = transcript.into();
+    assert_eq!(serde_json::to_value(&items).expect("serializes"), value);
 }

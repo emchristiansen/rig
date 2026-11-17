@@ -5,13 +5,14 @@
 //!
 //! let span = SpanBuilder::new("provider", "model", GenAiOperation::Chat).build();
 //! ```
-use crate::completion::{AssistantContent, Message, Usage};
+use crate::completion::{AssistantContent, CompletionRequest, Message, Usage};
 use crate::message::{
-    DocumentSourceKind, Image, MimeType, Reasoning, ReasoningContent, ToolResult,
-    ToolResultContent, UserContent,
+    DocumentData, DocumentSourceKind, Image, MimeType, Opaque, ToolResult, ToolResultContent,
+    UserContent,
 };
 use base64::Engine;
 use serde::Serialize;
+use std::borrow::Borrow;
 use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex};
 use tracing::callsite::Identifier;
@@ -45,6 +46,7 @@ macro_rules! __rig_canonical_completion_span {
             $(parent: $parent,)?
             $name,
             $($header)*
+            gen_ai.request.stream = $crate::telemetry::__tracing::field::Empty,
             gen_ai.response.id = $crate::telemetry::__tracing::field::Empty,
             gen_ai.response.model = $crate::telemetry::__tracing::field::Empty,
             rig.provider_request_id = $crate::telemetry::__tracing::field::Empty,
@@ -80,18 +82,17 @@ macro_rules! new_completion_span {
 /// A GenAI operation and its canonical span name. Completion operations carry
 /// message content and may adopt a completion-parent span; the others record
 /// only usage and identity on a fresh span.
+///
+/// Completion operations report the well-known `gen_ai.operation.name` values
+/// of the OpenTelemetry GenAI semantic conventions. Streaming is a delivery
+/// mode, not an operation: it is recorded as `gen_ai.request.stream` (see
+/// [`SpanBuilder::streaming`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenAiOperation {
-    /// A chat completion.
+    /// A chat completion (`chat`), unary or streamed.
     Chat,
-    /// A streaming chat completion.
-    ChatStreaming,
-    /// A Gemini generate-content request.
+    /// A Gemini generate-content request (`generate_content`), unary or streamed.
     GenerateContent,
-    /// A Gemini Interactions API request.
-    Interactions,
-    /// A streaming Gemini Interactions API request.
-    InteractionsStreaming,
     /// A text (or image) embedding request.
     Embeddings,
     /// A reranking request.
@@ -108,10 +109,7 @@ impl GenAiOperation {
     fn as_str(self) -> &'static str {
         match self {
             Self::Chat => "chat",
-            Self::ChatStreaming => "chat_streaming",
             Self::GenerateContent => "generate_content",
-            Self::Interactions => "interactions",
-            Self::InteractionsStreaming => "interactions_streaming",
             Self::Embeddings => "embeddings",
             Self::Rerank => "rerank",
             Self::Transcription => "transcription",
@@ -121,14 +119,7 @@ impl GenAiOperation {
     }
 
     pub(crate) fn is_completion(self) -> bool {
-        matches!(
-            self,
-            Self::Chat
-                | Self::ChatStreaming
-                | Self::GenerateContent
-                | Self::Interactions
-                | Self::InteractionsStreaming
-        )
+        matches!(self, Self::Chat | Self::GenerateContent)
     }
 }
 
@@ -353,27 +344,6 @@ macro_rules! new_modality_span {
     };
 }
 
-/// Runs a call of the unary operation `Op` in its canonical span and records
-/// the response with [`Operation::record`](crate::wire::Operation::record) on
-/// success. Returns the call's result unchanged; errors leave only request
-/// metadata on the span.
-pub async fn instrument_modality<Op, E>(
-    provider: &str,
-    request_model: &str,
-    call: impl Future<Output = Result<Op::Response, E>>,
-) -> Result<Op::Response, E>
-where
-    Op: crate::wire::Operation<Telemetry = GenAiOperation>,
-{
-    debug_assert!(!Op::telemetry(false).is_completion());
-    let span = SpanBuilder::new(provider, request_model, Op::telemetry(false)).build();
-    let result = tracing::Instrument::instrument(call, span.clone()).await;
-    if let Ok(response) = &result {
-        Op::record(&span, response);
-    }
-    result
-}
-
 /// Builder for a canonical GenAI span.
 ///
 /// A completion operation reuses the current span when it declares
@@ -386,6 +356,7 @@ pub struct SpanBuilder<'a> {
     request_model: &'a str,
     operation: GenAiOperation,
     system_instructions: Option<String>,
+    streaming: Option<bool>,
 }
 
 impl<'a> SpanBuilder<'a> {
@@ -396,7 +367,15 @@ impl<'a> SpanBuilder<'a> {
             request_model,
             operation,
             system_instructions: None,
+            streaming: None,
         }
+    }
+
+    /// Record whether the request streams its response, as
+    /// `gen_ai.request.stream`. Only completion spans record it.
+    pub fn streaming(mut self, streaming: bool) -> Self {
+        self.streaming = Some(streaming);
+        self
     }
 
     /// Set the system instructions sent with the request when sensitive content
@@ -422,19 +401,10 @@ impl<'a> SpanBuilder<'a> {
         let (provider, model) = (self.provider, self.request_model);
         let op = self.operation.as_str();
         let sys = self.system_instructions.as_deref();
-        match self.operation {
+        let span = match self.operation {
             GenAiOperation::Chat => new_completion_span!("chat", provider, model, op, sys),
-            GenAiOperation::ChatStreaming => {
-                new_completion_span!("chat_streaming", provider, model, op, sys)
-            }
             GenAiOperation::GenerateContent => {
                 new_completion_span!("generate_content", provider, model, op, sys)
-            }
-            GenAiOperation::Interactions => {
-                new_completion_span!("interactions", provider, model, op, sys)
-            }
-            GenAiOperation::InteractionsStreaming => {
-                new_completion_span!("interactions_streaming", provider, model, op, sys)
             }
             GenAiOperation::Embeddings => new_modality_span!("embeddings", provider, model, op),
             GenAiOperation::Rerank => new_modality_span!("rerank", provider, model, op),
@@ -447,6 +417,16 @@ impl<'a> SpanBuilder<'a> {
             GenAiOperation::AudioGeneration => {
                 new_modality_span!("audio_generation", provider, model, op)
             }
+        };
+        if self.operation.is_completion() {
+            self.record_streaming(&span);
+        }
+        span
+    }
+
+    fn record_streaming(&self, span: &tracing::Span) {
+        if let Some(streaming) = self.streaming {
+            span.record("gen_ai.request.stream", streaming);
         }
     }
 
@@ -463,6 +443,7 @@ impl<'a> SpanBuilder<'a> {
         current.record("gen_ai.operation.name", self.operation.as_str());
         current.record("gen_ai.provider.name", self.provider);
         current.record("gen_ai.request.model", self.request_model);
+        self.record_streaming(&current);
         if let Some(system_instructions) = self.system_instructions.as_deref() {
             current.record("gen_ai.system_instructions", system_instructions);
         }
@@ -493,22 +474,7 @@ enum TelemetryPart {
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         name: String,
-        /// The provider's namespace qualifier, verbatim, when the call had one.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        namespace: Option<String>,
         arguments: serde_json::Value,
-    },
-    /// A custom tool call: `input` is the model's verbatim text, recorded as
-    /// the string it is. A distinct part type rather than a `tool_call` whose
-    /// `arguments` is a JSON string, so a trace never presents raw input as a
-    /// parsed argument.
-    CustomToolCall {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
-        name: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        namespace: Option<String>,
-        input: String,
     },
     ToolCallResponse {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -518,10 +484,8 @@ enum TelemetryPart {
     Reasoning {
         content: String,
     },
-    /// An opaque provider output item, recorded whole: a distinct part type,
-    /// so a trace never presents it as text or a tool call.
-    ProviderItem {
-        item: serde_json::Value,
+    Opaque {
+        kind: String,
     },
     Uri {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -573,9 +537,6 @@ where
             modality,
             content: base64::engine::general_purpose::STANDARD.encode(content),
         }),
-        DocumentSourceKind::String(content) => Some(TelemetryPart::Text {
-            content: content.clone(),
-        }),
         DocumentSourceKind::Unknown => None,
     }
 }
@@ -584,26 +545,12 @@ fn image_part(image: &Image) -> Option<TelemetryPart> {
     media_part(&image.data, image.media_type.as_ref(), "image")
 }
 
-fn reasoning_parts(reasoning: &Reasoning) -> Vec<TelemetryPart> {
-    reasoning
-        .content
-        .iter()
-        .map(|content| {
-            let content = match content {
-                ReasoningContent::OpaqueSummary(value) | ReasoningContent::OpaqueContent(value) => {
-                    return TelemetryPart::Reasoning {
-                        content: value.to_string(),
-                    };
-                }
-                ReasoningContent::Text { text, .. } | ReasoningContent::Summary(text) => text,
-                ReasoningContent::Encrypted(content) => content,
-                ReasoningContent::Redacted { data } => data,
-            };
-            TelemetryPart::Reasoning {
-                content: content.clone(),
-            }
-        })
-        .collect()
+/// A provider-only item, named by its `type` and nothing else: its payload
+/// is the provider's, not content.
+fn opaque_part(opaque: &Opaque) -> TelemetryPart {
+    TelemetryPart::Opaque {
+        kind: opaque.kind().unwrap_or("unknown").to_owned(),
+    }
 }
 
 fn tool_result_response(result: &ToolResult) -> serde_json::Value {
@@ -644,9 +591,14 @@ fn user_parts(content: &[UserContent]) -> Vec<TelemetryPart> {
             UserContent::Video(video) => {
                 media_part(&video.data, video.media_type.as_ref(), "video")
             }
-            UserContent::Document(document) => {
-                media_part(&document.data, document.media_type.as_ref(), "document")
-            }
+            UserContent::Document(document) => match &document.data {
+                DocumentData::Text(content) => Some(TelemetryPart::Text {
+                    content: content.clone(),
+                }),
+                DocumentData::File(data) => {
+                    media_part(data, document.media_type.as_ref(), "document")
+                }
+            },
         })
         .collect()
 }
@@ -660,29 +612,22 @@ fn assistant_parts(content: &[AssistantContent]) -> Vec<TelemetryPart> {
             }],
             AssistantContent::ToolCall(tool_call) => vec![TelemetryPart::ToolCall {
                 id: Some(tool_call.id.to_string()),
-                name: tool_call.function.name.clone(),
-                namespace: tool_call.function.namespace.clone(),
-                arguments: tool_call.function.arguments.clone(),
+                name: tool_call.function.name.clone().into(),
+                arguments: tool_call.function.arguments_value(),
             }],
-            AssistantContent::CustomToolCall(call) => vec![TelemetryPart::CustomToolCall {
-                id: Some(call.id.to_string()),
-                name: call.name.clone(),
-                namespace: call.namespace.clone(),
-                input: call.input.clone(),
+            AssistantContent::Reasoning(reasoning) => vec![TelemetryPart::Reasoning {
+                content: reasoning.text.clone(),
             }],
-            AssistantContent::Reasoning(reasoning) => reasoning_parts(reasoning),
             AssistantContent::Image(image) => image_part(image).into_iter().collect(),
-            AssistantContent::ProviderItem(item) => vec![TelemetryPart::ProviderItem {
-                item: item.item.clone(),
-            }],
+            AssistantContent::Opaque(opaque) => vec![opaque_part(opaque)],
         })
         .collect()
 }
 
-fn input_messages(messages: &[Message]) -> Vec<TelemetryChatMessage> {
+fn input_messages(messages: &[impl Borrow<Message>]) -> Vec<TelemetryChatMessage> {
     messages
         .iter()
-        .map(|message| match message {
+        .map(|message| match message.borrow() {
             Message::System { content } => TelemetryChatMessage {
                 role: "system",
                 parts: vec![TelemetryPart::Text {
@@ -693,21 +638,19 @@ fn input_messages(messages: &[Message]) -> Vec<TelemetryChatMessage> {
                 role: "user",
                 parts: user_parts(content),
             },
-            Message::Assistant { content, .. } => TelemetryChatMessage {
+            Message::Assistant(turn) => TelemetryChatMessage {
                 role: "assistant",
-                parts: assistant_parts(content),
+                parts: assistant_parts(&turn.content),
             },
         })
         .collect()
 }
 
 fn output_messages(content: &[AssistantContent]) -> Vec<TelemetryOutputMessage> {
-    let finish_reason = if content.iter().any(|content| {
-        matches!(
-            content,
-            AssistantContent::ToolCall(_) | AssistantContent::CustomToolCall(_)
-        )
-    }) {
+    let finish_reason = if content
+        .iter()
+        .any(|content| matches!(content, AssistantContent::ToolCall(_)))
+    {
         "tool_call"
     } else {
         // Rig's normalized assistant content does not retain provider finish
@@ -742,7 +685,7 @@ pub fn system_instructions_json(instructions: Option<&str>, enabled: bool) -> Op
 /// Message content can contain prompts, retrieved context, tool results, and
 /// other sensitive or high-cardinality data. Keep this disabled unless the
 /// caller has explicitly opted in for debugging/observability.
-pub fn record_model_input(span: &tracing::Span, messages: &[Message], enabled: bool) {
+pub fn record_model_input(span: &tracing::Span, messages: &[impl Borrow<Message>], enabled: bool) {
     if !enabled || span.is_disabled() {
         return;
     }
@@ -769,22 +712,58 @@ pub fn record_model_output(span: &tracing::Span, content: &[AssistantContent], e
     }
 }
 
-/// Provider response metadata used to populate GenAI telemetry spans.
-pub trait ProviderResponseExt {
-    /// Provider-native usage type.
-    type Usage: Serialize;
+/// Records the request's tool definitions on `gen_ai.tool.definitions` when
+/// content telemetry is explicitly enabled.
+///
+/// Function tools carry their name, description and parameter schema.
+/// Provider-hosted tools in `additional_params.tools` carry only their type and
+/// name, since their configuration can hold credentials. An entry without a
+/// `type` field is a function when it has a `name`, and otherwise one tool per
+/// key, as in `{"googleSearch": {}}`. The name is the `name` field, or the one
+/// nested under the type (`{"type": "custom", "custom": {"name": ...}}`), or
+/// else the type.
+///
+/// This is the request as dispatched; a provider may still add or drop tools
+/// when it encodes the request. Records nothing when the request has no tools.
+pub fn record_tool_definitions(span: &tracing::Span, request: &CompletionRequest, enabled: bool) {
+    if !enabled || span.is_disabled() {
+        return;
+    }
 
-    /// Returns the provider response ID, if supplied.
-    fn response_id(&self) -> Option<&str>;
-
-    /// Returns the provider response model name, if supplied.
-    fn response_model_name(&self) -> Option<&str>;
-
-    /// Returns the primary text response, when available.
-    fn text_response(&self) -> Option<String>;
-
-    /// Returns provider-native usage metrics, if supplied.
-    fn usage(&self) -> Option<Self::Usage>;
+    let functions = request.tools.iter().map(|tool| {
+        serde_json::json!({
+            "type": "function",
+            "name": tool.name.as_str(),
+            "description": tool.description,
+            "parameters": tool.parameters,
+        })
+    });
+    let hosted = crate::completion::history::raw_tools(request)
+        .iter()
+        .filter_map(serde_json::Value::as_object)
+        .flat_map(|tool| {
+            let kinds: Vec<&str> = match (tool.get("type"), tool.get("name")) {
+                (Some(kind), _) => kind.as_str().into_iter().collect(),
+                (None, Some(_)) => vec!["function"],
+                (None, None) => tool.keys().map(String::as_str).collect(),
+            };
+            kinds.into_iter().map(move |kind| {
+                let name = [
+                    tool.get("name"),
+                    tool.get(kind).and_then(|body| body.get("name")),
+                ]
+                .into_iter()
+                .find_map(|name| name?.as_str());
+                serde_json::json!({ "type": kind, "name": name.unwrap_or(kind) })
+            })
+        });
+    let definitions: Vec<_> = functions.chain(hosted).collect();
+    if definitions.is_empty() {
+        return;
+    }
+    if let Ok(definitions) = serde_json::to_string(&definitions) {
+        span.record("gen_ai.tool.definitions", definitions);
+    }
 }
 
 /// Records GenAI usage and response metadata on tracing spans.
@@ -842,7 +821,5 @@ impl SpanCombinator for tracing::Span {
     }
 }
 
-#[cfg(test)]
-mod equivalence_tests;
 #[cfg(test)]
 mod tests;

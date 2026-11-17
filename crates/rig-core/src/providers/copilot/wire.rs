@@ -1,55 +1,31 @@
-//! Copilot configuration and completion, embedding, and catalogue wires.
-//! Completion selects the Responses route for Codex model identifiers and
-//! Chat Completions otherwise. Credentials must be exchanged before encoding.
+//! Copilot's dialect of the OpenAI wires. Completion selects the
+//! Responses route for Codex model identifiers and Chat Completions
+//! otherwise; every request carries the editor envelope. Credentials must be
+//! exchanged before encoding (see [`auth`](super::auth)).
 //!
 //! ```no_run
-//! use rig_core::providers::copilot::{wire::Copilot, GPT_4O};
+//! use rig_core::providers::copilot::{self, DIALECT};
+//! use rig_core::providers::openai::OpenAIConfig;
 //!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let wire = Copilot::from_env()?.completion(GPT_4O).with_edits_intent();
-//! # Ok(())
+//! # fn run(http: rig_core::http_client::DynHttpClient) {
+//! let github = OpenAIConfig::with_key(&DIALECT, "tid=session-token").connect(http);
+//! let model = github.completion(copilot::GPT_4O);
+//! # let _ = model;
 //! # }
 //! ```
 
-use serde::{Deserialize, Serialize};
-
-use crate::client::env::{self, EnvError};
-use crate::completion::{CompletionRequest, ProviderCapabilities};
-use crate::driver::{HasEmbedding, HasModelListing};
-use crate::error::EncodeError;
-use crate::model::{Model, ModelList};
-use crate::operation::{Completion, ModelListing};
-use crate::providers::internal::wire::classify_untyped_line;
+use crate::completion::CompletionRequest;
 use crate::providers::openai::responses_api::SystemInstructionsPlacement;
-use crate::providers::openai::responses_api::streaming::IncompleteTerminal;
-/// Copilot's embeddings wire is the shared one, pointed at Copilot by
-/// [`Copilot::embeddings`]; the editor envelope is the dialect's modality
-/// hook.
-pub use crate::providers::openai::wire::Embeddings;
 use crate::providers::openai::wire::{
-    Dialect, DialectHooks, EmbeddingQuirks, OpenAI, OpenAiDecoder, OpenAiWire, Quirks,
-    ResponsesQuirks, Route,
+    Dialect, DialectHooks, EmbeddingQuirks, OpenAIConfig, Quirks, ResponsesQuirks, Route,
 };
-use crate::telemetry::GenAiOperation;
-use crate::wire::{
-    Body, Decoder, Encoded, Framing, HasCompletion, Mode, Output, Secret, Sink, Wire, WireEvent,
-    WireFrame,
-};
+use crate::wire::Body;
 
-use super::{CopilotIntent, PROVIDER_NAME};
+use super::PROVIDER_NAME;
 
 /// The reply header carrying Copilot's transport request id. Copilot relays
 /// OpenAI's wire on both routes, header included.
-const REQUEST_ID_HEADER: Option<&str> = Some("x-request-id");
-
-/// Credential variable named in missing-credential errors.
-const PRIMARY_API_KEY_ENV: &str = "GITHUB_COPILOT_API_KEY";
-
-/// Session-token variables in precedence order.
-const API_KEY_ENV: [&str; 2] = ["GITHUB_COPILOT_API_KEY", "COPILOT_API_KEY"];
-
-/// The base-URL override, in order of precedence.
-const BASE_URL_ENV: &[&str] = &["GITHUB_COPILOT_API_BASE", "COPILOT_BASE_URL"];
+pub(super) const REQUEST_ID_HEADER: Option<&str> = Some("x-request-id");
 
 /// Copilot dialect with model-based routing and editor-identity headers.
 /// Responses requests place system messages in `input`. Verification uses
@@ -60,7 +36,12 @@ pub const DIALECT: Dialect = Dialect {
     quirks: Quirks {
         hooks: Some(&HOOKS),
         verify_path: "",
+        // Copilot bills a subscription, not the catalog's API rates.
+        catalog_priced: false,
         base_url_env_alias: Some("COPILOT_BASE_URL"),
+        // Copilot keeps no files, so no file id resolves there.
+        accepts_file_ids: false,
+        short_lived_key: true,
         embedding: EmbeddingQuirks {
             requires_usage: false,
             ..EmbeddingQuirks::openai()
@@ -80,7 +61,7 @@ pub const DIALECT: Dialect = Dialect {
 };
 
 static HOOKS: DialectHooks = DialectHooks {
-    default_endpoint: Some(super::base_url_from_token),
+    default_endpoint: Some(super::auth::base_url_from_token),
     model_route: Some(|model| {
         if routes_through_responses(model) {
             Route::Responses
@@ -88,33 +69,24 @@ static HOOKS: DialectHooks = DialectHooks {
             Route::Chat
         }
     }),
-    completion_envelope: Some(|provider, request, builder| {
-        completion_envelope(provider, request, builder, CopilotIntent::default())
-    }),
-    // Non-conversational modality requests use panel intent and a user initiator.
+    completion_envelope: Some(completion_envelope),
+    // Non-conversational modality requests use a user initiator.
     modality_envelope: Some(|provider, request| {
-        stamp(
-            request,
-            provider.api_key.expose(),
-            "user",
-            false,
-            CopilotIntent::Panel,
-        )
+        stamp(request, provider.api_key.expose(), "user", false)
     }),
 };
 
-/// The same envelope calculation serves the dialect hook and the public wrapper.
+/// The editor envelope of a completion request: the initiator and vision
+/// flag follow the request's history.
 fn completion_envelope(
-    provider: &OpenAI,
+    provider: &OpenAIConfig,
     request: &CompletionRequest,
     mut builder: http::request::Builder,
-    intent: CopilotIntent,
 ) -> http::request::Builder {
     for (name, value) in super::default_headers(
         provider.api_key.expose(),
         super::request_initiator(request),
         super::request_has_vision(request),
-        intent,
     ) {
         if let Some(headers) = builder.headers_mut() {
             headers.remove(name);
@@ -129,396 +101,25 @@ pub fn routes_through_responses(model: &str) -> bool {
     model.to_ascii_lowercase().contains("codex")
 }
 
-/// Copilot's configuration: plain data, credential redacted.
-///
-/// The credential is an *exchanged* Copilot session token, not a GitHub
-/// OAuth token: see the module docs and [`Self::from_auth`].
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Copilot {
-    /// The exchanged session token. Never serialized (see [`Secret`]).
-    pub api_key: Secret,
-    /// The API root every path resolves against.
-    pub base_url: String,
-}
-
-impl Copilot {
-    /// Configure Copilot with an exchanged session token.
-    /// Derive a permitted endpoint from `proxy-ep=` when present, otherwise use
-    /// the default. Explicit base-URL settings override token-derived routing.
-    pub fn new(api_key: impl Into<Secret>) -> Self {
-        credential_of(&OpenAI::with_key(&DIALECT, api_key))
-    }
-
-    /// Configure Copilot from an exchanged auth context.
-    /// The context's API base takes precedence over token-derived routing.
-    pub fn from_auth(context: &super::auth::AuthContext) -> Self {
-        let mut provider = Self::new(context.api_key.clone());
-        if let Some(api_base) = &context.api_base {
-            provider.base_url = api_base.clone();
-        }
-        provider
-    }
-
-    /// Read an exchanged token from `GITHUB_COPILOT_API_KEY` or `COPILOT_API_KEY`.
-    /// Read the optional base URL from `GITHUB_COPILOT_API_BASE` or `COPILOT_BASE_URL`.
-    /// Earlier nonblank variables take precedence. Return an error for missing
-    /// credentials or invalid environment values; this does not perform token exchange.
-    pub fn from_env() -> Result<Self, EnvError> {
-        let Some(api_key) = first_env(&API_KEY_ENV)? else {
-            return Err(EnvError::Variable {
-                name: PRIMARY_API_KEY_ENV,
-                source: std::env::VarError::NotPresent,
-            });
-        };
-        let mut provider = Self::new(api_key);
-        if let Some(base_url) = first_env(BASE_URL_ENV)? {
-            provider.base_url = base_url;
-        }
-        Ok(provider)
-    }
-
-    /// Override the base URL.
-    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
-        self.base_url = base_url.into();
-        self
-    }
-
-    /// The completion wire for `model`, on whichever route answers it.
-    pub fn completion(&self, model: impl Into<String>) -> CopilotWire {
-        self.wire_for(model)
-    }
-
-    /// Shared construction for the inherent and trait completion entry points.
-    fn wire_for(&self, model: impl Into<String>) -> CopilotWire {
-        CopilotWire {
-            wire: self.openai().completion(model),
-            intent: CopilotIntent::default(),
-        }
-    }
-
-    /// Build an embedding wire with Copilot's editor headers and optional usage.
-    /// Use `ndims` when supplied, otherwise the shared wire's model default.
-    pub fn embeddings(&self, model: impl Into<String>, ndims: Option<usize>) -> Embeddings {
-        Embeddings::new(self.openai(), model, ndims)
-    }
-
-    /// The model-listing wire.
-    pub fn models(&self) -> Models {
-        Models {
-            provider: self.clone(),
-        }
-    }
-
-    /// Convert to shared configuration with Copilot's dialect and explicit endpoint.
-    fn openai(&self) -> OpenAI {
-        OpenAI::with_key(&DIALECT, self.api_key.clone()).with_base_url(self.base_url.clone())
-    }
-
-    /// Resolve `path` against the base URL.
-    fn uri(&self, path: &str) -> String {
-        format!("{}{path}", self.base_url.trim_end_matches('/'))
-    }
-}
-
-/// Read the first nonblank environment variable in `names`, preserving its value.
-/// Return an error if an encountered variable cannot be decoded.
-fn first_env(names: &[&'static str]) -> Result<Option<String>, EnvError> {
-    for name in names {
-        if let Some(value) = env::optional(name)?.filter(|value| !value.trim().is_empty()) {
-            return Ok(Some(value));
-        }
-    }
-    Ok(None)
-}
-
 /// Stamp Copilot's request envelope onto a built request.
 ///
 /// Used by the modality hook and the catalogue wire. `insert` replaces the
 /// shared authentication header rather than appending a second credential.
 /// Completion routes use `completion_envelope` during encoding instead.
-fn stamp(
+pub(super) fn stamp(
     request: &mut http::Request<Body>,
     api_key: &str,
     initiator: &'static str,
     has_vision: bool,
-    intent: CopilotIntent,
 ) -> Result<(), http::Error> {
     let map = request.headers_mut();
-    for (name, value) in super::default_headers(api_key, initiator, has_vision, intent) {
+    for (name, value) in super::default_headers(api_key, initiator, has_vision) {
         map.insert(
             http::HeaderName::from_bytes(name.as_bytes())?,
             http::HeaderValue::from_str(&value)?,
         );
     }
     Ok(())
-}
-
-/// A [`CopilotWire`] around a wire whose dialect requires the caller's exact
-/// identity (the ChatGPT dialect), refused before anything is sent: Copilot's
-/// envelope replaces the `user-agent`, so the request could not carry that
-/// identity exactly.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "a Copilot envelope would replace the caller's exact identity that `{dialect}` requires, so the request is not sent"
-)]
-pub struct CopilotEnvelopeOverCallerIdentity {
-    /// The enclosed wire's dialect.
-    pub dialect: &'static str,
-}
-
-/// Completion wire with Copilot's conversation intent and editor headers.
-/// Delegates payload handling to `wire`, but overrides its request envelope
-/// even when that field contains another dialect.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct CopilotWire {
-    /// The route's wire, pointed at Copilot.
-    pub wire: OpenAiWire,
-    /// The conversation intent this turn declares (`openai-intent`).
-    pub intent: CopilotIntent,
-}
-
-impl CopilotWire {
-    /// The conversation intent this wire declares.
-    pub fn intent(&self) -> CopilotIntent {
-        self.intent
-    }
-
-    /// Declare `intent` in the `openai-intent` header.
-    pub fn with_intent(mut self, intent: CopilotIntent) -> Self {
-        self.intent = intent;
-        self
-    }
-
-    /// Declare the generic chat-panel conversation semantics.
-    pub fn with_panel_intent(self) -> Self {
-        self.with_intent(CopilotIntent::Panel)
-    }
-
-    /// Declare the edit-oriented conversation semantics.
-    pub fn with_edits_intent(self) -> Self {
-        self.with_intent(CopilotIntent::Edits)
-    }
-
-    /// Sanitize tool schemas for strict mode on whichever route answers.
-    ///
-    /// The shared [`Responses::new`](crate::providers::openai::responses_api::wire::Responses::new)
-    /// constructor already enables this for Copilot, so this is the chat route's opt-in.
-    pub fn with_strict_tools(mut self) -> Self {
-        self.wire = self.wire.with_strict_tools();
-        self
-    }
-
-    /// Select how a streamed reply's terminal `response.incomplete` is taken
-    /// on the Responses route (Codex-class models).
-    ///
-    /// Refused by default, like every HTTP SSE Responses stream; with
-    /// [`IncompleteTerminal::Accept`] the partial output is kept and the turn
-    /// ends with the provider's finish reason. The chat route has no such
-    /// terminal, so this is a no-op there.
-    pub fn with_streamed_incomplete(mut self, incomplete: IncompleteTerminal) -> Self {
-        if let OpenAiWire::Responses(wire) = self.wire {
-            self.wire = OpenAiWire::Responses(wire.with_streamed_incomplete(incomplete));
-        }
-        self
-    }
-
-    /// Serialize tool-result content as arrays.
-    ///
-    /// A chat-completions shape: the Responses request has one content
-    /// encoding, so this is a no-op on that route.
-    pub fn with_tool_result_array_content(mut self) -> Self {
-        if let OpenAiWire::Chat(wire) = self.wire {
-            self.wire = OpenAiWire::Chat(wire.with_tool_result_array_content());
-        }
-        self
-    }
-}
-
-/// The Copilot credential behind the shared configuration
-/// [`Copilot::new`] resolves its endpoint through.
-fn credential_of(provider: &OpenAI) -> Copilot {
-    Copilot {
-        api_key: provider.api_key.clone(),
-        base_url: provider.base_url.clone(),
-    }
-}
-
-impl Wire for CopilotWire {
-    type Op = Completion;
-    type Decoder = OpenAiDecoder;
-
-    // The contained OpenAI-shaped wire's credential source, if it has one:
-    // the driver is bound to this wrapper, so the wrapper must forward it.
-    fn credential_stamp(&self) -> Option<crate::wire::CredentialStamp> {
-        self.wire.credential_stamp()
-    }
-
-    fn name(&self) -> &str {
-        self.wire.name()
-    }
-
-    fn model(&self) -> Option<&str> {
-        self.wire.model()
-    }
-
-    fn replay_issuers(&self, model: Option<&str>) -> Vec<String> {
-        self.wire.replay_issuers(model)
-    }
-
-    fn route(&self) -> Option<&str> {
-        self.wire.route()
-    }
-
-    fn encode(&self, request: CompletionRequest, mode: Mode) -> Result<Encoded, EncodeError> {
-        let dialect = &self.wire.provider().dialect;
-        if dialect.quirks.identity.is_some() {
-            return Err(EncodeError::request(CopilotEnvelopeOverCallerIdentity {
-                dialect: dialect.name,
-            }));
-        }
-        self.wire
-            .encode_with_headers(request, mode, |provider, request, builder| {
-                Ok(completion_envelope(
-                    provider,
-                    request,
-                    provider.headers(builder)?,
-                    self.intent,
-                ))
-            })
-    }
-
-    fn decoder(&self, mode: Mode) -> OpenAiDecoder {
-        self.wire.decoder(mode)
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        self.wire.capabilities()
-    }
-
-    fn telemetry(&self, streaming: bool) -> GenAiOperation {
-        self.wire.telemetry(streaming)
-    }
-}
-
-/// Copilot's model-listing wire.
-///
-/// `GET /models` answers with the whole catalogue, so
-/// [`Decoder::continuation`] keeps its default `None`.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Models {
-    /// Which Copilot, and how to reach it.
-    pub provider: Copilot,
-}
-
-/// Catalogue entry with model identity, vendor, and modality under `capabilities.type`.
-#[derive(Debug, Deserialize)]
-pub struct ModelEntry {
-    id: String,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    vendor: Option<String>,
-    #[serde(default)]
-    capabilities: Option<ModelEntryCapabilities>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ModelEntryCapabilities {
-    #[serde(default, rename = "type")]
-    kind: Option<String>,
-}
-
-/// The `{ "data": [...] }` envelope.
-#[derive(Debug, Deserialize)]
-pub struct ModelsReply {
-    #[serde(default)]
-    data: Vec<ModelEntry>,
-}
-
-impl ModelsReply {
-    /// The catalogue as normalized models.
-    pub fn into_models(self) -> Vec<Model> {
-        self.data.into_iter().map(Model::from).collect()
-    }
-}
-
-impl From<ModelEntry> for Model {
-    fn from(entry: ModelEntry) -> Self {
-        let mut model = Model::from_id(entry.id);
-        model.name = entry.name;
-        model.owned_by = entry.vendor;
-        if let Some(capabilities) = entry.capabilities {
-            model.r#type = capabilities.kind;
-        }
-        model
-    }
-}
-
-/// The model-listing decoder.
-#[derive(Default)]
-pub struct ModelsDecoder;
-
-impl Decoder<ModelListing> for ModelsDecoder {
-    type Event = ModelsReply;
-
-    fn classify(&self, frame: WireFrame) -> WireEvent<Self::Event> {
-        classify_untyped_line(frame.as_bytes())
-    }
-
-    fn interpret(&mut self, event: Self::Event, out: &mut Output<ModelListing>) {
-        out.push(Ok(ModelList::new(event.into_models())));
-    }
-}
-
-impl Wire for Models {
-    type Op = ModelListing;
-    type Decoder = ModelsDecoder;
-
-    fn name(&self) -> &str {
-        PROVIDER_NAME
-    }
-
-    fn encode(&self, _request: (), _mode: Mode) -> Result<Encoded, EncodeError> {
-        let mut request = http::Request::get(self.provider.uri(super::MODEL_LISTING_PATH))
-            .header(http::header::CONTENT_TYPE, "application/json")
-            .body(Body::empty())?;
-        stamp(
-            &mut request,
-            self.provider.api_key.expose(),
-            "user",
-            false,
-            CopilotIntent::Panel,
-        )?;
-        Ok(Encoded::new(request, Framing::Whole).with_request_id_header(REQUEST_ID_HEADER))
-    }
-
-    fn decoder(&self, _mode: Mode) -> ModelsDecoder {
-        ModelsDecoder
-    }
-}
-
-impl HasCompletion for Copilot {
-    type Wire = CopilotWire;
-
-    fn completion(&self, model: impl Into<String>) -> CopilotWire {
-        self.completion(model)
-    }
-}
-
-impl HasEmbedding for Copilot {
-    type Wire = Embeddings;
-
-    fn embedding(&self, model: impl Into<String>, ndims: Option<usize>) -> Embeddings {
-        self.embeddings(model, ndims)
-    }
-}
-
-impl HasModelListing for Copilot {
-    type Wire = Models;
-
-    fn model_listing(&self) -> Models {
-        self.models()
-    }
 }
 
 #[cfg(test)]

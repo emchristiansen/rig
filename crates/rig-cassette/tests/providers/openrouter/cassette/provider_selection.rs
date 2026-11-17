@@ -1,7 +1,8 @@
 //! Cassette-backed OpenRouter provider selection scenarios.
 
-use rig::prelude::*;
-use rig::providers::openrouter::{MaxPrice, ProviderPreferences, ProviderSortStrategy};
+use rig::providers::openrouter::extension::{
+    MaxPrice, OpenRouterOptions, ProviderPreferences, ProviderSortStrategy,
+};
 
 use crate::support::assert_nonempty_response;
 
@@ -19,43 +20,34 @@ async fn provider_selection_scenarios() {
                     "hello",
                     ProviderPreferences::new()
                         .order(["DeepInfra", "DeepSeek", "Chutes"])
-                        .allow_fallbacks(true)
-                        .to_json(),
+                        .allow_fallbacks(true),
                 ),
                 (
                     "planet",
-                    ProviderPreferences::new()
-                        .ignore(["Google Vertex"])
-                        .to_json(),
+                    ProviderPreferences::new().ignore(["Google Vertex"]),
                 ),
                 (
                     "french hello",
-                    ProviderPreferences::new()
-                        .sort(ProviderSortStrategy::Latency)
-                        .to_json(),
+                    ProviderPreferences::new().sort(ProviderSortStrategy::Latency),
                 ),
                 (
                     "sky color",
-                    ProviderPreferences::new()
-                        .require_parameters(true)
-                        .to_json(),
+                    ProviderPreferences::new().require_parameters(true),
                 ),
                 (
                     "country",
                     ProviderPreferences::new()
-                        .max_price(MaxPrice::new().prompt(0.30).completion(0.50))
-                        .to_json(),
+                        .max_price(MaxPrice::new().prompt(0.30).completion(0.50)),
                 ),
             ];
 
-            for (prompt, params) in scenarios {
-                let agent = client
-                    .agent(DEEPSEEK_V3_2)
+            for (prompt, preferences) in scenarios {
+                let agent = rig::AgentBuilder::new(client.completion(DEEPSEEK_V3_2))
                     .preamble("You are a helpful assistant.")
-                    .additional_params(params)
+                    .provider_option(OpenRouterOptions::new().provider(preferences))
                     .build();
                 let response = agent.prompt(prompt).await.expect("prompt should succeed");
-                assert_nonempty_response(&response.output);
+                assert_nonempty_response(&response.output());
             }
         },
     )

@@ -2,33 +2,26 @@
 //! equivalence row — hand-written layers standing in for the corpus's
 //! hooks, over the hooks cells' own cassettes, so the records can be
 //! asserted byte-equal to the hook goldens' — a host's denial and a
-//! host's patch beneath the agent's, and a memory `Load` replaced by a
-//! layer. The layers are in `test-support/rig-test-support/src/goldens.rs`; the enumeration and
+//! host's patch beneath the agent's. The layers are in `test-support/rig-test-support/src/goldens.rs`; the enumeration and
 //! the replays live in `crates/rig-cassette/tests/corpus_layers.rs`.
 
 use rig::agent::AgentBuilder;
-use rig::bus::Bus;
-use rig::driver::Bound;
 use rig::effect::{EffectFamily, EffectKind, HandlerKey};
-use rig::prelude::*;
+use rig::handlers::Handlers;
 use rig::providers::anthropic::completion::CLAUDE_SONNET_4_6;
-use rig::providers::anthropic::wire::Anthropic;
 use rig::serve::ErasedHandler;
 use rig_cassette::agent::AgentReplayExt;
+use rig_test_support::cassette_models::AnthropicModels;
 
-use super::super::support::{
-    with_anthropic_corpus_hooks_cassette, with_anthropic_corpus_layers_cassette,
-};
+use super::super::support::with_anthropic_corpus_hooks_cassette;
 use crate::goldens::{
-    CONVERSATION, DENY_REASON, DenyAddLayer, HistoryIsReplaced, PATCHED_AGAIN_ARGS, PatchAddArgs,
-    PatchAddArgsLayer, PatchAgainLayer, REPLACED_RESULT, ReplaceAddResultLayer, ReplaceLoadLayer,
-    add_tool_under, families,
+    DENY_REASON, DenyAddLayer, PATCHED_AGAIN_ARGS, PatchAddArgs, PatchAddArgsLayer,
+    PatchAgainLayer, ReplaceAddResultLayer, add_tool_under, families,
 };
-use crate::support::{BASIC_PREAMBLE, TOOLS_PREAMBLE};
+use crate::support::TOOLS_PREAMBLE;
 
 pub(super) const ADD_PROMPT: &str =
     "Use the add tool to add 17 and 25, then reply with just the number.";
-pub(super) const NAME_PROMPT: &str = "What is my name? Reply with just the name.";
 
 pub(super) fn tool_record_args(log: &rig::cassette::effect_log::EffectLog) -> Vec<String> {
     log.records
@@ -44,7 +37,7 @@ pub(super) fn tool_record_outputs(log: &rig::cassette::effect_log::EffectLog) ->
     log.records
         .iter()
         .filter_map(|record| match &record.outcome {
-            Ok(rig::effect::Outcome::ToolResult { result, .. }) => Some(result.output().render()),
+            Ok(rig::effect::Answered::ToolResult { result, .. }) => Some(result.output().render()),
             _ => None,
         })
         .collect()
@@ -53,15 +46,12 @@ pub(super) fn tool_record_outputs(log: &rig::cassette::effect_log::EffectLog) ->
 /// The program of the hooks cells with `layers` around `add` instead of
 /// a hook stack, on the agent's own bus.
 async fn own_bus(
-    client: Bound<Anthropic>,
+    client: AnthropicModels,
     layers: impl FnOnce(ErasedHandler) -> ErasedHandler,
-    hooks: impl FnOnce(
-        AgentBuilder<rig::agent::WithToolServerHandle>,
-    ) -> AgentBuilder<rig::agent::WithToolServerHandle>,
+    hooks: impl FnOnce(AgentBuilder) -> AgentBuilder,
 ) -> rig::cassette::effect_log::EffectLog {
     let server = add_tool_under(layers);
-    let builder = client
-        .agent(CLAUDE_SONNET_4_6)
+    let builder = rig::AgentBuilder::new(client.completion(CLAUDE_SONNET_4_6))
         .name("golden")
         .preamble(TOOLS_PREAMBLE)
         .temperature(0.0)
@@ -73,7 +63,7 @@ async fn own_bus(
         .max_turns(3)
         .await
         .expect("the agent answers");
-    assert!(!response.output.is_empty());
+    assert!(!response.output().is_empty());
     agent.stamp(recorder.take())
 }
 
@@ -147,38 +137,34 @@ async fn two_layers_effect_log_is_the_golden_fixture() {
 async fn host_deny_over_host_bus_effect_log_is_the_golden_fixture() {
     // The host's own policy on the agent's tool key, over the host's bus.
     with_anthropic_corpus_hooks_cassette("corpus_hooks/deny_tool", |client| async move {
-        let (dispatcher, registrar, mut driver) = Bus::channel();
+        let handlers = Handlers::default();
         let model_key = HandlerKey::from("golden/model:default");
-        driver
+        handlers
             .register_erased(
                 model_key.clone(),
-                ErasedHandler::new(rig::serve::adapters::CompletionAdapter::new(
+                ErasedHandler::new(rig::serve::adapters::ModelAdapter::new(
                     "default",
                     client.completion(CLAUDE_SONNET_4_6),
                 )),
             )
             .expect("a fresh key");
         let recorder = rig::cassette::effect_log::EffectLogRecorder::new();
-        driver.record_to(recorder.clone());
-        let driver = tokio::spawn(driver);
+        handlers.record_to(recorder.clone());
         let server = add_tool_under(|adder| adder.layered(DenyAddLayer));
-        let agent =
-            AgentBuilder::over_bus(dispatcher.clone(), registrar.clone(), "golden", model_key)
-                .name("golden")
-                .preamble(TOOLS_PREAMBLE)
-                .temperature(0.0)
-                .tool_server_handle(server)
-                .build();
+        let agent = AgentBuilder::over_handlers(handlers.clone(), "golden", model_key)
+            .name("golden")
+            .preamble(TOOLS_PREAMBLE)
+            .temperature(0.0)
+            .tool_server_handle(server)
+            .build();
         let response = agent
             .prompt(ADD_PROMPT)
             .max_turns(3)
             .await
             .expect("the agent answers");
-        assert!(!response.output.is_empty());
+        assert!(!response.output().is_empty());
         let log = agent.stamp(recorder.take());
-        drop((agent, dispatcher, registrar));
-        driver.await.expect("the host's driver");
-        assert_eq!(log.header.bus, None);
+        drop(agent);
         assert_eq!(
             families(&log),
             [EffectFamily::Completion, EffectFamily::Completion]
@@ -206,51 +192,5 @@ async fn patch_beneath_hook_patch_effect_log_is_the_golden_fixture() {
         assert_eq!(log.header.hooks, ["PatchAddArgs", "PatchAgainLayer"]);
         crate::goldens::golden_effects("anthropic_layers_patch_beneath_hook_patch", &log);
     })
-    .await;
-}
-
-#[tokio::test]
-async fn memory_load_replaced_effect_log_is_the_golden_fixture() {
-    with_anthropic_corpus_layers_cassette(
-        "corpus_layers/memory_load_replaced",
-        |client| async move {
-            let memory = ErasedHandler::new(rig::serve::adapters::MemoryAdapter::new(
-                rig::memory::InMemoryConversationMemory::new(),
-            ))
-            .layered(ReplaceLoadLayer);
-            let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
-            let agent = client
-                .agent(CLAUDE_SONNET_4_6)
-                .name("golden")
-                .preamble(BASIC_PREAMBLE)
-                .temperature(0.0)
-                .memory_handler(memory)
-                .conversation(CONVERSATION)
-                .add_hook(HistoryIsReplaced).record_to(recorder.clone()).build();
-            let response = agent.prompt(NAME_PROMPT).await.expect("the agent answers");
-            assert!(response.output.contains("Ada"), "{}", response.output);
-            let log = agent.stamp(recorder.take());
-            assert_eq!(
-                families(&log),
-                [
-                    EffectFamily::Memory,
-                    EffectFamily::Completion,
-                    EffectFamily::Memory
-                ]
-            );
-            // The record holds the store's answer: an empty conversation.
-            assert!(
-                matches!(
-                    &log.records[0].outcome,
-                    Ok(rig::effect::Outcome::Memory(rig::effect::MemoryOutcome::Loaded { messages })) if messages.is_empty()
-                ),
-                "{:?}",
-                log.records[0].outcome
-            );
-            assert_eq!(log.header.hooks, ["HistoryIsReplaced", "ReplaceLoadLayer"]);
-            let _ = REPLACED_RESULT;
-            crate::goldens::golden_effects("anthropic_layers_memory_load_replaced", &log);
-        },
-    )
     .await;
 }

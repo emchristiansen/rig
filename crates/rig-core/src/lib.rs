@@ -9,18 +9,32 @@
         clippy::unreachable
     )
 )]
-//! Provider-agnostic model, message, tool, memory, and vector-store contracts.
-//! Provider configurations and endpoint wires bind to transports through
-//! [`driver::Bound`]. Companion crates supply transports, agent runtimes,
-//! and external storage integrations.
+//! Provider-agnostic model, message, conversation, tool, and vector-store contracts.
+//! Provider configurations build endpoint wires, and a [`Model`] binds a
+//! wire to a [`driver::Transport`]; a [`DynModel`] is a model erased to
+//! its operation, for consumers that store one. Companion crates supply
+//! transports, agent runtimes, and external storage integrations.
+//!
+//! `rig-core` does not force serde_json's `preserve_order` or `float_roundtrip`.
+//! Without them, schema properties and JSON text in prompts, embeddings and
+//! tool results use sorted object keys, and parsed floats can differ in their
+//! low bits. Restore the previous configuration in your application's
+//! dependencies with
+//! `serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }`.
+//!
+//! Cargo unifies these features: `rig-cassette` with `traffic` (including
+//! `rig-traffic`) enables both; `rig-claude-cloak`, `rig-mcp-client` and
+//! `rig-mongodb` through BSON enable `preserve_order`. Rig has no forwarding feature for either setting.
 //!
 //! ```no_run
-//! use rig_core::completion::{CompletionModel, CompletionResponse};
+//! use rig_core::DynModel;
+//! use rig_core::completion::{CompletionRequest, CompletionResponse};
 //! use rig_core::error::ProviderError;
+//! use rig_core::operation::Completion;
 //!
-//! async fn ask<M: CompletionModel + Clone>(model: &M) -> Result<CompletionResponse, ProviderError> {
-//!     let request = model.completion_request("Who are you?").build();
-//!     model.completion(request).await
+//! async fn ask(model: &DynModel<Completion>) -> Result<CompletionResponse, ProviderError> {
+//!     let request = CompletionRequest::new("Who are you?");
+//!     model.call(request).await
 //! }
 //! ```
 
@@ -29,13 +43,15 @@ extern crate self as rig;
 #[cfg(feature = "audio")]
 #[cfg_attr(docsrs, doc(cfg(feature = "audio")))]
 pub mod audio_generation;
+pub mod catalog;
 pub mod client;
 pub mod completion;
+pub mod conversation;
 pub mod driver;
 pub mod effect;
 pub mod embeddings;
 pub mod error;
-pub mod http_client;
+pub use rig_http::http_client;
 pub mod id;
 #[cfg(feature = "image")]
 #[cfg_attr(docsrs, doc(cfg(feature = "image")))]
@@ -46,31 +62,32 @@ pub mod image_generation;
 pub mod json_utils;
 pub mod loaders;
 pub mod markers;
-pub mod memory;
 pub mod model;
 pub mod observe;
 pub mod operation;
 pub mod prelude;
 pub(crate) mod provider_response;
 pub mod providers;
+pub mod redact;
 pub mod rerank;
 pub mod serve;
 
 pub mod streaming;
+pub mod structured_output;
 #[cfg(any(test, feature = "test-utils"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-utils")))]
 pub mod test_utils;
 pub mod tool;
-pub mod transcript;
 pub mod transcription;
 pub mod vector_store;
-pub mod wasm_compat;
+pub use rig_http::wasm_compat;
 pub mod wire;
 #[cfg(feature = "websocket")]
 #[cfg_attr(docsrs, doc(cfg(feature = "websocket")))]
-pub mod ws_client;
+pub use rig_http::ws_client;
 
 pub use completion::message;
+pub use driver::{DynModel, Model};
 pub use embeddings::Embed;
 pub use error::{ErrorKind, ErrorReport, ProviderError};
 pub use provider_response::ProviderResponseError;
@@ -94,6 +111,18 @@ pub use rig_derive::rig_tool;
 
 pub mod telemetry;
 
+/// Milliseconds since the Unix epoch at `at`, also on the web; 0 before it.
+pub fn millis(at: web_time::SystemTime) -> u64 {
+    at.duration_since(web_time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
+
+/// Milliseconds since the Unix epoch, also on the web.
+pub fn now_ms() -> u64 {
+    millis(web_time::SystemTime::now())
+}
+
 // Native runtime values must retain their thread-safety bounds.
 #[cfg(not(target_family = "wasm"))]
 const _: fn() = || {
@@ -105,8 +134,8 @@ const _: fn() = || {
     assert_send_sync_static::<completion::ModelRef>();
     assert_send_sync_static::<tool::DynamicTool>();
     // One erased transport, shared by every provider a host binds.
-    assert_send_sync_static::<http_client::BoxedHttpClient>();
+    assert_send_sync_static::<http_client::DynHttpClient>();
     // A live stream is owned by one poller: `Send` so it can move to a worker,
     // not `Sync`.
-    assert_send_static::<streaming::StreamingCompletionResponse>();
+    assert_send_static::<streaming::CompletionStream>();
 };

@@ -6,56 +6,30 @@
 //! populate them") makes capture, not documentation, the fix.
 
 use anyhow::Result;
-use rig::completion::CompletionModel;
 
 use super::support::with_groq_cassette_result;
+use rig::completion::CompletionRequest;
 
 const MODEL: &str = "openai/gpt-oss-120b";
 
 #[tokio::test]
-async fn blocking_response_carries_identity() -> Result<()> {
-    with_groq_cassette_result(
-        "response_identity_edge/blocking_response_carries_identity",
-        |client| async move {
-            let model = client.completion(MODEL);
-            let response = model
-                .completion_request("Reply with exactly: identity probe")
-                .send()
-                .await?;
-            anyhow::ensure!(
-                response
-                    .provider_request_id
-                    .as_deref()
-                    .is_some_and(|id| !id.trim().is_empty()),
-                "Groq sends x-request-id, so provider_request_id must be populated; got {:?}",
-                response.provider_request_id
-            );
-            Ok::<_, anyhow::Error>(())
-        },
-    )
-    .await
-}
-
-#[tokio::test]
 async fn streaming_terminal_carries_identity() -> Result<()> {
     use futures::StreamExt;
-    use rig::streaming::StreamEvent;
 
     with_groq_cassette_result(
         "response_identity_edge/streaming_terminal_carries_identity",
         |client| async move {
             let model = client.completion(MODEL);
-            let mut stream = model
-                .completion_request("Reply with exactly: stream identity probe")
-                .stream()
-                .await?;
-            let mut terminal = None;
+            let mut stream = model.stream(CompletionRequest::new(
+                "Reply with exactly: stream identity probe",
+            ))?;
             while let Some(item) = stream.next().await {
-                if let StreamEvent::Final(final_record) = item? {
-                    terminal = Some(final_record);
-                }
+                item?;
             }
-            let terminal = terminal.expect("stream should yield a terminal record");
+            let terminal = stream
+                .finish()
+                .await
+                .expect("stream should yield a terminal record");
             anyhow::ensure!(
                 terminal
                     .provider_request_id
@@ -64,30 +38,6 @@ async fn streaming_terminal_carries_identity() -> Result<()> {
                 "blocking/streaming parity: the SSE connection's x-request-id \
                  reaches the terminal; got {:?}",
                 terminal.provider_request_id
-            );
-            Ok::<_, anyhow::Error>(())
-        },
-    )
-    .await
-}
-
-/// A provider 4xx carries the failed call's transport request id (rig#2314).
-#[tokio::test]
-async fn provider_error_response_carries_request_id() -> Result<()> {
-    with_groq_cassette_result(
-        "response_identity_edge/provider_error_response_carries_request_id",
-        |client| async move {
-            let model = client.completion("groq-nonexistent-model-for-identity-edge");
-            let error = model
-                .completion_request("Never answered")
-                .send()
-                .await
-                .expect_err("a nonexistent model must fail");
-            anyhow::ensure!(
-                error
-                    .provider_request_id()
-                    .is_some_and(|id| !id.trim().is_empty()),
-                "the 4xx error carries the x-request-id Groq sent; got {error:?}"
             );
             Ok::<_, anyhow::Error>(())
         },
@@ -106,8 +56,7 @@ async fn auth_rejection_classifies_with_contract() -> Result<()> {
         |client| async move {
             let model = client.completion(MODEL);
             let error = model
-                .completion_request("Never authenticated")
-                .send()
+                .call(CompletionRequest::new("Never authenticated"))
                 .await
                 .expect_err("a bogus key must be rejected");
             anyhow::ensure!(

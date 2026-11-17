@@ -2,8 +2,8 @@
 //!
 //! Every provider speaking the OpenAI chat-completions wire reports the same
 //! fields under the same names, so "the normalized view reproduces the
-//! recorded reply" and "the terminal record reproduces the recorded terminal
-//! frame" are one operation per format rather than one per provider. What is
+//! recorded reply" and "the document a stream rebuilds reproduces the recorded
+//! terminal frame" are one operation per format rather than one per provider. What is
 //! *not* shared: which fixture frame counts as the terminal one (dialects
 //! disagree — see [`recorded_sole_usage_frame`] against
 //! [`recorded_agreeing_usage_frames`]), what a dialect adds beside the
@@ -11,17 +11,9 @@
 //! Those stay at the call site.
 
 use rig_core::completion::{CompletionResponse, FinishReason};
-use rig_core::providers::openai;
-use rig_core::providers::openai::wire::{ChatUsage, StreamingCompletionResponse};
-use rig_core::streaming::StreamFinal;
-use serde::Deserialize as _;
 use serde_json::Value;
 
 use crate::support::{assert_matches_recorded_token, assistant_text};
-
-/// The provider-native terminal record a chat-completions stream's
-/// [`StreamFinal::raw`] holds, over the dialect-tolerant accounting.
-pub type Terminal = StreamingCompletionResponse<ChatUsage>;
 
 /// The finish reason a recorded chat-completions body reports.
 ///
@@ -38,8 +30,8 @@ pub fn recorded_chat_finish_reason(body: &Value) -> FinishReason {
 /// The finish reason a chat-completions `finish_reason` word names.
 ///
 /// The same hand-written mapping as [`recorded_chat_finish_reason`], for the
-/// cells that read the word off a provider-native typed view rather than out
-/// of the fixture.
+/// cells that read the word off the provider's reply rather than out of the
+/// fixture.
 pub fn native_finish_reason(word: &str) -> FinishReason {
     match word {
         "stop" => FinishReason::Stop,
@@ -62,17 +54,13 @@ pub fn assert_reproduces_body(
     body: &Value,
     context: &str,
 ) {
-    assert_eq!(response.provider, provider, "{context}: provider");
+    assert_eq!(response.provider(), provider, "{context}: provider");
     assert_matches_recorded_token(
-        response.response_id.as_deref(),
+        response.response_id(),
         body["id"].as_str(),
         &format!("{context}: response id"),
     );
-    assert_eq!(
-        response.model.as_deref(),
-        body["model"].as_str(),
-        "{context}: model"
-    );
+    assert_eq!(response.model(), body["model"].as_str(), "{context}: model");
     assert_eq!(
         response.finish_reason(),
         Some(recorded_chat_finish_reason(body)),
@@ -100,39 +88,33 @@ pub fn assert_reproduces_body(
     );
 }
 
-/// The provider-native view of the captured reply, beside the normalized
-/// fields the decoder mapped from it.
-///
-/// `native` is read out of the response's own `raw` by the cell, which is why
-/// this pins the mapping one decoder performed rather than comparing the
-/// normalized response with a second copy of the same mapping. Dialects
-/// wrapping the shared type (Venice) pass their inner
-/// [`openai::CompletionResponse`].
+/// The provider's reply, read back from the response's `raw`, beside the
+/// normalized fields the decoder mapped from it: its id, model, finish
+/// reason and counters.
 pub fn assert_native_matches_normalized(
     response: &CompletionResponse,
-    native: &openai::CompletionResponse,
+    native: &Value,
     context: &str,
 ) {
     assert_eq!(
-        response.response_id.as_deref(),
-        Some(native.id.as_str()),
+        response.response_id(),
+        native["id"].as_str(),
         "{context}: native response id"
     );
     assert_eq!(
-        response.model.as_deref(),
-        Some(native.model.as_str()),
+        response.model(),
+        native["model"].as_str(),
         "{context}: native model"
     );
-    let native_choice = native
-        .choices
-        .first()
-        .expect("the reply carries at least one choice");
+    let reason = native["choices"][0]["finish_reason"]
+        .as_str()
+        .expect("the reply carries a finish reason");
     assert_eq!(
         response.finish_reason(),
-        Some(native_finish_reason(native_choice.finish_reason.as_str())),
+        Some(native_finish_reason(reason)),
         "{context}: the normalized reason is the native one"
     );
-    let native_usage = native.usage.as_ref().expect("the reply reports usage");
+    let usage = &native["usage"];
     assert_eq!(
         (
             response.usage.input_tokens,
@@ -140,9 +122,9 @@ pub fn assert_native_matches_normalized(
             response.usage.total_tokens
         ),
         (
-            Some(native_usage.prompt_tokens as u64),
-            native_usage.completion_tokens.map(|tokens| tokens as u64),
-            Some(native_usage.total_tokens as u64),
+            usage["prompt_tokens"].as_u64(),
+            usage["completion_tokens"].as_u64(),
+            usage["total_tokens"].as_u64(),
         ),
         "{context}: the normalized counters are the native ones"
     );
@@ -154,19 +136,19 @@ pub fn assert_native_matches_normalized(
 /// As with [`assert_reproduces_body`], the transport id contract is the
 /// cell's to state.
 pub fn assert_terminal_reproduces_frame(
-    terminal: &StreamFinal,
+    terminal: &CompletionResponse,
     provider: &str,
     frame: &Value,
     context: &str,
 ) {
-    assert_eq!(terminal.provider, provider, "{context}: provider");
+    assert_eq!(terminal.provider(), provider, "{context}: provider");
     assert_matches_recorded_token(
-        terminal.response_id.as_deref(),
+        terminal.response_id(),
         frame["id"].as_str(),
         &format!("{context}: response id"),
     );
     assert_eq!(
-        terminal.model.as_deref(),
+        terminal.model(),
         frame["model"].as_str(),
         "{context}: model"
     );
@@ -185,40 +167,48 @@ pub fn assert_terminal_reproduces_frame(
     );
 }
 
-/// The terminal record `raw` holds, read back and required to be exactly the
-/// decoder's record serialized.
-///
-/// A streamed reply is many frames and no single one of them is the answer,
-/// so what rides along is the record the decoder reassembled — which makes an
-/// exact typed round trip the right claim here, unlike the blocking path
-/// where `raw` is the reply *document*. The returned typed record is the
-/// cell's handle on whatever its dialect keeps beside the shared fields.
-pub fn assert_terminal_round_trips(terminal: &StreamFinal) -> Terminal {
-    let raw = &terminal.raw;
-    let typed = Terminal::deserialize(raw)
-        .expect("raw is the chat-completions terminal record, serialized");
+/// The `chat.completion` document a stream's `raw` holds: the reply's id,
+/// model and first choice's finish reason, which the normalized terminal
+/// reports, and the provider's own usage object, whose counters are the
+/// normalized ones. Returned for the cell to read whatever its dialect keeps
+/// beside the shared fields.
+pub fn assert_terminal_round_trips(terminal: &CompletionResponse) -> Value {
+    let raw = terminal.raw.clone();
     assert_eq!(
-        serde_json::to_value(&typed).expect("typed serializes"),
-        *raw,
-        "the captured value is the typed terminal serialized, nothing more"
+        raw["object"], "chat.completion",
+        "the captured value is the unary document the stream rebuilt: {raw}"
     );
-    assert_eq!(typed.response_id, terminal.response_id, "response id");
-    assert_eq!(typed.model, terminal.model, "model");
-    assert_eq!(typed.finish_reason, terminal.finish_reason, "finish reason");
-    let usage = typed
-        .usage
-        .as_ref()
-        .expect("the terminal record carries the reply's accounting");
+    assert!(
+        raw["choices"][0]["message"].is_object(),
+        "the rebuilt document holds the answer's message: {raw}"
+    );
+    assert_eq!(raw["id"].as_str(), terminal.response_id(), "response id");
+    assert_eq!(raw["model"].as_str(), terminal.model(), "model");
     assert_eq!(
-        usage.to_normalized(),
-        terminal.usage,
-        "the normalized usage is that accounting, normalized"
+        serde_json::from_value::<Option<FinishReason>>(raw["choices"][0]["finish_reason"].clone())
+            .expect("a finish reason"),
+        terminal.finish_reason(),
+        "finish reason"
+    );
+    let usage = &raw["usage"];
+    assert!(
+        usage.is_object(),
+        "the rebuilt document carries the reply's accounting"
     );
     assert_eq!(
-        typed.provider_request_id, None,
-        "the transport id is stamped on the normalized terminal, not the native record"
+        (
+            terminal.usage.input_tokens,
+            terminal.usage.output_tokens,
+            terminal.usage.total_tokens
+        ),
+        (
+            usage["prompt_tokens"].as_u64(),
+            usage["completion_tokens"].as_u64(),
+            usage["total_tokens"].as_u64(),
+        ),
+        "the normalized counters are the accounting's"
     );
-    typed
+    raw
 }
 
 /// The one usage-bearing SSE frame of a recorded chat-completions stream.

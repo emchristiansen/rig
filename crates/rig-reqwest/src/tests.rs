@@ -1,6 +1,9 @@
 use super::*;
 use http::StatusCode;
 
+#[cfg(not(target_family = "wasm"))]
+mod error_body;
+
 /// rig#2210: the bundled transport's own error constructor is where the
 /// headers are captured, so drive it with a real `reqwest::Response`.
 #[tokio::test]
@@ -31,4 +34,47 @@ async fn non_success_status_error_preserves_response_headers() {
             .and_then(|v| v.to_str().ok()),
         Some("0")
     );
+}
+
+/// Every `default()` is a clone of the one process-wide client.
+#[test]
+fn default_hands_out_clones_of_one_client() {
+    let first = ReqwestClient::default();
+    let second = ReqwestClient::default();
+    assert!(first.same(&second));
+    assert!(first.inner().is_some());
+    let custom = ReqwestClient::from(reqwest::Client::new());
+    assert!(!first.same(&custom));
+}
+
+/// A client reqwest could not build reports the build error on every send,
+/// in-band, rather than panicking where it was named, and as `Unbuilt`,
+/// which callers do not retry.
+#[tokio::test]
+async fn an_unbuilt_client_reports_its_build_error_on_every_send() {
+    let refused = reqwest::Client::new()
+        .get("not a url")
+        .build()
+        .expect_err("an unparseable URL");
+    let client = ReqwestClient(Built::Failed(Arc::new(refused)));
+    assert!(client.inner().is_none());
+    let request = || {
+        Request::builder()
+            .uri("https://example.test/")
+            .body(Bytes::new())
+            .expect("a request")
+    };
+    for _ in 0..2 {
+        let Err(error) = client.send::<_, Bytes>(request()).await else {
+            panic!("an unbuilt client sent a request");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("could not build the bundled reqwest transport"),
+            "{error}"
+        );
+        assert!(matches!(error, Error::Unbuilt(_)), "{error:?}");
+        assert!(client.send_streaming(request()).await.is_err());
+    }
 }

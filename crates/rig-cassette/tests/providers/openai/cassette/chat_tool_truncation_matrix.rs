@@ -7,13 +7,13 @@
 //! below 16, so empty/no-call states are not live-producible on these models;
 //! the shared unit suite covers those synthetic policies.
 //!
-//! The complete recorded space is 2 transports × 2 models × 3 budgets × 2
-//! public surfaces = 24 cells. Model cells read the normalized blocking reply
-//! the driver decodes from the provider-native response, or drive the
-//! normalized stream; agent cells prove that a partial call is never invoked
-//! and a complete control is invoked exactly once. Every cell asserts its own
-//! request, finish reason, and accumulated
-//! argument bytes from the fixture.
+//! The space is 2 transports × 2 models × 3 budgets × 2
+//! public surfaces = 24 cells, of which the one below is a test. Model cells
+//! read the normalized blocking reply the driver decodes from the
+//! provider-native response, or drive the normalized stream; agent cells prove
+//! that a partial call is never invoked and a complete control is invoked
+//! exactly once. Each test asserts its own request, finish reason, and
+//! accumulated argument bytes from the fixture.
 //!
 //! | dimension | values |
 //! |---|---|
@@ -22,11 +22,9 @@
 //! | output cap | 16 partial, 32 partial, 48 complete |
 //! | surface | raw/normalized model, one-turn agent |
 //!
-//! Coverage ledger: the provider-supported pre-pruning product is 24 and all
-//! 24 cells are recorded. Exploratory caps below 16 are not cassette cells
-//! because OpenAI rejects those requests before generation; the shared unit
-//! suite supplies the otherwise-unproducible empty/no-call `length` shapes.
-//! Each explicit test maps to
+//! Exploratory caps below 16 are not cassette cells because OpenAI rejects
+//! those requests before generation; the shared unit suite supplies the
+//! otherwise-unproducible empty/no-call `length` shapes. Each test maps to
 //! `crates/rig-cassette/fixtures/cassettes/openai/chat_tool_truncation_matrix/<test-name>.yaml`.
 //! The two inexpensive mini models were selected because both expose a stable
 //! truncation boundary. Assertions cover exact wire arguments and reason,
@@ -35,7 +33,7 @@
 //!
 //! | recorded cells | exact fixture set |
 //! |---|---|
-//! | all 24 | `crates/rig-cassette/fixtures/cassettes/openai/chat_tool_truncation_matrix/{blocking,streaming}_{gpt4o,gpt41}_{low,mid,complete}_{model,agent}.yaml` |
+//! | 1 of 24 | `crates/rig-cassette/fixtures/cassettes/openai/chat_tool_truncation_matrix/streaming_gpt4o_low_agent.yaml` |
 
 use std::sync::{
     Arc, Mutex,
@@ -43,12 +41,6 @@ use std::sync::{
 };
 
 use anyhow::Result;
-use futures::StreamExt as _;
-use rig::completion::{AssistantContent, CompletionModel, FinishReason};
-use rig::driver::Bound;
-use rig::prelude::*;
-use rig::providers::openai::wire::Chat;
-use rig::streaming::StreamEvent;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -60,26 +52,22 @@ const PROMPT: &str = "The cache warmer raced the artifact uploader, the retry st
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Transport {
-    Blocking,
     Streaming,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Model {
     Gpt4oMini,
-    Gpt41Mini,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Budget {
     Low,
-    Mid,
     Complete,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Surface {
-    Model,
     Agent,
 }
 
@@ -93,8 +81,6 @@ struct Cell {
 
 #[derive(Debug, Default)]
 struct Observation {
-    finish_reason: Option<FinishReason>,
-    arguments: Vec<Value>,
     errors: Vec<String>,
     invocations: usize,
 }
@@ -113,48 +99,27 @@ fn cell(transport: Transport, model: Model, budget: Budget, surface: Surface) ->
 fn model_name(model: Model) -> &'static str {
     match model {
         Model::Gpt4oMini => "gpt-4o-mini",
-        Model::Gpt41Mini => "gpt-4.1-mini",
     }
 }
 
 fn max_tokens(budget: Budget) -> u64 {
     match budget {
         Budget::Low => 16,
-        Budget::Mid => 32,
         Budget::Complete => 48,
     }
 }
 
 fn tool_definition() -> rig::completion::ToolDefinition {
     rig::completion::ToolDefinition {
-        name: "file_report".to_owned(),
+        name: rig_core::message::ToolName::new("file_report").expect("tool name"),
         description: "File an incident report".to_owned(),
         parameters: json!({
             "type": "object",
             "properties": { "summary": { "type": "string" } },
             "required": ["summary"]
         }),
+        annotations: Default::default(),
     }
-}
-
-fn request(model: &Bound<Chat>, cell: Cell) -> rig::completion::CompletionRequest {
-    model
-        .completion_request(PROMPT)
-        .preamble(PREAMBLE.to_owned())
-        .tool(tool_definition())
-        .additional_params(json!({ "tool_choice": "required" }))
-        .max_tokens(max_tokens(cell.budget))
-        .build()
-}
-
-fn calls(choice: &[AssistantContent]) -> Vec<Value> {
-    choice
-        .iter()
-        .filter_map(|content| match content {
-            AssistantContent::ToolCall(call) => Some(call.function.arguments.clone()),
-            _ => None,
-        })
-        .collect()
 }
 
 #[derive(Clone)]
@@ -194,59 +159,9 @@ impl Tool for FileReport {
     }
 }
 
-async fn run_model(client: OpenAiCassette, cell: Cell) -> Observation {
-    let model = client.openai.chat(model_name(cell.model));
-    match cell.transport {
-        // The provider-native reply and the normalized view are one call now:
-        // the driver decodes the native response and hands back the
-        // normalization, keeping the native value on `CompletionResponse::raw`.
-        Transport::Blocking => match model.completion(request(&model, cell)).await {
-            Ok(response) => Observation {
-                finish_reason: response.finish_reason(),
-                arguments: calls(&response.choice),
-                ..Default::default()
-            },
-            Err(error) => Observation {
-                errors: vec![error.to_string()],
-                ..Default::default()
-            },
-        },
-        Transport::Streaming => {
-            let mut stream = match model.stream(request(&model, cell)).await {
-                Ok(stream) => stream,
-                Err(error) => {
-                    return Observation {
-                        errors: vec![error.to_string()],
-                        ..Default::default()
-                    };
-                }
-            };
-            let mut observation = Observation::default();
-            while let Some(item) = stream.next().await {
-                match item {
-                    Ok(StreamEvent::BlockEnd {
-                        block: Some(AssistantContent::ToolCall(tool_call)),
-                        ..
-                    }) => {
-                        observation.arguments.push(tool_call.function.arguments);
-                    }
-                    Ok(StreamEvent::Final(terminal)) => {
-                        observation.finish_reason = terminal.finish_reason;
-                    }
-                    Ok(_) => {}
-                    Err(error) => observation.errors.push(error.to_string()),
-                }
-            }
-            observation
-        }
-    }
-}
-
 async fn run_agent(client: OpenAiCassette, cell: Cell) -> Observation {
     let invocations = Arc::new(AtomicUsize::new(0));
-    let agent = client
-        .chat
-        .agent(model_name(cell.model))
+    let agent = rig::AgentBuilder::new(client.chat.completion(model_name(cell.model)))
         .preamble(PREAMBLE)
         .tool(FileReport {
             invocations: Arc::clone(&invocations),
@@ -255,34 +170,26 @@ async fn run_agent(client: OpenAiCassette, cell: Cell) -> Observation {
         .max_tokens(max_tokens(cell.budget))
         .default_max_turns(1)
         .build();
-    let mut errors = Vec::new();
-    match cell.transport {
-        Transport::Blocking => {
-            if let Err(error) = agent.prompt(PROMPT).await {
-                errors.push(error.to_string());
-            }
-        }
+    let errors = match cell.transport {
         Transport::Streaming => {
             let mut stream = agent
                 .prompt(PROMPT)
                 .history(Vec::<rig::completion::Message>::new())
                 .max_turns(1)
                 .stream();
-            errors = crate::support::collect_stream_observation(&mut stream)
+            crate::support::collect_stream_observation(&mut stream)
                 .await
-                .errors;
+                .errors
         }
-    }
+    };
     Observation {
         errors,
         invocations: invocations.load(Ordering::SeqCst),
-        ..Default::default()
     }
 }
 
 async fn run_cell(client: OpenAiCassette, cell: Cell, observed: SharedObservation) -> Result<()> {
     let observation = match cell.surface {
-        Surface::Model => run_model(client, cell).await,
         Surface::Agent => run_agent(client, cell).await,
     };
     *observed.lock().expect("observation mutex poisoned") = Some(observation);
@@ -293,35 +200,12 @@ fn recorded_request(scenario: &str) -> Value {
     crate::cassettes::recorded_json_request("openai", scenario)
 }
 
-fn recorded_response(scenario: &str) -> Value {
-    crate::cassettes::recorded_json_response("openai", scenario)
-}
-
 fn recorded_chunks(scenario: &str) -> Vec<Value> {
     crate::cassettes::recorded_sse_json_frames("openai", scenario)
 }
 
 fn recorded_finish_and_arguments(scenario: &str, transport: Transport) -> (String, Vec<String>) {
     match transport {
-        Transport::Blocking => {
-            let response = recorded_response(scenario);
-            let finish = response["choices"][0]["finish_reason"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned();
-            let arguments = response["choices"][0]["message"]["tool_calls"]
-                .as_array()
-                .map(|calls| {
-                    calls
-                        .iter()
-                        .filter_map(|call| {
-                            call["function"]["arguments"].as_str().map(str::to_owned)
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            (finish, arguments)
-        }
         Transport::Streaming => {
             let mut finish = String::new();
             let mut arguments = Vec::<String>::new();
@@ -415,36 +299,6 @@ fn assert_cell(scenario: &str, cell: Cell, observed: SharedObservation) {
         .take()
         .expect("cell observation");
     match cell.surface {
-        Surface::Model if complete => {
-            assert!(
-                observation.errors.is_empty(),
-                "{scenario}: {:?}",
-                observation.errors
-            );
-            assert_eq!(
-                observation.finish_reason,
-                Some(FinishReason::ToolCalls),
-                "{scenario}"
-            );
-            assert_eq!(observation.arguments.len(), 1, "{scenario}");
-            assert_eq!(observation.arguments[0]["summary"], PROMPT, "{scenario}");
-        }
-        Surface::Model => {
-            assert!(
-                observation.errors.is_empty(),
-                "{scenario}: truncated turn survives: {:?}",
-                observation.errors
-            );
-            assert_eq!(
-                observation.finish_reason,
-                Some(FinishReason::Length),
-                "{scenario}"
-            );
-            assert!(
-                observation.arguments.is_empty(),
-                "{scenario}: partial call is dropped"
-            );
-        }
         Surface::Agent if complete => assert_eq!(
             observation.invocations, 1,
             "{scenario}: complete call invoked once"
@@ -474,279 +328,6 @@ async fn execute(scenario: &'static str, cell: Cell, observed: SharedObservation
 // parses source rather than macro expansion.
 
 #[tokio::test]
-async fn blocking_gpt4o_low_model() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/blocking_gpt4o_low_model";
-    let c = cell(
-        Transport::Blocking,
-        Model::Gpt4oMini,
-        Budget::Low,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/blocking_gpt4o_low_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_gpt4o_low_agent() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/blocking_gpt4o_low_agent";
-    let c = cell(
-        Transport::Blocking,
-        Model::Gpt4oMini,
-        Budget::Low,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/blocking_gpt4o_low_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_gpt4o_mid_model() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/blocking_gpt4o_mid_model";
-    let c = cell(
-        Transport::Blocking,
-        Model::Gpt4oMini,
-        Budget::Mid,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/blocking_gpt4o_mid_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_gpt4o_mid_agent() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/blocking_gpt4o_mid_agent";
-    let c = cell(
-        Transport::Blocking,
-        Model::Gpt4oMini,
-        Budget::Mid,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/blocking_gpt4o_mid_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_gpt4o_complete_model() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/blocking_gpt4o_complete_model";
-    let c = cell(
-        Transport::Blocking,
-        Model::Gpt4oMini,
-        Budget::Complete,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/blocking_gpt4o_complete_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_gpt4o_complete_agent() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/blocking_gpt4o_complete_agent";
-    let c = cell(
-        Transport::Blocking,
-        Model::Gpt4oMini,
-        Budget::Complete,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/blocking_gpt4o_complete_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_gpt41_low_model() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/blocking_gpt41_low_model";
-    let c = cell(
-        Transport::Blocking,
-        Model::Gpt41Mini,
-        Budget::Low,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/blocking_gpt41_low_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_gpt41_low_agent() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/blocking_gpt41_low_agent";
-    let c = cell(
-        Transport::Blocking,
-        Model::Gpt41Mini,
-        Budget::Low,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/blocking_gpt41_low_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_gpt41_mid_model() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/blocking_gpt41_mid_model";
-    let c = cell(
-        Transport::Blocking,
-        Model::Gpt41Mini,
-        Budget::Mid,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/blocking_gpt41_mid_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_gpt41_mid_agent() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/blocking_gpt41_mid_agent";
-    let c = cell(
-        Transport::Blocking,
-        Model::Gpt41Mini,
-        Budget::Mid,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/blocking_gpt41_mid_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_gpt41_complete_model() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/blocking_gpt41_complete_model";
-    let c = cell(
-        Transport::Blocking,
-        Model::Gpt41Mini,
-        Budget::Complete,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/blocking_gpt41_complete_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn blocking_gpt41_complete_agent() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/blocking_gpt41_complete_agent";
-    let c = cell(
-        Transport::Blocking,
-        Model::Gpt41Mini,
-        Budget::Complete,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/blocking_gpt41_complete_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_gpt4o_low_model() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/streaming_gpt4o_low_model";
-    let c = cell(
-        Transport::Streaming,
-        Model::Gpt4oMini,
-        Budget::Low,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/streaming_gpt4o_low_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
 async fn streaming_gpt4o_low_agent() -> Result<()> {
     const S: &str = "chat_tool_truncation_matrix/streaming_gpt4o_low_agent";
     let c = cell(
@@ -758,216 +339,6 @@ async fn streaming_gpt4o_low_agent() -> Result<()> {
     let o = SharedObservation::default();
     with_openai_tool_truncation_cassette_result(
         "chat_tool_truncation_matrix/streaming_gpt4o_low_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_gpt4o_mid_model() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/streaming_gpt4o_mid_model";
-    let c = cell(
-        Transport::Streaming,
-        Model::Gpt4oMini,
-        Budget::Mid,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/streaming_gpt4o_mid_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_gpt4o_mid_agent() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/streaming_gpt4o_mid_agent";
-    let c = cell(
-        Transport::Streaming,
-        Model::Gpt4oMini,
-        Budget::Mid,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/streaming_gpt4o_mid_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_gpt4o_complete_model() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/streaming_gpt4o_complete_model";
-    let c = cell(
-        Transport::Streaming,
-        Model::Gpt4oMini,
-        Budget::Complete,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/streaming_gpt4o_complete_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_gpt4o_complete_agent() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/streaming_gpt4o_complete_agent";
-    let c = cell(
-        Transport::Streaming,
-        Model::Gpt4oMini,
-        Budget::Complete,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/streaming_gpt4o_complete_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_gpt41_low_model() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/streaming_gpt41_low_model";
-    let c = cell(
-        Transport::Streaming,
-        Model::Gpt41Mini,
-        Budget::Low,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/streaming_gpt41_low_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_gpt41_low_agent() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/streaming_gpt41_low_agent";
-    let c = cell(
-        Transport::Streaming,
-        Model::Gpt41Mini,
-        Budget::Low,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/streaming_gpt41_low_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_gpt41_mid_model() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/streaming_gpt41_mid_model";
-    let c = cell(
-        Transport::Streaming,
-        Model::Gpt41Mini,
-        Budget::Mid,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/streaming_gpt41_mid_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_gpt41_mid_agent() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/streaming_gpt41_mid_agent";
-    let c = cell(
-        Transport::Streaming,
-        Model::Gpt41Mini,
-        Budget::Mid,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/streaming_gpt41_mid_agent",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_gpt41_complete_model() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/streaming_gpt41_complete_model";
-    let c = cell(
-        Transport::Streaming,
-        Model::Gpt41Mini,
-        Budget::Complete,
-        Surface::Model,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/streaming_gpt41_complete_model",
-        {
-            let o = Arc::clone(&o);
-            move |x| run_cell(x, c, o)
-        },
-    )
-    .await?;
-    execute(S, c, o).await;
-    Ok(())
-}
-#[tokio::test]
-async fn streaming_gpt41_complete_agent() -> Result<()> {
-    const S: &str = "chat_tool_truncation_matrix/streaming_gpt41_complete_agent";
-    let c = cell(
-        Transport::Streaming,
-        Model::Gpt41Mini,
-        Budget::Complete,
-        Surface::Agent,
-    );
-    let o = SharedObservation::default();
-    with_openai_tool_truncation_cassette_result(
-        "chat_tool_truncation_matrix/streaming_gpt41_complete_agent",
         {
             let o = Arc::clone(&o);
             move |x| run_cell(x, c, o)

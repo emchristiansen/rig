@@ -16,7 +16,7 @@ use rig_core::{
 use crate::{
     agent::{Agent, MultiTurnStreamItem},
     completion::{PromptError, Usage},
-    streaming::{Delta, StreamEvent},
+    streaming::{Item, StreamEvent},
 };
 use rig_core::wasm_compat::WasmCompatSend;
 
@@ -42,7 +42,7 @@ impl Chat for Agent {
     ) -> Result<String, PromptError> {
         Agent::chat(self, prompt, history)
             .await
-            .map(|response| response.output)
+            .map(|response| response.output())
     }
 }
 use futures::StreamExt;
@@ -115,7 +115,7 @@ impl CliChat for AgentImpl {
             .stream();
 
         let mut acc = String::new();
-        let mut messages = None;
+        let mut messages = Vec::new();
 
         let result = loop {
             let Some(chunk) = response_stream.next().await else {
@@ -124,34 +124,24 @@ impl CliChat for AgentImpl {
             };
 
             match chunk {
-                Ok(MultiTurnStreamItem::StreamAssistantItem(StreamEvent::BlockDelta {
-                    delta: Delta::Text { text },
+                Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::Text {
+                    text,
                     ..
-                })) => {
+                }))) => {
                     print!("{text}");
                     acc.push_str(&text);
                 }
                 Ok(MultiTurnStreamItem::FinalResponse(final_response)) => {
                     self.usage = final_response.usage();
-                    messages = final_response
-                        .messages()
-                        .map(<[rig_core::completion::Message]>::to_vec);
+                    messages = final_response.messages;
                 }
-                Err(e) => {
-                    // Preserve structured run errors rather than reducing them to display text.
-                    break Err(crate::agent::streaming_error_into_prompt(e));
-                }
+                Err(e) => break Err(e),
                 _ => continue,
             }
         };
 
-        if let Ok(response) = &result {
-            if let Some(messages) = messages {
-                history.extend(messages);
-            } else {
-                history.push(Message::user(prompt));
-                history.push(Message::assistant(response.as_str()));
-            }
+        if result.is_ok() {
+            history.extend(messages);
         }
 
         result
@@ -243,7 +233,7 @@ where
         loop {
             print!("> ");
             stdout.flush().map_err(|e| {
-                PromptError::CompletionError(ProviderError::Response(format!(
+                PromptError::Provider(ProviderError::Response(format!(
                     "failed to flush stdout: {e}"
                 )))
             })?;

@@ -1,8 +1,9 @@
 # rig-typesafeai
 
 Experimental TypeSafe Jev judgments for Rig. Enable the root `rig` feature
-`typesafeai` to use `rig::typesafeai`, or depend on this crate and bind a Rig HTTP
-transport explicitly. It uses Rig's `Operation`, `Wire`, `Bound`, and shared driver.
+`typesafeai` to use `rig::typesafeai`, or depend on this crate and pair it with a
+Rig HTTP transport explicitly. It uses Rig's `Operation`, `Wire`, `Model`, and
+shared driver.
 There are no Jev derive macros or schema-generation traits.
 
 ## One structure for questions and answers
@@ -11,7 +12,8 @@ Implement `Query` on a generic named struct. Its associated `Output` replaces
 question fields with their answer types while preserving their names and layout:
 
 ```rust
-use rig_typesafeai::{Error, Noul, NoulAnswer, Query};
+use rig_core::error::ProviderError;
+use rig_typesafeai::{Noul, NoulAnswer, Query};
 use serde::{Serialize, Deserialize};
 
 // The fields are declared once, for both questions and answers.
@@ -25,7 +27,7 @@ impl<R: Query, V: Query> Query for Assessment<R, V> {
     type Response = Assessment<R::Response, V::Response>;
     type Output = Assessment<R::Output, V::Output>;
 
-    fn decode(&self, response: Self::Response) -> Result<Self::Output, Error> {
+    fn decode(&self, response: Self::Response) -> Result<Self::Output, ProviderError> {
         Ok(Assessment {
             ready: self.ready.decode(response.ready)?,
             needs_review: self.needs_review.decode(response.needs_review)?,
@@ -37,10 +39,10 @@ let query = Assessment {
     ready: Noul::new("Is this ready to ship?")?,
     needs_review: Noul::new("Does this need human review?")?,
 };
-# Ok::<(), Error>(())
+# Ok::<(), ProviderError>(())
 ```
 
-With a bound Jev client, evaluate it directly:
+With a Jev model (`Jev::from_env()?.evaluation()`), evaluate it directly:
 
 ```rust,ignore
 let answers: Assessment<NoulAnswer, NoulAnswer> =
@@ -85,8 +87,9 @@ Its output is explicitly `BTreeMap<String, types::Answer>`; construction validat
 the definitions and evaluation validates the provider's answers.
 
 `Jev::from_env()` reads `JEV_TOKEN` without loading a secrets file. Its default
-model is `jev-latest`; `.model(...)` selects another provider model identifier.
-Configure timeouts and retry middleware on the Rig transport.
+model is `jev-latest`; `JevConfig::model(...)` selects another provider model
+identifier. Configure timeouts and retry middleware on the Rig transport and
+pass it with `JevConfig::connect`.
 
 Questions share state but cannot consume each other's answers in one request.
 Confidence measures concentration, not correctness. Keep distributions and put

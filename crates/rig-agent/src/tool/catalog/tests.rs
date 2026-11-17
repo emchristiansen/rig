@@ -1,10 +1,9 @@
-use super::*;
-use crate::tool::{DynamicTool, ToolOutput, ToolSet};
+use crate::tool::{DynamicTool, ToolContext, ToolOutput, ToolSet};
 
 fn dynamic(name: &str) -> DynamicTool {
     let reply = format!("{name}!");
     DynamicTool::new(
-        name,
+        rig_core::message::ToolName::new(name).expect("tool name"),
         format!("the {name} tool"),
         serde_json::json!({"type": "object"}),
         move |_| {
@@ -35,12 +34,13 @@ async fn catalog_matches_definitions_and_dispatches_by_name() {
     );
     assert!(set.contains("gamma") && !catalog.contains("gamma"));
 
-    let mut context = ToolContext::new();
-    let result = catalog.execute("beta", "{}", &mut context).await;
+    let beta = catalog.get("beta").expect("advertised");
+    let result = beta.execute("{}".into(), &mut ToolContext::new()).await;
     assert_eq!(result.output().as_text(), Some("beta!"));
-
-    let missing = catalog.execute("gamma", "{}", &mut context).await;
-    assert!(!missing.is_success(), "retrieval-only tools are not pinned");
+    assert!(
+        catalog.get("gamma").is_none(),
+        "retrieval-only tools are not pinned"
+    );
 }
 
 /// An owned execution matches `execute` (result and published context) and
@@ -55,15 +55,16 @@ async fn an_owned_execution_matches_the_borrowed_one_and_is_static() {
     set.add_dynamic_tool(dynamic("alpha"));
     let catalog = set.catalog();
 
+    let alpha = catalog.get("alpha").expect("advertised");
     let mut context = ToolContext::new();
-    let borrowed = catalog.execute("alpha", "{}", &mut context).await;
+    let borrowed = alpha.execute("{}".into(), &mut context).await;
 
-    // An owned execution — the catalog, arguments and context all moved into
-    // the future — is `Send + 'static`, so a host can spawn it.
-    let owned_catalog = catalog.clone();
+    // An owned execution — the registration, arguments and context all
+    // moved into the future — is `Send + 'static`, so a host can spawn it.
+    let owned_tool = alpha.clone();
     let (owned, owned_context) = assert_send_static(async move {
         let mut context = ToolContext::new();
-        let result = owned_catalog.execute("alpha", "{}", &mut context).await;
+        let result = owned_tool.execute("{}".into(), &mut context).await;
         (result, context)
     })
     .await;
@@ -72,23 +73,5 @@ async fn an_owned_execution_matches_the_borrowed_one_and_is_static() {
         format!("{owned_context:?}"),
         format!("{context:?}"),
         "owned dispatch publishes the same context metadata"
-    );
-}
-
-#[tokio::test]
-async fn retain_names_narrows_definitions_and_dispatch() {
-    let mut set = ToolSet::default();
-    set.add_dynamic_tool(dynamic("alpha"));
-    set.add_dynamic_tool(dynamic("beta"));
-    let mut catalog = set.catalog();
-    catalog.retain_names(&BTreeSet::from(["beta".to_string()]));
-    assert_eq!(catalog.names().collect::<Vec<_>>(), ["beta"]);
-    assert_eq!(catalog.take_definitions().len(), 1);
-    assert!(catalog.definitions().is_empty());
-    assert!(
-        !catalog
-            .execute("alpha", "{}", &mut ToolContext::new())
-            .await
-            .is_success()
     );
 }

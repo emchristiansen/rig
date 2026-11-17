@@ -1,51 +1,18 @@
 # rig-memory
 
-Conversation memory policies for the [Rig](https://github.com/0xPlaygrounds/rig)
-agent framework.
+Saved conversations for [Rig](https://github.com/0xPlaygrounds/rig): recent messages,
+compaction, and sessions saved as JSON-lines logs (`rig-session/4`) that can be resumed,
+rewritten, and an agent's log forked up to a turn boundary. With default features it is pure data and builds for wasm32;
+feature `fs` adds `DirStore` and `DirFiles`. `load_async` and `save_async` keep a conversation in
+any `AsyncStore`, such as a database or IndexedDB, and every local store is one; rig-agent's
+`AgentBuilder::memory` keeps an agent's conversation there. A store appends to a log only if the
+log is still as long as the writer read it, checking and appending in one step, so of two saves
+that read one log the second is refused. Database stores ship in `rig-sqlite` (`SqliteSessionStore`)
+and `rig-postgres` (`PostgresSessionStore`) behind their `memory` feature. Feature `test-utils`
+adds `conformance::check_store`, the contract suite every store's tests run against it, and
+`migration::testing`, a synthetic earlier format with its migration.
 
-`rig-core` ships the `ConversationMemory` trait and an in-process
-`InMemoryConversationMemory` backend. This crate provides reusable named
-policies for shaping loaded history before it is sent to the model:
-
-- [`NoopMemoryPolicy`] — identity policy, useful as a default.
-- [`SlidingWindowMemory`] — keep at most the most recent `N` messages.
-- [`TokenWindowMemory`] — keep the most recent messages that fit within a token
-  budget supplied by a [`TokenCounter`].
-
-Both window policies remove the leading prefix through any tool-result
-messages whose assistant calls were truncated. Results are detected anywhere
-in a user message, including after text and across intervening system messages.
-Cleanup stops at the first retained assistant; later paired exchanges remain
-intact. Whole removed messages are included in `apply_with_demoted`'s demoted
-prefix in original order, including accompanying text, so demotion hooks lose
-no content.
-
-## Usage
-
-```rust,no_run
-use rig_memory::{InMemoryConversationMemory, SlidingWindowMemory, IntoFilter};
-
-let memory = InMemoryConversationMemory::new()
-    .with_filter(SlidingWindowMemory::last_messages(20).into_filter());
-```
-
-For backends other than `InMemoryConversationMemory`, apply a policy directly:
-
-```rust,ignore
-use rig_memory::{MemoryPolicy, SlidingWindowMemory};
-
-let policy = SlidingWindowMemory::last_messages(20);
-let trimmed = policy.apply(loaded_messages)?;
-```
-
-To wrap any backend with a policy and propagate policy errors to the caller
-(rather than silently degrading to identity on failure), use `PolicyMemory`:
-
-```rust,no_run
-use rig_memory::{InMemoryConversationMemory, PolicyMemory, SlidingWindowMemory};
-
-let memory = PolicyMemory::new(
-    InMemoryConversationMemory::new(),
-    SlidingWindowMemory::last_messages(20),
-);
-```
+A session in another format is refused untouched. `migration::SHIPPED` is the chain of steps, each
+taking the whole session from one format to the next, that brings an earlier one to the current
+format through the session's own `Store`, keeping a copy of it as it was under `rig/kept/`. It has
+no step yet, as no earlier format was released. See the crate docs for the API.

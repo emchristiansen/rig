@@ -1,0 +1,748 @@
+{
+  "agent_tool_sessions/low_latency_streaming_text_surfaces_final_usage.yaml#0": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "text": "alpha,beta,gamma,delta,epsilon,zeta,eta,theta",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 51,
+      "output_tokens": 16,
+      "total_tokens": 67
+    },
+    "response_id": "chatcmpl-ef12fcaf-398b-47b9-9da8-02447c010364",
+    "finish_reason": "stop",
+    "model": "qwen/qwen3.8-27b",
+    "provider_request_id": "req_01m36hnsxxej1b3dnab3p9z9hc",
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": "alpha,beta,gamma,delta,epsilon,zeta,eta,theta",
+            "role": "assistant"
+          },
+          "finish_reason": "stop",
+          "index": 0,
+          "logprobs": null
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-ef12fcaf-398b-47b9-9da8-02447c010364",
+      "model": "qwen/qwen3.8-27b",
+      "object": "chat.completion",
+      "system_fingerprint": "fp_57c7e760a9",
+      "x_groq": {
+        "id": "req_01m36hnsxxej1b3dnab3p9z9hc",
+        "usage": {
+          "completion_time": 0.031519729,
+          "completion_tokens": 16,
+          "prompt_time": 0.00400693,
+          "prompt_tokens": 51,
+          "queue_time": 0.004035914,
+          "total_time": 0.035526659,
+          "total_tokens": 67
+        }
+      },
+      "usage": {
+        "completion_time": 0.031519729,
+        "completion_tokens": 16,
+        "prompt_time": 0.00400693,
+        "prompt_tokens": 51,
+        "queue_time": 0.004035914,
+        "total_time": 0.035526659,
+        "total_tokens": 67
+      },
+      "service_tier": "on_demand"
+    }
+  },
+  "agent_tool_sessions/parallel_tool_calls_single_turn_nonstreaming.yaml#1": {
+    "mode": "unary",
+    "choice": [
+      {
+        "text": "The two tool outputs are \"crimson-harbor\" and \"silver-orchard\".",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 477,
+      "output_tokens": 20,
+      "total_tokens": 497
+    },
+    "response_id": "chatcmpl-7f78e339-e3f0-42b9-93d9-c5997b393242",
+    "finish_reason": "stop",
+    "model": "qwen/qwen3.8-27b",
+    "provider_request_id": "req_01m36jh38aeex9afjnhgyjayc8",
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "logprobs": null,
+          "message": {
+            "content": "The two tool outputs are \"crimson-harbor\" and \"silver-orchard\".",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-7f78e339-e3f0-42b9-93d9-c5997b393242",
+      "model": "qwen/qwen3.8-27b",
+      "object": "chat.completion",
+      "service_tier": "on_demand",
+      "system_fingerprint": "fp_57c7e760a9",
+      "usage": {
+        "completion_time": 0.039422384,
+        "completion_tokens": 20,
+        "prompt_time": 0.0381043,
+        "prompt_tokens": 477,
+        "queue_time": 0.023233745,
+        "total_time": 0.077526684,
+        "total_tokens": 497
+      },
+      "usage_breakdown": null,
+      "x_groq": {
+        "id": "req_01m36jh38aeex9afjnhgyjayc8",
+        "seed": 213147573
+      }
+    }
+  },
+  "agent_tool_sessions/sequential_complex_tool_calls_nonstreaming.yaml#0": {
+    "mode": "unary",
+    "choice": [
+      {
+        "tool_call": {
+          "id": "5dettfrmf",
+          "name": "ping_empty",
+          "arguments": {},
+          "native": {
+            "item": {
+              "function": {
+                "arguments": "{}",
+                "name": "ping_empty"
+              },
+              "id": "5dettfrmf",
+              "type": "function"
+            },
+            "fingerprint": "859633184c7b38e8"
+          }
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 896,
+      "output_tokens": 15,
+      "total_tokens": 911
+    },
+    "response_id": "chatcmpl-308c299c-936d-428b-9f1f-afcce87e7606",
+    "finish_reason": "tool_calls",
+    "model": "qwen/qwen3.8-27b",
+    "provider_request_id": "req_01m36jppcvegyvpm3x96r6e41f",
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "tool_calls",
+          "index": 0,
+          "logprobs": null,
+          "message": {
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{}",
+                  "name": "ping_empty"
+                },
+                "id": "5dettfrmf",
+                "type": "function"
+              }
+            ]
+          }
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-308c299c-936d-428b-9f1f-afcce87e7606",
+      "model": "qwen/qwen3.8-27b",
+      "object": "chat.completion",
+      "service_tier": "on_demand",
+      "system_fingerprint": "fp_57c7e760a9",
+      "usage": {
+        "completion_time": 0.030324028,
+        "completion_tokens": 15,
+        "prompt_time": 0.071952213,
+        "prompt_tokens": 896,
+        "queue_time": 0.031786226,
+        "total_time": 0.102276241,
+        "total_tokens": 911
+      },
+      "usage_breakdown": null,
+      "x_groq": {
+        "id": "req_01m36jppcvegyvpm3x96r6e41f",
+        "seed": 2144679403
+      }
+    }
+  },
+  "agent_tool_sessions/sequential_complex_tool_calls_streaming.yaml#0": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "tool_call": {
+          "id": "2g9gqs22f",
+          "name": "ping_empty",
+          "arguments": {},
+          "native": {
+            "item": {
+              "function": {
+                "arguments": "{}",
+                "name": "ping_empty"
+              },
+              "id": "2g9gqs22f",
+              "type": "function"
+            },
+            "fingerprint": "d6df151c61f9c478"
+          }
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 896,
+      "output_tokens": 15,
+      "total_tokens": 911
+    },
+    "response_id": "chatcmpl-b712b12f-7a38-4152-8c49-9e052adea1f9",
+    "finish_reason": "tool_calls",
+    "model": "qwen/qwen3.8-27b",
+    "provider_request_id": "req_01m3za0zyxetx8gxngf1bkgxqa",
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": null,
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{}",
+                  "name": "ping_empty"
+                },
+                "id": "2g9gqs22f",
+                "type": "function"
+              }
+            ]
+          },
+          "finish_reason": "tool_calls",
+          "index": 0,
+          "logprobs": null
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-b712b12f-7a38-4152-8c49-9e052adea1f9",
+      "model": "qwen/qwen3.8-27b",
+      "object": "chat.completion",
+      "system_fingerprint": "fp_57c7e760a9",
+      "x_groq": {
+        "id": "req_01m3za0zyxetx8gxngf1bkgxqa",
+        "usage": {
+          "completion_time": 0.030332849,
+          "completion_tokens": 15,
+          "prompt_time": 0.074612713,
+          "prompt_tokens": 896,
+          "queue_time": 0.026346553,
+          "total_time": 0.104945562,
+          "total_tokens": 911
+        }
+      },
+      "usage": {
+        "completion_time": 0.030332849,
+        "completion_tokens": 15,
+        "prompt_time": 0.074612713,
+        "prompt_tokens": 896,
+        "queue_time": 0.026346553,
+        "total_time": 0.104945562,
+        "total_tokens": 911
+      },
+      "service_tier": "on_demand"
+    }
+  },
+  "history_survival_matrix/streaming.yaml#3": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "reasoning": {
+          "text": "Verify.",
+          "redacted": false,
+          "native": {
+            "item": {
+              "reasoning": "Verify."
+            },
+            "fingerprint": "1721fbd70c12f920"
+          }
+        }
+      },
+      {
+        "tool_call": {
+          "id": "fc_74e11b2a-b57b-4897-bb9a-ae82c2ef1d2c",
+          "name": "verify_code",
+          "arguments": {
+            "code": "beta-code-2286"
+          },
+          "native": {
+            "item": {
+              "function": {
+                "arguments": "{\"code\":\"beta-code-2286\"}",
+                "name": "verify_code"
+              },
+              "id": "fc_74e11b2a-b57b-4897-bb9a-ae82c2ef1d2c",
+              "type": "function"
+            },
+            "fingerprint": "7e699f90980da863"
+          }
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 491,
+      "output_tokens": 26,
+      "total_tokens": 517,
+      "reasoning_tokens": 3
+    },
+    "response_id": "chatcmpl-7cdfa0b9-5a33-4135-ab29-873a87cf32a3",
+    "finish_reason": "tool_calls",
+    "model": "openai/gpt-oss-20b",
+    "provider_request_id": "req_01m3z3nr1dees8e21jj3xjv07z",
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": null,
+            "role": "assistant",
+            "channel": "analysis",
+            "reasoning": "Verify.",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"code\":\"beta-code-2286\"}",
+                  "name": "verify_code"
+                },
+                "id": "fc_74e11b2a-b57b-4897-bb9a-ae82c2ef1d2c",
+                "type": "function"
+              }
+            ]
+          },
+          "finish_reason": "tool_calls",
+          "index": 0,
+          "logprobs": null
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-7cdfa0b9-5a33-4135-ab29-873a87cf32a3",
+      "model": "openai/gpt-oss-20b",
+      "object": "chat.completion",
+      "system_fingerprint": "fp_3cdd24b83b",
+      "x_groq": {
+        "id": "req_01m3z3nr1dees8e21jj3xjv07z",
+        "usage": {
+          "completion_time": 0.027594265,
+          "completion_tokens": 26,
+          "completion_tokens_details": {
+            "reasoning_tokens": 3
+          },
+          "prompt_time": 0.026522783,
+          "prompt_tokens": 491,
+          "queue_time": 0.003134991,
+          "total_time": 0.054117048,
+          "total_tokens": 517
+        }
+      },
+      "usage": {
+        "completion_time": 0.027594265,
+        "completion_tokens": 26,
+        "completion_tokens_details": {
+          "reasoning_tokens": 3
+        },
+        "prompt_time": 0.026522783,
+        "prompt_tokens": 491,
+        "queue_time": 0.003134991,
+        "total_time": 0.054117048,
+        "total_tokens": 517
+      },
+      "service_tier": "on_demand"
+    }
+  },
+  "history_survival_matrix/unary.yaml#2": {
+    "mode": "unary",
+    "choice": [
+      {
+        "reasoning": {
+          "text": "Now beta.",
+          "redacted": false,
+          "native": {
+            "item": {
+              "reasoning": "Now beta."
+            },
+            "fingerprint": "1bacdf49452ba9e9"
+          }
+        }
+      },
+      {
+        "tool_call": {
+          "id": "fc_08be4fa5-e56e-4413-8406-93b6749f585e",
+          "name": "lookup_record",
+          "arguments": {
+            "record": "beta"
+          },
+          "native": {
+            "item": {
+              "function": {
+                "arguments": "{\"record\":\"beta\"}",
+                "name": "lookup_record"
+              },
+              "id": "fc_08be4fa5-e56e-4413-8406-93b6749f585e",
+              "type": "function"
+            },
+            "fingerprint": "a71493dabfebae37"
+          }
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 370,
+      "output_tokens": 23,
+      "total_tokens": 393,
+      "reasoning_tokens": 4
+    },
+    "response_id": "chatcmpl-e94f997c-3571-4e20-b5cb-88b8219d1df6",
+    "finish_reason": "tool_calls",
+    "model": "openai/gpt-oss-20b",
+    "provider_request_id": "req_01m3xcjygjexv80448aschc8za",
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "tool_calls",
+          "index": 0,
+          "logprobs": null,
+          "message": {
+            "reasoning": "Now beta.",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"record\":\"beta\"}",
+                  "name": "lookup_record"
+                },
+                "id": "fc_08be4fa5-e56e-4413-8406-93b6749f585e",
+                "type": "function"
+              }
+            ]
+          }
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-e94f997c-3571-4e20-b5cb-88b8219d1df6",
+      "model": "openai/gpt-oss-20b",
+      "object": "chat.completion",
+      "service_tier": "on_demand",
+      "system_fingerprint": "fp_d3e146e1a5",
+      "usage": {
+        "completion_time": 0.040892583,
+        "completion_tokens": 23,
+        "completion_tokens_details": {
+          "reasoning_tokens": 4
+        },
+        "prompt_time": 0.023503536,
+        "prompt_tokens": 370,
+        "queue_time": 0.170507938,
+        "total_time": 0.064396119,
+        "total_tokens": 393
+      },
+      "usage_breakdown": null,
+      "x_groq": {
+        "id": "req_01m3xcjygjexv80448aschc8za",
+        "seed": 695773722
+      }
+    }
+  },
+  "history_survival_matrix/unary.yaml#8": {
+    "mode": "unary",
+    "choice": [
+      {
+        "reasoning": {
+          "text": "Need to output: alpha-code-7431,beta-code-2286.",
+          "redacted": false,
+          "native": {
+            "item": {
+              "reasoning": "Need to output: alpha-code-7431,beta-code-2286."
+            },
+            "fingerprint": "e1cb0c0cf100478a"
+          }
+        }
+      },
+      {
+        "text": "alpha-code-7431,beta-code-2286",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 655,
+      "output_tokens": 37,
+      "total_tokens": 692,
+      "reasoning_tokens": 17
+    },
+    "response_id": "chatcmpl-8ed3b97f-4126-4429-973d-0797a1e4efb2",
+    "finish_reason": "stop",
+    "model": "openai/gpt-oss-20b",
+    "provider_request_id": "req_01m3xck0cte73s8s82ph9xp7ge",
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "logprobs": null,
+          "message": {
+            "content": "alpha-code-7431,beta-code-2286",
+            "reasoning": "Need to output: alpha-code-7431,beta-code-2286.",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-8ed3b97f-4126-4429-973d-0797a1e4efb2",
+      "model": "openai/gpt-oss-20b",
+      "object": "chat.completion",
+      "service_tier": "on_demand",
+      "system_fingerprint": "fp_e2cb7a84ec",
+      "usage": {
+        "completion_time": 0.040153109,
+        "completion_tokens": 37,
+        "completion_tokens_details": {
+          "reasoning_tokens": 17
+        },
+        "prompt_time": 0.046334266,
+        "prompt_tokens": 655,
+        "queue_time": 0.057750865,
+        "total_time": 0.086487375,
+        "total_tokens": 692
+      },
+      "usage_breakdown": null,
+      "x_groq": {
+        "id": "req_01m3xck0cte73s8s82ph9xp7ge",
+        "seed": 1369350129
+      }
+    }
+  },
+  "prompt_caching/blocking_probe.yaml#2": {
+    "mode": "unary",
+    "choice": [
+      {
+        "reasoning": {
+          "text": "User wants \"probe still ready\". Must output exactly that.",
+          "redacted": false,
+          "native": {
+            "item": {
+              "reasoning": "User wants \"probe still ready\". Must output exactly that."
+            },
+            "fingerprint": "113ba360ea5a1a01"
+          }
+        }
+      },
+      {
+        "text": "probe still ready",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 1866,
+      "output_tokens": 25,
+      "total_tokens": 1891,
+      "cached_input_tokens": 1792,
+      "reasoning_tokens": 13
+    },
+    "response_id": "chatcmpl-a84c8cb9-853c-4894-ac35-09a371b0ca53",
+    "finish_reason": "stop",
+    "model": "openai/gpt-oss-20b",
+    "provider_request_id": "req_01m40zqdwpeyf9qtmsf9pbfrn6",
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "logprobs": null,
+          "message": {
+            "content": "probe still ready",
+            "reasoning": "User wants \"probe still ready\". Must output exactly that.",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-a84c8cb9-853c-4894-ac35-09a371b0ca53",
+      "model": "openai/gpt-oss-20b",
+      "object": "chat.completion",
+      "service_tier": "on_demand",
+      "system_fingerprint": "fp_4a35f7bd1b",
+      "usage": {
+        "completion_time": 0.025643103,
+        "completion_tokens": 25,
+        "completion_tokens_details": {
+          "reasoning_tokens": 13
+        },
+        "prompt_time": 0.008759379,
+        "prompt_tokens": 1866,
+        "prompt_tokens_details": {
+          "cached_tokens": 1792
+        },
+        "queue_time": 0.020952601,
+        "total_time": 0.034402482,
+        "total_tokens": 1891
+      },
+      "usage_breakdown": null,
+      "x_groq": {
+        "id": "req_01m40zqdwpeyf9qtmsf9pbfrn6",
+        "seed": 415673840
+      }
+    }
+  },
+  "raw_completion_parity_matrix/plain_raw_completion_lacks_request_id.yaml#0": {
+    "mode": "unary",
+    "choice": [
+      {
+        "reasoning": {
+          "text": "The user says \"Reply with the single word: pong\". So",
+          "redacted": false,
+          "native": {
+            "item": {
+              "reasoning": "The user says \"Reply with the single word: pong\". So"
+            },
+            "fingerprint": "b0214440bb23b556"
+          }
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 78,
+      "output_tokens": 16,
+      "total_tokens": 94,
+      "reasoning_tokens": 14
+    },
+    "response_id": "chatcmpl-cc907762-da00-4a8e-9ba6-57b0d30c9908",
+    "finish_reason": "length",
+    "model": "openai/gpt-oss-20b",
+    "provider_request_id": "req_01m36hc70je5vr226pgc1btdzq",
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "length",
+          "index": 0,
+          "logprobs": null,
+          "message": {
+            "content": "",
+            "reasoning": "The user says \"Reply with the single word: pong\". So",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-cc907762-da00-4a8e-9ba6-57b0d30c9908",
+      "model": "openai/gpt-oss-20b",
+      "object": "chat.completion",
+      "service_tier": "on_demand",
+      "system_fingerprint": "fp_a4315eb300",
+      "usage": {
+        "completion_time": 0.016729905,
+        "completion_tokens": 16,
+        "completion_tokens_details": {
+          "reasoning_tokens": 14
+        },
+        "prompt_time": 0.004348141,
+        "prompt_tokens": 78,
+        "queue_time": 0.177076735,
+        "total_time": 0.021078046,
+        "total_tokens": 94
+      },
+      "usage_breakdown": null,
+      "x_groq": {
+        "id": "req_01m36hc70je5vr226pgc1btdzq",
+        "seed": 26645231
+      }
+    }
+  },
+  "response_identity_edge/streaming_terminal_carries_identity.yaml#0": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "reasoning": {
+          "text": "The user says: \"Reply with exactly: stream identity probe\". The instruction is to reply with exactly that phrase. There's no conflict with policy. We can comply.",
+          "redacted": false,
+          "native": {
+            "item": {
+              "reasoning": "The user says: \"Reply with exactly: stream identity probe\". The instruction is to reply with exactly that phrase. There's no conflict with policy. We can comply."
+            },
+            "fingerprint": "b9229e3239a5fd4c"
+          }
+        }
+      },
+      {
+        "text": "stream identity probe",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 78,
+      "output_tokens": 46,
+      "total_tokens": 124,
+      "reasoning_tokens": 34
+    },
+    "response_id": "chatcmpl-ecc803ec-835c-489a-bff1-bd3a0f18ac19",
+    "finish_reason": "stop",
+    "model": "openai/gpt-oss-120b",
+    "provider_request_id": "req_01m36hc866er5bsnj6mmh4hjq1",
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": "stream identity probe",
+            "role": "assistant",
+            "channel": "analysis",
+            "reasoning": "The user says: \"Reply with exactly: stream identity probe\". The instruction is to reply with exactly that phrase. There's no conflict with policy. We can comply."
+          },
+          "finish_reason": "stop",
+          "index": 0,
+          "logprobs": null
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-ecc803ec-835c-489a-bff1-bd3a0f18ac19",
+      "model": "openai/gpt-oss-120b",
+      "object": "chat.completion",
+      "system_fingerprint": "fp_df9620fe21",
+      "x_groq": {
+        "id": "req_01m36hc866er5bsnj6mmh4hjq1",
+        "usage": {
+          "completion_time": 0.094441218,
+          "completion_tokens": 46,
+          "completion_tokens_details": {
+            "reasoning_tokens": 34
+          },
+          "prompt_time": 0.004025632,
+          "prompt_tokens": 78,
+          "queue_time": 0.004893845,
+          "total_time": 0.09846685,
+          "total_tokens": 124
+        }
+      },
+      "usage": {
+        "completion_time": 0.094441218,
+        "completion_tokens": 46,
+        "completion_tokens_details": {
+          "reasoning_tokens": 34
+        },
+        "prompt_time": 0.004025632,
+        "prompt_tokens": 78,
+        "queue_time": 0.004893845,
+        "total_time": 0.09846685,
+        "total_tokens": 124
+      },
+      "service_tier": "on_demand"
+    }
+  }
+}

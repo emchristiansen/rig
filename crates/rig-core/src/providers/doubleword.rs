@@ -1,18 +1,25 @@
 //! Doubleword's model identifiers.
 //!
-//! Configure realtime chat and embedding requests with
-//! [`crate::providers::openai::wire::DOUBLEWORD`]. Async polling and batch
-//! submission are not modeled by these operations.
+//! [`from_env`] and [`new`] build a client on the [`DOUBLEWORD`](crate::providers::openai::wire::DOUBLEWORD) dialect for
+//! realtime chat, embeddings and its Responses endpoint. On `.responses(model)`,
+//! [`ServiceTier::Flex`](crate::completion::ServiceTier::Flex) runs a request
+//! at the flex tier and a unary call waits for its result; a long wait can
+//! time out the connection. Background polling and batch submission are not
+//! modeled by these operations.
 //!
 //! ```no_run
+//! use rig_core::completion::{CompletionRequest, GenerationOptions, ServiceTier};
 //! use rig_core::providers::doubleword;
-//! use rig_core::providers::openai::wire::{DOUBLEWORD, OpenAI};
 //!
-//! # fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let doubleword = OpenAI::from_env_with(&DOUBLEWORD)?;
-//! let chat = doubleword.chat(doubleword::QWEN3_5_9B);
-//! let embedding = doubleword.embeddings(doubleword::QWEN3_EMBEDDING_8B, None);
-//! # let _ = (chat, embedding);
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let doubleword = doubleword::from_env()?;
+//! let flex = GenerationOptions::default().service_tier(ServiceTier::Flex);
+//! let reply = doubleword
+//!     .responses(doubleword::QWEN3_5_9B)
+//!     .call(CompletionRequest::new("Summarize this report.").options(flex))
+//!     .await?;
+//! let embedding = doubleword.embedding(doubleword::QWEN3_EMBEDDING_8B, None);
+//! # let _ = (reply, embedding);
 //! # Ok(())
 //! # }
 //! ```
@@ -33,3 +40,9 @@ pub const QWEN3_VL_235B: &str = "Qwen/Qwen3-VL-235B-A22B-Instruct-FP8";
 /// Identifier for the Qwen3 Embedding 8B model. Supported output dimensions are
 /// defined by [`crate::providers::openai::wire::DOUBLEWORD`].
 pub const QWEN3_EMBEDDING_8B: &str = "Qwen/Qwen3-Embedding-8B";
+
+/// The provider key: the dialect name, a reply's `Origin::provider` and
+/// the typed provider-options key.
+pub const PROVIDER_NAME: &str = "doubleword";
+
+crate::client::macros::openai_vendor!(crate::providers::openai::wire::DOUBLEWORD, "Doubleword");

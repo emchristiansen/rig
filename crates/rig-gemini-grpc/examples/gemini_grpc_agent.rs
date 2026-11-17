@@ -1,40 +1,20 @@
 use rig_agent::prelude::*;
-use rig_gemini_grpc::Client;
+use rig_gemini_grpc::GeminiGrpc;
 
-#[tracing::instrument(ret)]
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_target(false)
-        .init();
+    // Connect with the API key in `GEMINI_API_KEY`.
+    let transport = GeminiGrpc::from_env().await?;
 
-    // Initialize the Google Gemini gRPC client
-    let client = Client::from_env().map_err(|err| anyhow::anyhow!("{err}"))?;
-
-    // Create agent with a single context prompt
-    let agent = client
-        .agent("gemini-2.5-flash")
+    let agent = AgentBuilder::new(transport.completion("gemini-2.5-flash"))
         .preamble("Be creative and concise. Answer directly and clearly.")
         .temperature(0.5)
         .build();
 
-    tracing::info!("Prompting the agent via gRPC...");
-
-    // Prompt the agent and print the response
     let response = agent
         .prompt("How much wood would a woodchuck chuck if a woodchuck could chuck wood? Infer an answer.")
-        .await;
-
-    tracing::info!("Response: {:?}", response);
-
-    match response {
-        Ok(response) => println!("{}", response.output),
-        Err(e) => {
-            tracing::error!("Error: {:?}", e);
-            return Err(e.into());
-        }
-    }
+        .await?;
+    println!("{}", response.output());
 
     Ok(())
 }
