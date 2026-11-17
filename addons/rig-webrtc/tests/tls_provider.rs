@@ -16,7 +16,7 @@ use std::net::SocketAddr;
 use rig_core::providers::chatgpt;
 use rig_core::providers::openai::OpenAIConfig;
 use rig_live::chatgpt as realtime;
-use rig_live::support::CallerIdentity;
+use rig_live::support::{CallerIdentity, CodexIdentity};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -53,7 +53,8 @@ async fn the_documented_composition_reaches_tls_without_panicking() {
         .with_base_url(format!("https://{https}/backend-api/codex"))
         .with_account_id("account-id")
         .connect(rig_reqwest::ReqwestClient::default());
-    let calls = realtime::LiveCalls::new(provider)
+    let conversation = CodexIdentity::from_ids("session-1", "thread-1").expect("ids");
+    let calls = realtime::LiveCalls::new(provider, conversation)
         .expect("the Codex backend")
         .with_caller_identity(identity)
         .with_control_base_url(format!("wss://{wss}/v1/live"));

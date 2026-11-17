@@ -20,7 +20,9 @@ The crates are not published; consumers depend on them by Git revision.
 
 They live here rather than under `crates/` because upstream's guard tests
 scan `crates/` (for example `tests/core/no_random_ids.rs`) and would need
-their allowlists edited for fork code.
+their allowlists edited for fork code. Being outside that scan exempts
+nothing: `rig-live/tests/no_random_ids.rs` holds every crate here to the same
+record-replay rule, with its own list of allowed sites and their reasons.
 
 ## Every upstream file the fork changes
 
@@ -33,6 +35,7 @@ places where the fork's side must be re-applied.
 | `Cargo.lock` | Entries for the add-on crates and their dependencies. | Follows from the line above. Regenerate rather than merge by hand. |
 | `flake.nix` | `rustToolchain` reads `./addons/rust-toolchain.toml`; a `shellHook` links `target/` to a per-workspace cache under `~/.cache/cargo-target`. | The workstation's development shell. |
 | `flake.lock` | The `rust-overlay` input is newer. | Provides Rust 1.100.0. |
+| `.gitignore` | First line `target/` becomes `target`; the `.envrc` line is removed. | The development shell makes `target` a symlink, which `target/` does not match; `.envrc` is tracked. |
 | `.cargo/config.toml` | Appended `[registry] global-min-publish-age = "14 days"` and `[resolver] incompatible-publish-age = "deny"`. | The workstation's fourteen-day rule for registry crates. |
 
 Files the fork adds outside this directory: `.envrc` (`use flake`).

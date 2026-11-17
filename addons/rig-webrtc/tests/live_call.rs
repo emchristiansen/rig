@@ -13,12 +13,12 @@
 
 mod common;
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rig_core::providers::chatgpt;
 use rig_core::providers::openai::OpenAIConfig;
 use rig_live::chatgpt as realtime;
-use rig_live::support::CallerIdentity;
+use rig_live::support::{CallerIdentity, CodexIdentity};
 use rig_webrtc::{LivePeer, OpusPacket};
 
 /// One 20 ms Opus frame of silence.
@@ -50,7 +50,15 @@ async fn a_live_call_starts_reports_usage_and_closes() {
     let provider = OpenAIConfig::with_key(&chatgpt::DIALECT, env("CHATGPT_ACCESS_TOKEN"))
         .with_account_id(env("CHATGPT_ACCOUNT_ID"))
         .connect(rig_reqwest::ReqwestClient::default());
-    let calls = realtime::LiveCalls::new(provider)
+    // A new conversation each run, as a client starting a fresh one would.
+    let started_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_nanos();
+    let conversation_id = format!("rig-webrtc-live-call-{started_at}");
+    let conversation =
+        CodexIdentity::from_ids(conversation_id.clone(), conversation_id).expect("valid ids");
+    let calls = realtime::LiveCalls::new(provider, conversation)
         .expect("the Codex backend")
         .with_caller_identity(identity);
 

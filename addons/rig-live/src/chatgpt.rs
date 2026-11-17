@@ -19,12 +19,13 @@
 //! # async fn example(
 //! #     http: &impl rig_core::http_client::HttpClientExt,
 //! #     identity: rig_live::support::CallerIdentity,
+//! #     conversation: rig_live::support::CodexIdentity,
 //! #     offer_sdp: &str,
 //! # ) -> Result<(), rig_core::error::ProviderError> {
 //! let provider = OpenAIConfig::with_key(&chatgpt::DIALECT, "access-token")
 //!     .with_account_id("account-id")
 //!     .client();
-//! let calls = LiveCalls::new(provider)?.with_caller_identity(identity);
+//! let calls = LiveCalls::new(provider, conversation)?.with_caller_identity(identity);
 //! let call = calls
 //!     .create_call(http, offer_sdp, &SessionConfig::new("Answer briefly."))
 //!     .await?;

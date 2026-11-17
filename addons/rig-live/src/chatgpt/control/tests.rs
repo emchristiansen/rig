@@ -120,11 +120,16 @@ fn test_caller_identity() -> crate::support::CallerIdentity {
         .expect("a valid test identity")
 }
 
+fn conversation() -> crate::support::CodexIdentity {
+    crate::support::CodexIdentity::from_ids("session-1", "thread-1").expect("valid ids")
+}
+
 fn calls() -> LiveCalls {
     LiveCalls::new(
         OpenAIConfig::with_key(&chatgpt::DIALECT, "test-token")
             .with_account_id("acct-123")
             .client(),
+        conversation(),
     )
     .expect("the Codex backend")
     .with_caller_identity(test_caller_identity())
@@ -333,6 +338,7 @@ async fn a_credential_source_keeps_the_callers_headers_on_the_handshake() {
         OpenAIConfig::with_key(&chatgpt::DIALECT, "test-token")
             .with_account_id("acct-123")
             .client(),
+        conversation(),
     )
     .expect("the Codex backend")
     .with_caller_identity(test_caller_identity())
@@ -366,4 +372,85 @@ async fn a_credential_source_keeps_the_callers_headers_on_the_handshake() {
     );
     assert_eq!(all("authorization"), ["Bearer rotated-token"]);
     assert_eq!(all("chatgpt-account-id"), ["rotated-account"]);
+}
+
+/// The corrupt frame a control read carries, found by walking the source
+/// chain of a boxed error, as a caller wrapping [`ControlError`] would.
+fn corrupt_in_chain(error: ControlError) -> Option<crate::support::error::FrameEvidence> {
+    let boxed: Box<dyn std::error::Error + Send + Sync> = Box::new(error);
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(boxed.as_ref());
+    while let Some(error) = current {
+        if let Some(corrupt) = error.downcast_ref::<CorruptFrame>() {
+            return Some(corrupt.evidence().clone());
+        }
+        current = error.source();
+    }
+    None
+}
+
+/// A text frame that does not decode reaches the caller as
+/// [`ControlError::CorruptFrame`] with the exact frame, its `type` and the
+/// decode error, and the corrupt frame is in the error's source chain. The
+/// socket goes on reading after it.
+#[tokio::test]
+async fn a_text_frame_that_does_not_decode_keeps_its_text_and_decode_error() {
+    use crate::support::error::FrameEvidence;
+
+    let malformed = r#"{"type":"turn.done","turn":{"id":1}}"#;
+    let backend = Scripted::with([
+        Frame::Text(malformed.into()),
+        Frame::Text("not json".into()),
+    ]);
+    let mut socket = ControlSocket::from_connection(Box::new(backend), call_id());
+
+    let error = socket.next_event().await.expect_err("the frame is refused");
+    let corrupt = error.corrupt_frame().expect("a corrupt frame");
+    assert_eq!(
+        corrupt.evidence(),
+        &FrameEvidence::Text(malformed.to_owned())
+    );
+    assert_eq!(corrupt.frame_bytes(), Some(malformed.as_bytes()));
+    assert_eq!(corrupt.event_type(), Some("turn.done"));
+    assert_eq!(
+        corrupt.error().classify(),
+        serde_json::error::Category::Data
+    );
+    assert_eq!(
+        corrupt_in_chain(error),
+        Some(FrameEvidence::Text(malformed.to_owned()))
+    );
+
+    let ControlError::CorruptFrame(not_json) =
+        socket.next_event().await.expect_err("the frame is refused")
+    else {
+        panic!("a corrupt frame");
+    };
+    assert_eq!(not_json.frame(), Some("not json"));
+    assert_eq!(not_json.event_type(), None);
+    assert_eq!(
+        not_json.error().classify(),
+        serde_json::error::Category::Syntax
+    );
+}
+
+/// A binary frame that is not UTF-8 keeps its exact bytes in the source
+/// chain too, with the UTF-8 failure as its decode error.
+#[tokio::test]
+async fn a_binary_frame_that_is_not_utf8_is_in_the_source_chain() {
+    let received = vec![b'{', 0xff, 0xfe, b'}'];
+    let backend = Scripted::with([Frame::Binary(bytes::Bytes::from(received.clone()))]);
+    let mut socket = ControlSocket::from_connection(Box::new(backend), call_id());
+
+    let error = socket.next_event().await.expect_err("the frame is refused");
+    let corrupt = error.corrupt_frame().expect("a corrupt frame");
+    assert_eq!(corrupt.frame_bytes(), Some(received.as_slice()));
+    assert_eq!(corrupt.frame(), None);
+    assert!(
+        corrupt.error().to_string().contains("invalid utf-8"),
+        "{corrupt}"
+    );
+    assert_eq!(
+        corrupt_in_chain(error),
+        Some(crate::support::error::FrameEvidence::Bytes(received))
+    );
 }

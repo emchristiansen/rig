@@ -20,9 +20,9 @@ pub const X_CLIENT_REQUEST_ID_HEADER: &str = "x-client-request-id";
 /// The stable Codex cache and correlation identity of one conversation.
 ///
 /// Used for every header that names the conversation, so all of them agree
-/// by construction. [`Self::generate`] draws opaque ids from
-/// [`rig_core::id::generate`]; [`Self::from_ids`] takes ids the caller
-/// derives.
+/// by construction. [`Self::from_ids`] takes ids the caller derives or
+/// recorded; nothing here draws one, so a replayed call names the same
+/// conversation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "CodexIdentityIds", into = "CodexIdentityIds")]
 pub struct CodexIdentity {
@@ -72,15 +72,6 @@ impl From<InvalidCodexIdentity> for ProviderError {
 }
 
 impl CodexIdentity {
-    /// A fresh identity.
-    #[must_use]
-    pub fn generate() -> Self {
-        Self {
-            session_id: rig_core::id::generate(),
-            thread_id: rig_core::id::generate(),
-        }
-    }
-
     /// An identity from ids the caller derives (for example from a
     /// prefix-cache seed), sent exactly as given. Refuses an empty id, or one
     /// no HTTP header can carry.

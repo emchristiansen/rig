@@ -37,10 +37,13 @@ use std::time::Duration;
 use rig_core::providers::chatgpt;
 use rig_core::providers::openai::OpenAIConfig;
 use rig_live::chatgpt as realtime;
-use rig_live::support::CallerIdentity;
+use rig_live::support::{CallerIdentity, CodexIdentity};
 use rig_webrtc::{LivePeer, OpusPacket, PeerEvent};
 
-async fn call(identity: CallerIdentity) -> Result<(), Box<dyn std::error::Error>> {
+async fn call(
+    identity: CallerIdentity,
+    conversation: CodexIdentity,
+) -> Result<(), Box<dyn std::error::Error>> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .map_err(|_| "another rustls provider is already installed")?;
@@ -48,7 +51,7 @@ async fn call(identity: CallerIdentity) -> Result<(), Box<dyn std::error::Error>
     let provider = OpenAIConfig::with_key(&chatgpt::DIALECT, "access-token")
         .with_account_id("account-id")
         .connect(rig_reqwest::ReqwestClient::default());
-    let calls = realtime::LiveCalls::new(provider)?.with_caller_identity(identity);
+    let calls = realtime::LiveCalls::new(provider, conversation)?.with_caller_identity(identity);
     let peer = LivePeer::builder().build().await?;
     let offer_sdp = peer.offer().await?;
     let session = realtime::SessionConfig::new("Answer briefly.");
