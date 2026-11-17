@@ -161,6 +161,7 @@ pub struct LivePeerBuilder {
     loopback_candidates: bool,
     timeout: Duration,
     event_queue: NonZeroUsize,
+    ssrc: Option<u32>,
 }
 
 impl Default for LivePeerBuilder {
@@ -171,6 +172,7 @@ impl Default for LivePeerBuilder {
             loopback_candidates: false,
             timeout: Duration::from_secs(15),
             event_queue: DEFAULT_EVENT_QUEUE,
+            ssrc: None,
         }
     }
 }
@@ -217,6 +219,17 @@ impl LivePeerBuilder {
         self
     }
 
+    /// Send the Opus track as RTP stream `ssrc`, which the offer names in its
+    /// `a=ssrc` line and track id. Without it the peer draws a random SSRC,
+    /// so a caller that records calls, or compares offers on replay,
+    /// supplies one. The offer still carries the ICE credentials, DTLS
+    /// fingerprint and SDP session id webrtc-rs draws for every connection.
+    #[must_use]
+    pub fn with_ssrc(mut self, ssrc: u32) -> Self {
+        self.ssrc = Some(ssrc);
+        self
+    }
+
     /// Build the peer: its Opus track and its ordered event data channel.
     /// Needs a running tokio runtime.
     ///
@@ -231,7 +244,7 @@ impl LivePeerBuilder {
     }
 
     async fn construct(self) -> Result<LivePeer, PeerError> {
-        let ssrc = fastrand::u32(..);
+        let ssrc = self.ssrc.unwrap_or_else(|| fastrand::u32(..));
         let codec = RTCRtpCodec {
             mime_type: "audio/opus".into(),
             clock_rate: OPUS_CLOCK_RATE,

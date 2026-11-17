@@ -172,10 +172,10 @@ async fn a_call_runs_end_to_end_against_local_servers() {
         .with_base_url(format!("http://{http_addr}/backend-api/codex"))
         .with_account_id("acct-123")
         .connect(rig_reqwest::ReqwestClient::default());
-    let calls = realtime::LiveCalls::new(provider)
+    let conversation = CodexIdentity::from_ids("session-1", "thread-1").expect("ids");
+    let calls = realtime::LiveCalls::new(provider, conversation)
         .expect("the Codex backend")
         .with_caller_identity(identity)
-        .with_identity(CodexIdentity::from_ids("session-1", "thread-1").expect("ids"))
         .with_request_headers(
             RequestHeaders::new()
                 .with("x-codex-turn-metadata", r#"{"thread_source":"user"}"#)

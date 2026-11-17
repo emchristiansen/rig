@@ -637,3 +637,41 @@ fn mute_unmute_and_close_serialize_the_reference_examples() {
         json!({"type": "session.close"})
     );
 }
+
+/// A corrupt frame reaches the caller as the typed error, with the exact
+/// frame, its `type`, and the decode error, also through a boxed error.
+#[test]
+fn a_corrupt_frame_keeps_its_exact_text_and_decode_error() {
+    use crate::support::error::{CorruptFrame, FrameEvidence};
+
+    let payload =
+        r#"{"type":"session.input_transcript.delta","event_id":"e","start_ms":1,"end_ms":2}"#;
+    let corrupt = ServerEvent::parse(payload).expect_err("no delta");
+    assert_eq!(corrupt.evidence(), &FrameEvidence::Text(payload.to_owned()));
+    assert_eq!(corrupt.frame_bytes(), Some(payload.as_bytes()));
+    assert_eq!(corrupt.event_type(), Some("session.input_transcript.delta"));
+    assert_eq!(
+        corrupt.error().classify(),
+        serde_json::error::Category::Data
+    );
+    assert!(
+        corrupt
+            .error()
+            .to_string()
+            .contains("missing field `delta`"),
+        "{corrupt}"
+    );
+
+    let not_json = ServerEvent::parse("not json").expect_err("not JSON");
+    assert_eq!(not_json.frame_bytes(), Some("not json".as_bytes()));
+    assert_eq!(
+        not_json.error().classify(),
+        serde_json::error::Category::Syntax
+    );
+
+    let boxed: Box<dyn std::error::Error + Send + Sync> = Box::new(corrupt);
+    let recovered = boxed
+        .downcast_ref::<CorruptFrame>()
+        .expect("the boxed error is the corrupt frame");
+    assert_eq!(recovered.frame(), Some(payload));
+}

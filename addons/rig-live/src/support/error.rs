@@ -28,6 +28,10 @@ pub use rig_core::error::{
 /// fields failed typed decoding. A malformed modelled event is never demoted
 /// to an unmodelled one; it surfaces as this error, carrying the frame so a
 /// caller can keep it.
+///
+/// There is deliberately no conversion into [`ProviderError`]: it has no
+/// variant that could carry the frame, so a caller keeps this type, or
+/// [`ControlError`](crate::chatgpt::ControlError) from a control socket.
 #[derive(Debug)]
 pub struct CorruptFrame {
     event_type: Option<String>,
@@ -120,14 +124,5 @@ impl fmt::Display for CorruptFrame {
 impl std::error::Error for CorruptFrame {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.error)
-    }
-}
-
-/// A corrupt frame becomes [`ProviderError::Response`] carrying its
-/// [`Display`](fmt::Display) form, frame included. The typed evidence and
-/// the decode error do not survive the conversion.
-impl From<CorruptFrame> for ProviderError {
-    fn from(corrupt: CorruptFrame) -> Self {
-        ProviderError::Response(corrupt.to_string())
     }
 }

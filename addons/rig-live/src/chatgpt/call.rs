@@ -138,19 +138,23 @@ const LIVE_HEADERS: [&str; 2] = [OPENAI_ALPHA_HEADER, X_SESSION_ID_HEADER];
 pub type NotTheCodexBackend = NotACodexWire;
 
 impl LiveCalls {
-    /// Calls over `provider`, with a fresh identity whose session id is also
-    /// the realtime session id. Refuses a provider whose dialect does not
-    /// speak the Codex contract.
+    /// Calls over `provider` for the conversation `identity`, carried as
+    /// `session-id` and `thread-id`, with its session id also the realtime
+    /// session id. Refuses a provider whose dialect does not speak the Codex
+    /// contract.
+    ///
+    /// The identity is the caller's, so every header naming the conversation
+    /// is a function of what the caller supplied and a recorded call can be
+    /// replayed with the same headers.
     ///
     /// No request is built until [`Self::with_caller_identity`] supplies the
     /// caller's exact identity: the provider's own `identity` is not sent.
-    pub fn new(provider: OpenAI) -> Result<Self, NotTheCodexBackend> {
+    pub fn new(provider: OpenAI, identity: CodexIdentity) -> Result<Self, NotTheCodexBackend> {
         if provider.config().dialect.quirks.responses.contract != ResponsesContract::Codex {
             return Err(NotACodexWire {
                 dialect: provider.config().dialect.name,
             });
         }
-        let identity = CodexIdentity::generate();
         Ok(Self {
             realtime_session_id: identity.session_id().to_owned(),
             provider,
@@ -186,15 +190,6 @@ impl LiveCalls {
     #[must_use]
     pub fn with_credential_source(mut self, source: impl CredentialSource + 'static) -> Self {
         self.credential_source = Some(CredentialSourceHandle::new(source));
-        self
-    }
-
-    /// Carry `identity` as `session-id` and `thread-id`, and its session id
-    /// as `x-session-id`.
-    #[must_use]
-    pub fn with_identity(mut self, identity: CodexIdentity) -> Self {
-        self.realtime_session_id = identity.session_id().to_owned();
-        self.identity = identity;
         self
     }
 

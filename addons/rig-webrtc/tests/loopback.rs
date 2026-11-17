@@ -113,6 +113,38 @@ async fn opus_and_event_messages_cross_a_loopback_call_both_ways() {
     answerer.close().await.expect("the answerer closes");
 }
 
+/// A supplied SSRC is the one the offer names: two peers built with the same
+/// SSRC offer the same `a=ssrc` lines and track id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_supplied_ssrc_is_the_ssrc_the_offer_names() {
+    const SSRC: u32 = 0x1234_5678;
+    let mut ssrc_lines = Vec::new();
+    for _ in 0..2 {
+        let peer = common::loopback_builder(0)
+            .with_ssrc(SSRC)
+            .build()
+            .await
+            .expect("the live peer builds");
+        let offer = peer.offer().await.expect("an offer");
+        assert!(offer.contains(&format!("audio-{SSRC}")), "{offer}");
+        let lines: Vec<String> = offer
+            .lines()
+            .filter(|line| line.starts_with("a=ssrc:"))
+            .map(ToOwned::to_owned)
+            .collect();
+        assert!(!lines.is_empty(), "{offer}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.starts_with(&format!("a=ssrc:{SSRC} "))),
+            "{offer}"
+        );
+        ssrc_lines.push(lines);
+        peer.close().await.expect("the peer closes");
+    }
+    assert_eq!(ssrc_lines.first(), ssrc_lines.get(1));
+}
+
 /// One task waits for events while another sends on the same peer: the
 /// receive future and the sends overlap, through `tokio::join!` on shared
 /// references and through an `Arc` in a spawned task.

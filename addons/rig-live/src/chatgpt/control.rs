@@ -201,13 +201,17 @@ impl std::fmt::Debug for ControlSocket {
 
 /// A control socket read that failed: the transport failed, or a frame did
 /// not decode.
+///
+/// It does not convert into [`ProviderError`], which has no variant that
+/// could carry a corrupt frame; match it, or use [`Self::corrupt_frame`].
 #[derive(Debug, thiserror::Error)]
 pub enum ControlError {
     /// The transport failed.
     #[error(transparent)]
     Provider(#[from] ProviderError),
-    /// A frame did not decode; it is kept as received.
-    #[error(transparent)]
+    /// A frame did not decode; it is kept as received, and is also this
+    /// error's [`source`](std::error::Error::source).
+    #[error("{0}")]
     CorruptFrame(#[from] CorruptFrame),
 }
 
@@ -218,17 +222,6 @@ impl ControlError {
         match self {
             Self::CorruptFrame(corrupt) => Some(corrupt),
             Self::Provider(_) => None,
-        }
-    }
-}
-
-/// A transport failure stays the [`ProviderError`] it was; a corrupt frame
-/// becomes one as [`CorruptFrame`] converts.
-impl From<ControlError> for ProviderError {
-    fn from(error: ControlError) -> Self {
-        match error {
-            ControlError::Provider(error) => error,
-            ControlError::CorruptFrame(corrupt) => corrupt.into(),
         }
     }
 }

@@ -177,11 +177,15 @@ fn caller_identity() -> CallerIdentity {
     .expect("a valid caller identity")
 }
 
+/// The conversation every test call names.
+fn conversation() -> CodexIdentity {
+    CodexIdentity::from_ids("session-1", "thread-1").expect("valid ids")
+}
+
 fn calls() -> LiveCalls {
-    LiveCalls::new(provider().client())
+    LiveCalls::new(provider().client(), conversation())
         .expect("the ChatGPT dialect is the Codex backend")
         .with_caller_identity(caller_identity())
-        .with_identity(CodexIdentity::from_ids("session-1", "thread-1").expect("valid ids"))
 }
 
 fn sorted_headers(headers: &http::HeaderMap) -> Vec<(String, String)> {
@@ -355,9 +359,11 @@ fn the_control_handshake_carries_the_call_headers() {
 /// dialect is refused by name.
 #[test]
 fn calls_need_the_codex_backend_and_the_callers_identity() {
-    let anonymous =
-        LiveCalls::new(OpenAIConfig::with_key(&chatgpt::DIALECT, ACCESS_TOKEN).client())
-            .expect("the ChatGPT dialect is the Codex backend");
+    let anonymous = LiveCalls::new(
+        OpenAIConfig::with_key(&chatgpt::DIALECT, ACCESS_TOKEN).client(),
+        conversation(),
+    )
+    .expect("the ChatGPT dialect is the Codex backend");
     assert!(
         anonymous
             .call_request(OFFER, &SessionConfig::new("x"))
@@ -369,8 +375,45 @@ fn calls_need_the_codex_backend_and_the_callers_identity() {
             .is_err()
     );
 
-    let refused = LiveCalls::new(OpenAI::new("sk-test")).expect_err("not the Codex backend");
+    let refused =
+        LiveCalls::new(OpenAI::new("sk-test"), conversation()).expect_err("not the Codex backend");
     assert_eq!(refused.dialect, "openai");
+}
+
+/// Every header naming the conversation is the caller's identity, so calls
+/// built twice from the same inputs send identical requests.
+#[test]
+fn the_conversation_headers_are_a_function_of_the_callers_identity() {
+    let conversation = CodexIdentity::from_ids("session-9", "thread-9").expect("valid ids");
+    let build = || {
+        LiveCalls::new(provider().client(), conversation.clone())
+            .expect("the ChatGPT dialect is the Codex backend")
+            .with_caller_identity(caller_identity())
+    };
+    let (first, second) = (build(), build());
+    assert_eq!(first.identity(), &conversation);
+    assert_eq!(first.realtime_session_id(), "session-9");
+
+    let session = SessionConfig::new("x");
+    let first_call = first.call_request(OFFER, &session).expect("builds");
+    let second_call = second.call_request(OFFER, &session).expect("builds");
+    assert_eq!(first_call.headers()["session-id"], "session-9");
+    assert_eq!(first_call.headers()["thread-id"], "thread-9");
+    assert_eq!(first_call.headers()["x-session-id"], "session-9");
+    assert_eq!(
+        sorted_headers(first_call.headers()),
+        sorted_headers(second_call.headers())
+    );
+    assert_eq!(first_call.body(), second_call.body());
+
+    let call_id = CallId::new("rtc_1").expect("an id");
+    let first_control = first.control_request(&call_id).expect("builds");
+    let second_control = second.control_request(&call_id).expect("builds");
+    assert_eq!(first_control.uri(), second_control.uri());
+    assert_eq!(
+        sorted_headers(first_control.headers()),
+        sorted_headers(second_control.headers())
+    );
 }
 
 /// A separate `x-session-id` replaces only that header.
@@ -405,7 +448,7 @@ async fn a_credential_source_is_read_at_send_time() {
             })
         }
     }
-    let calls = LiveCalls::new(provider().client())
+    let calls = LiveCalls::new(provider().client(), conversation())
         .expect("Codex")
         .with_caller_identity(caller_identity())
         .with_credential_source(Source);
@@ -515,7 +558,7 @@ async fn a_credential_source_keeps_the_callers_headers() {
             })
         }
     }
-    let calls = LiveCalls::new(provider().client())
+    let calls = LiveCalls::new(provider().client(), conversation())
         .expect("Codex")
         .with_caller_identity(caller_identity())
         .with_credential_source(Source)
