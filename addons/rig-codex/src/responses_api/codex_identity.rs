@@ -23,6 +23,7 @@ use rig_core::providers::openai::wire::ResponsesContract;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use super::body::RequestBody;
 use super::wire::CodexRequestError;
 use rig_core::error::ProviderError;
 
@@ -155,24 +156,30 @@ impl CodexIdentity {
     /// Stamp this identity onto a `response.create` or `/responses` body:
     /// `prompt_cache_key` and the `client_metadata` session and thread keys,
     /// each only where the request does not already carry its own value.
-    pub(crate) fn stamp(&self, body: &mut Map<String, Value>) -> Result<(), CodexRequestError> {
-        body.entry(PROMPT_CACHE_KEY_FIELD)
-            .or_insert_with(|| Value::String(self.prompt_cache_key().to_owned()));
+    pub(crate) fn stamp(&self, body: &mut RequestBody) -> Result<(), CodexRequestError> {
+        if !body.contains(PROMPT_CACHE_KEY_FIELD) {
+            body.insert(PROMPT_CACHE_KEY_FIELD, self.prompt_cache_key())
+                .map_err(CodexRequestError::Body)?;
+        }
 
-        let metadata = body
-            .entry(CLIENT_METADATA_FIELD)
-            .or_insert_with(|| Value::Object(Map::new()));
-        let Value::Object(metadata) = metadata else {
-            return Err(CodexRequestError::ClientMetadata {
-                found: metadata.clone(),
-            });
+        let mut metadata = match body.get::<Value>(CLIENT_METADATA_FIELD) {
+            None => Map::new(),
+            Some(Ok(Value::Object(metadata))) => metadata,
+            Some(Ok(found)) => return Err(CodexRequestError::ClientMetadata { found }),
+            Some(Err(error)) => return Err(CodexRequestError::Body(error)),
         };
+        let stated = body.contains(CLIENT_METADATA_FIELD).then_some(metadata.len());
         metadata
             .entry(SESSION_ID_METADATA_KEY)
             .or_insert_with(|| Value::String(self.session_id.clone()));
         metadata
             .entry(THREAD_ID_METADATA_KEY)
             .or_insert_with(|| Value::String(self.thread_id.clone()));
+        // A request that already names both ids keeps its metadata as written.
+        if stated != Some(metadata.len()) {
+            body.insert(CLIENT_METADATA_FIELD, &metadata)
+                .map_err(CodexRequestError::Body)?;
+        }
         Ok(())
     }
 }

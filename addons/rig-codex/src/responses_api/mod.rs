@@ -30,6 +30,7 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::ops::Add;
 
+pub(crate) mod body;
 pub mod codex_identity;
 pub mod request_compression;
 pub mod request_headers;
@@ -41,70 +42,12 @@ pub use rig_core::providers::openai::responses_api::{
     ResponsesToolDefinition, SystemInstructionsPlacement,
 };
 
-/// The body fields written after every other, in this order: the
-/// conversation, then the output cap, as Rig's own encoder orders a body.
-pub(crate) const LAST_FIELDS: [&str; 2] = ["input", "max_output_tokens"];
-
-/// A Responses request body's fields in their own order, with the
-/// conversation and the output cap last. A body read back from Rig's encoder
-/// keeps the encoder's order this way whether or not `serde_json` preserves
-/// key order.
-pub(crate) struct BodyFields<'a>(pub(crate) &'a Map<String, Value>);
-
-impl BodyFields<'_> {
-    /// Write the fields into `map`, in order.
-    pub(crate) fn serialize_into<M: serde::ser::SerializeMap>(
-        &self,
-        map: &mut M,
-    ) -> Result<(), M::Error> {
-        for (key, value) in self.0 {
-            if !LAST_FIELDS.contains(&key.as_str()) {
-                map.serialize_entry(key, value)?;
-            }
-        }
-        for key in LAST_FIELDS {
-            if let Some(value) = self.0.get(key) {
-                map.serialize_entry(key, value)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-impl Serialize for BodyFields<'_> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap as _;
-        let mut map = serializer.serialize_map(Some(self.0.len()))?;
-        self.serialize_into(&mut map)?;
-        map.end()
-    }
-}
-
 /// One Responses input item, as Rig's encoder writes it.
 pub type InputItem = Value;
 
-/// The Responses request body Rig's own encoder writes for `request` on
-/// `wire`: the request is prepared for the wire as the driver prepares it,
-/// encoded as a streamed HTTP request, and its body read back as JSON.
-pub(crate) fn encode_body(
-    wire: &Responses,
-    request: CompletionRequest,
-) -> Result<Map<String, Value>, ProviderError> {
-    let request = Completion::prepare(request, &wire.describe())?;
-    let encoded = wire.encode(request, Mode::Streaming)?;
-    let Body::Bytes(bytes) = encoded.request.body() else {
-        return Err(EncodeError::request("a Responses request body must be JSON bytes").into());
-    };
-    match serde_json::from_slice::<Value>(bytes)? {
-        Value::Object(body) => Ok(body),
-        other => Err(EncodeError::request(format!(
-            "a Responses request must encode to a JSON object, got {other}"
-        ))
-        .into()),
-    }
-}
-
-/// The Responses input items Rig's encoder writes for `request` on `wire`.
+/// The Responses input items Rig's encoder writes for `request` on `wire`:
+/// the request is prepared for the wire as the driver prepares it, encoded
+/// as a streamed HTTP request, and the `input` of its body read back.
 ///
 /// This is how a caller projects appended history into the items of an
 /// incremental websocket turn
@@ -115,9 +58,17 @@ pub fn input_items(
     wire: &Responses,
     request: CompletionRequest,
 ) -> Result<Vec<InputItem>, ProviderError> {
-    match rig_core::json_utils::remove_preserving_order(&mut encode_body(wire, request)?, "input") {
-        Some(Value::Array(items)) => Ok(items),
-        _ => Err(EncodeError::request("the encoded Responses request has no `input` array").into()),
+    let request = Completion::prepare(request, &wire.describe())?;
+    let encoded = wire.encode(request, Mode::Streaming)?;
+    let Body::Bytes(bytes) = encoded.request.body() else {
+        return Err(EncodeError::request("a Responses request body must be JSON bytes").into());
+    };
+    let body = body::RequestBody::parse(bytes)?;
+    match body.get::<Vec<InputItem>>("input") {
+        Some(items) => Ok(items?),
+        None => {
+            Err(EncodeError::request("the encoded Responses request has no `input` array").into())
+        }
     }
 }
 
