@@ -1,0 +1,3688 @@
+[
+ {
+  "t": 7.783,
+  "direction": "server",
+  "event": {
+   "type": "session.started",
+   "session": {
+    "id": "rtc_u2_ETA9Ip3oMWvJ5irb9yRCP9qJwt56zE69",
+    "status": "active",
+    "expires_at": 1790626432
+   }
+  }
+ },
+ {
+  "t": 7.964,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 8.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 8.293,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 8.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 8.692,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 8.771,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 800,
+   "end_ms": 1000
+  }
+ },
+ {
+  "t": 8.859,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 1000,
+   "end_ms": 1200
+  }
+ },
+ {
+  "t": 8.892,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "EwPpAsMCrAKjAqICqAKtAqsCngKJAmsCRAIVAt4BpgF4AVEBOQEnARsBEgEEAfYA"
+  }
+ },
+ {
+  "t": 9.06,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 1600,
+   "end_ms": 1800
+  }
+ },
+ {
+  "t": 9.093,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "KP6c/0gBkwL+ApICoAHMAJYAswAhAeUBAAN/BBQGXQcRCDEIBwjmB+kH5gedB9UG"
+  }
+ },
+ {
+  "t": 9.294,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "BQfgAR3/df2D+/T4x/SP8OXtZe0w7xryQvXN9175LPpe+lz6ePri+n77TvwW/Zr9"
+  }
+ },
+ {
+  "t": 9.481,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 2000,
+   "end_ms": 2200
+  }
+ },
+ {
+  "t": 9.494,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "bwBC/tAB7QEX/Mv+rwEE/xz/OALBAT8ALgAZ/wj/jwFsAX7++QGDBUcCQf9t/9gA"
+  }
+ },
+ {
+  "t": 9.594,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 2200,
+   "end_ms": 2400
+  }
+ },
+ {
+  "t": 9.597,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 1600,
+   "item": {
+    "id": "item_ETA9LrhSt4UZ8GhtP7PXS",
+    "type": "input_transcript",
+    "text": " In the"
+   },
+   "start_ms": 1400
+  }
+ },
+ {
+  "t": 9.599,
+  "direction": "server",
+  "event": {
+   "type": "turn.created",
+   "turn": {
+    "id": "turn_ETA9LX5fFmeXWHx1Akcom",
+    "end_ms": 1600,
+    "role": "user",
+    "start_ms": 1400,
+    "transcript": " In the"
+   }
+  }
+ },
+ {
+  "t": 9.693,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "NwA4ADgANgA5AD8APAA7ADoAOgA3ADQAMAAqACYAIgAeABsAGAAUABMAEgAGAAMA"
+  }
+ },
+ {
+  "t": 9.785,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 2400,
+   "end_ms": 2600
+  }
+ },
+ {
+  "t": 9.893,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "6wIzASv/2v4wAY8B2/6VAKMA6f32AAoDFAB8/hAALwInAJ/8Qf05A70CRfyF/qkA"
+  }
+ },
+ {
+  "t": 10.06,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 2600,
+   "end_ms": 2800
+  }
+ },
+ {
+  "t": 10.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "O/+VAPEBYgOvBOAF+gbkB5AI2wi4CDwIjwfJBuMF4QRdA2gBVv8u/Un7vvl5+JH3"
+  }
+ },
+ {
+  "t": 10.206,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 2800,
+   "end_ms": 3000
+  }
+ },
+ {
+  "t": 10.21,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 2200,
+   "item": {
+    "id": "item_ETA9LxDnn2nYSJDUVeBX7",
+    "type": "input_transcript",
+    "text": " report"
+   },
+   "start_ms": 2000
+  }
+ },
+ {
+  "t": 10.21,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " report",
+   "end_ms": 2200,
+   "start_ms": 2000,
+   "turn_id": "turn_ETA9LX5fFmeXWHx1Akcom"
+  }
+ },
+ {
+  "t": 10.293,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "8f/y//H/8P/y//T/8//t/+r/8f8AAPr/5v/p//X/+P/0//T/6P/k/wAABgDY/+P/"
+  }
+ },
+ {
+  "t": 10.485,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 3000,
+   "end_ms": 3200
+  }
+ },
+ {
+  "t": 10.491,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "YwOaB8oM8BAhEmIP6QmSBNABSgKYBHYGqwYyBj4GHAcMCN4GxgLC/en5wffV9gj1"
+  }
+ },
+ {
+  "t": 10.65,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 3200,
+   "end_ms": 3400
+  }
+ },
+ {
+  "t": 10.653,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 2600,
+   "item": {
+    "id": "item_ETA9Mu7BDjZgSnFyiqXny",
+    "type": "input_transcript",
+    "text": ", what"
+   },
+   "start_ms": 2400
+  }
+ },
+ {
+  "t": 10.654,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": ", what",
+   "end_ms": 2600,
+   "start_ms": 2400,
+   "turn_id": "turn_ETA9LX5fFmeXWHx1Akcom"
+  }
+ },
+ {
+  "t": 10.692,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "lvDo7231lvwuAQP/CPYj7JPmkOUG56/oz+jp53jnm+jj6nLrWOns5tnlj+Zx6Znt"
+  }
+ },
+ {
+  "t": 10.789,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 3400,
+   "end_ms": 3600
+  }
+ },
+ {
+  "t": 10.791,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 2800,
+   "item": {
+    "id": "item_ETA9MIETKI29tHBzkoyS9",
+    "type": "input_transcript",
+    "text": " total"
+   },
+   "start_ms": 2600
+  }
+ },
+ {
+  "t": 10.792,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " total",
+   "end_ms": 2800,
+   "start_ms": 2600,
+   "turn_id": "turn_ETA9LX5fFmeXWHx1Akcom"
+  }
+ },
+ {
+  "t": 10.892,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "l/pF+xL85PyQ/fn9Jv4e/hn+Sf60/ob/mQC3Ab4CdwPjAwgE9APeA9wDAQRiBOME"
+  }
+ },
+ {
+  "t": 10.988,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 3600,
+   "end_ms": 3800
+  }
+ },
+ {
+  "t": 11.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "7P/l/+D/2v/V/9L/0P/S/9X/2//g/+X/7P/z//v/BQAOABkAJAAwADwARwBRAFkA"
+  }
+ },
+ {
+  "t": 11.238,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 3800,
+   "end_ms": 4000
+  }
+ },
+ {
+  "t": 11.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 11.403,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 4000,
+   "end_ms": 4200
+  }
+ },
+ {
+  "t": 11.405,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 3400,
+   "item": {
+    "id": "item_ETA9Nj3612tWskIAzcj6k",
+    "type": "input_transcript",
+    "text": " spending"
+   },
+   "start_ms": 3200
+  }
+ },
+ {
+  "t": 11.407,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " spending",
+   "end_ms": 3400,
+   "start_ms": 3200,
+   "turn_id": "turn_ETA9LX5fFmeXWHx1Akcom"
+  }
+ },
+ {
+  "t": 11.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "9f54/Fr8uf0x/Qf8Bfu5/NH9Avy8+hL7Yf6IAHv/nPx8+Vz5Ivov+xP+Dv+h/Sb+"
+  }
+ },
+ {
+  "t": 11.681,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 4200,
+   "end_ms": 4400
+  }
+ },
+ {
+  "t": 11.692,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "EALyA3MCEwIsA+ABeQOKBZ8DZQFsAgYEGwb8BdMAgQFKBu0CWQAeBKME4wKBA+cC"
+  }
+ },
+ {
+  "t": 11.792,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 4400,
+   "end_ms": 4600
+  }
+ },
+ {
+  "t": 11.794,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 3800,
+   "item": {
+    "id": "item_ETA9NGZ48Uvl2a0mhhd4u",
+    "type": "input_transcript",
+    "text": " ceiling is"
+   },
+   "start_ms": 3600
+  }
+ },
+ {
+  "t": 11.795,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " ceiling is",
+   "end_ms": 3800,
+   "start_ms": 3600,
+   "turn_id": "turn_ETA9LX5fFmeXWHx1Akcom"
+  }
+ },
+ {
+  "t": 11.892,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "cAEW/zf/GAFuAGAA4ACsAF8AgQBMAMb/+P/1/7MAAAFS/y3/kgA2ADgAlQDq/xMA"
+  }
+ },
+ {
+  "t": 11.989,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 4600,
+   "end_ms": 4800
+  }
+ },
+ {
+  "t": 12.093,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "ZwMYA74CUQLVAV4BBQHVAM8A8gAhAUYBYgF6AY0BpQG1AcABtwGiAaIBlwGWAZoB"
+  }
+ },
+ {
+  "t": 12.244,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 4800,
+   "end_ms": 5000
+  }
+ },
+ {
+  "t": 12.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "UvOv9W74R/ss/uAAPgNXBTkH+AifCvYL2AwSDb0MAAwBC9AJXQivBrcEmQJ9AG7+"
+  }
+ },
+ {
+  "t": 12.438,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 5000,
+   "end_ms": 5200
+  }
+ },
+ {
+  "t": 12.441,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 4400,
+   "item": {
+    "id": "item_ETA9ODREizC8XNTLJ9Dig",
+    "type": "input_transcript",
+    "text": " proposed"
+   },
+   "start_ms": 4200
+  }
+ },
+ {
+  "t": 12.443,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " proposed",
+   "end_ms": 4400,
+   "start_ms": 4200,
+   "turn_id": "turn_ETA9LX5fFmeXWHx1Akcom"
+  }
+ },
+ {
+  "t": 12.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "7wEjAjMCIALpAZMBKwHFAHcATwBVAH0AxgAbAWoBswHwAR8CPQJFAj0CJwIFAtsB"
+  }
+ },
+ {
+  "t": 12.636,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 5200,
+   "end_ms": 5400
+  }
+ },
+ {
+  "t": 12.639,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 4600,
+   "item": {
+    "id": "item_ETA9OxIXdFYQG2DViBLHw",
+    "type": "input_transcript",
+    "text": " for"
+   },
+   "start_ms": 4400
+  }
+ },
+ {
+  "t": 12.64,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " for",
+   "end_ms": 4600,
+   "start_ms": 4400,
+   "turn_id": "turn_ETA9LX5fFmeXWHx1Akcom"
+  }
+ },
+ {
+  "t": 12.692,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 12.803,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 5400,
+   "end_ms": 5600
+  }
+ },
+ {
+  "t": 12.805,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 4800,
+   "item": {
+    "id": "item_ETA9OfeJ3raGRfbN3lJm4",
+    "type": "input_transcript",
+    "text": " the"
+   },
+   "start_ms": 4600
+  }
+ },
+ {
+  "t": 12.806,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " the",
+   "end_ms": 4800,
+   "start_ms": 4600,
+   "turn_id": "turn_ETA9LX5fFmeXWHx1Akcom"
+  }
+ },
+ {
+  "t": 12.892,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "YfJZ8mXygfLX8qLzx/QH9kb3dvhC+ZT5yfkW+o36OvsR/Nn8i/1W/j//FQCoABAB"
+  }
+ },
+ {
+  "t": 13.053,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 5600,
+   "end_ms": 5800
+  }
+ },
+ {
+  "t": 13.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "Rftc9uXxvO517S7um/Ac9LL3t/oT/SD/OAF0A0QFJgamBq0HdAmsC2sN9AxTCrgI"
+  }
+ },
+ {
+  "t": 13.218,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 5800,
+   "end_ms": 6000
+  }
+ },
+ {
+  "t": 13.221,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 5200,
+   "item": {
+    "id": "item_ETA9Ota1e1clA3vD6zwJM",
+    "type": "input_transcript",
+    "text": " pilot"
+   },
+   "start_ms": 5000
+  }
+ },
+ {
+  "t": 13.224,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " pilot",
+   "end_ms": 5200,
+   "start_ms": 5000,
+   "turn_id": "turn_ETA9LX5fFmeXWHx1Akcom"
+  }
+ },
+ {
+  "t": 13.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "ieEQ4UnfVd9i4rTkZOOn4FDfYt+g4UzmJ+uY7JbrA+uQ63juy/Qk/f4DCwcfBqEC"
+  }
+ },
+ {
+  "t": 13.472,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 6000,
+   "end_ms": 6200
+  }
+ },
+ {
+  "t": 13.493,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "ov+R/LP8tgFrA7f/KAAk/1b9fgAQAcP+AABHAeP9D/3TAZwCzf+s/ob/yANzAP/9"
+  }
+ },
+ {
+  "t": 13.667,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 6200,
+   "end_ms": 6400
+  }
+ },
+ {
+  "t": 13.67,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 5600,
+   "item": {
+    "id": "item_ETA9PnB2d1UPYjFpQO1F5",
+    "type": "input_transcript",
+    "text": ", and"
+   },
+   "start_ms": 5400
+  }
+ },
+ {
+  "t": 13.672,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": ", and",
+   "end_ms": 5600,
+   "start_ms": 5400,
+   "turn_id": "turn_ETA9LX5fFmeXWHx1Akcom"
+  }
+ },
+ {
+  "t": 13.693,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "XB5cGsgYwxkEG9QYcg51+07p++Ks6Sn2AAGeAl/2b+IG05zNO8+p0njUPtNG0B/P"
+  }
+ },
+ {
+  "t": 13.833,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 6400,
+   "end_ms": 6600
+  }
+ },
+ {
+  "t": 13.835,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 5800,
+   "item": {
+    "id": "item_ETA9PFeA9Kc2QeTysNJjv",
+    "type": "input_transcript",
+    "text": " how is"
+   },
+   "start_ms": 5600
+  }
+ },
+ {
+  "t": 13.837,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " how is",
+   "end_ms": 5800,
+   "start_ms": 5600,
+   "turn_id": "turn_ETA9LX5fFmeXWHx1Akcom"
+  }
+ },
+ {
+  "t": 13.892,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "FgAVABIAEAARABMAFQAUABEAEAAQABEAEAAPAA4ADwAQABEAEAAPAA8AEAAPAAwA"
+  }
+ },
+ {
+  "t": 14.004,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 6600,
+   "end_ms": 6800
+  }
+ },
+ {
+  "t": 14.007,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 6000,
+   "item": {
+    "id": "item_ETA9PnPOLzXeygod3fDBf",
+    "type": "input_transcript",
+    "text": " it"
+   },
+   "start_ms": 5800
+  }
+ },
+ {
+  "t": 14.009,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " it",
+   "end_ms": 6000,
+   "start_ms": 5800,
+   "turn_id": "turn_ETA9LX5fFmeXWHx1Akcom"
+  }
+ },
+ {
+  "t": 14.093,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 14.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 14.388,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 6800,
+   "end_ms": 7000
+  }
+ },
+ {
+  "t": 14.495,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 14.603,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 7000,
+   "end_ms": 7200
+  }
+ },
+ {
+  "t": 14.606,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 6400,
+   "item": {
+    "id": "item_ETA9QvM6C8vYlux61JLRt",
+    "type": "input_transcript",
+    "text": " split"
+   },
+   "start_ms": 6200
+  }
+ },
+ {
+  "t": 14.606,
+  "direction": "server",
+  "event": {
+   "type": "output_transcript.added",
+   "end_ms": 6400,
+   "item": {
+    "id": "item_ETA9QqWSCEkmpg13nJF8o",
+    "type": "output_transcript",
+    "text": " Eighty"
+   },
+   "start_ms": 6200
+  }
+ },
+ {
+  "t": 14.607,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " split",
+   "end_ms": 6400,
+   "start_ms": 6200,
+   "turn_id": "turn_ETA9LX5fFmeXWHx1Akcom"
+  }
+ },
+ {
+  "t": 14.693,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 14.788,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "gPxp+4/5Cfkx+WT5CfpS+ob6CPrm+UP5/PdG99H2FfdG95P4g/lK+lf6aPke+J73",
+   "start_ms": 7200,
+   "end_ms": 7400
+  }
+ },
+ {
+  "t": 14.791,
+  "direction": "server",
+  "event": {
+   "type": "output_transcript.added",
+   "end_ms": 6600,
+   "item": {
+    "id": "item_ETA9Q34KbUqdie4WJpYmA",
+    "type": "output_transcript",
+    "text": " dollars"
+   },
+   "start_ms": 6400
+  }
+ },
+ {
+  "t": 14.893,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 14.996,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "tvnU+rP79fsz++P6Qfok+iz77frv+tP6+Pvh/Az94/yj/Pf7lvzt/GH9bP1+/TD+",
+   "start_ms": 7400,
+   "end_ms": 7600
+  }
+ },
+ {
+  "t": 14.999,
+  "direction": "server",
+  "event": {
+   "type": "output_transcript.added",
+   "end_ms": 6800,
+   "item": {
+    "id": "item_ETA9Qdw9mJfnHut6VsYsc",
+    "type": "output_transcript",
+    "text": " in"
+   },
+   "start_ms": 6600
+  }
+ },
+ {
+  "t": 15.093,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 15.147,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "5gHLAIr/Nf4B/d37APtZ+uL5Z/kB+dD4tvjA+BH5Ufli+Un59/ho+L739vZC9rD1",
+   "start_ms": 7600,
+   "end_ms": 7800
+  }
+ },
+ {
+  "t": 15.15,
+  "direction": "server",
+  "event": {
+   "type": "output_transcript.added",
+   "end_ms": 7000,
+   "item": {
+    "id": "item_ETA9QnB1iUlfnF7Di4JUj",
+    "type": "output_transcript",
+    "text": " total,"
+   },
+   "start_ms": 6800
+  }
+ },
+ {
+  "t": 15.293,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 15.343,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "L/Jm8bjw/+9i7+DuKe6e7UXtw+xz7Brs4evH68zrm+uO67vryuuy67rrE+w87JLs",
+   "start_ms": 7800,
+   "end_ms": 8000
+  }
+ },
+ {
+  "t": 15.347,
+  "direction": "server",
+  "event": {
+   "type": "turn.done",
+   "turn": {
+    "id": "turn_ETA9LX5fFmeXWHx1Akcom",
+    "end_ms": 7200,
+    "role": "user",
+    "start_ms": 1400,
+    "transcript": " In the report, what total spending ceiling is proposed for the pilot, and how is it split"
+   }
+  }
+ },
+ {
+  "t": 15.348,
+  "direction": "server",
+  "event": {
+   "type": "turn.created",
+   "turn": {
+    "id": "turn_ETA9Q2RCFRNudjgWWp8kS",
+    "end_ms": 7200,
+    "role": "assistant",
+    "start_ms": 7000,
+    "transcript": " Eighty dollars in total,"
+   }
+  }
+ },
+ {
+  "t": 15.494,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 15.513,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "zgrBCuAK/AprC+wLHw2EDiUQRRIbFKIVABcnGC0ZChrWGpobkBvgGvAZPxjFFVUT",
+   "start_ms": 8000,
+   "end_ms": 8200
+  }
+ },
+ {
+  "t": 15.515,
+  "direction": "server",
+  "event": {
+   "type": "output_transcript.added",
+   "end_ms": 7400,
+   "item": {
+    "id": "item_ETA9RVfn88EDjUwzi76dq",
+    "type": "output_transcript",
+    "text": " split"
+   },
+   "start_ms": 7200
+  }
+ },
+ {
+  "t": 15.545,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " split",
+   "end_ms": 7400,
+   "start_ms": 7200,
+   "turn_id": "turn_ETA9Q2RCFRNudjgWWp8kS"
+  }
+ },
+ {
+  "t": 15.693,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 15.737,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "UQVABd4EswSDBCYE1gOLAygD9wKXAloCDQK7AVgBCAGlAFAACwCZ/yT/7f6k/mL+",
+   "start_ms": 8200,
+   "end_ms": 8400
+  }
+ },
+ {
+  "t": 15.893,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 15.934,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "jv+r/3X/7f4J/0j/Jv+L/7z/Jf+I/7X/l/+I/1L/PP/H/9D/6f8AAE4A2/9V/5T/",
+   "start_ms": 8400,
+   "end_ms": 8600
+  }
+ },
+ {
+  "t": 15.937,
+  "direction": "server",
+  "event": {
+   "type": "output_transcript.added",
+   "end_ms": 7800,
+   "item": {
+    "id": "item_ETA9R9jlyltP3zymXPa6o",
+    "type": "output_transcript",
+    "text": " as"
+   },
+   "start_ms": 7600
+  }
+ },
+ {
+  "t": 15.939,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " as",
+   "end_ms": 7800,
+   "start_ms": 7600,
+   "turn_id": "turn_ETA9Q2RCFRNudjgWWp8kS"
+  }
+ },
+ {
+  "t": 16.094,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 16.123,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "Zv+C/8//T//G/tn9EPzr+br4fPaF9fD0G/Tx8ynzq/Ni9D71J/aE9if2C/Yd9ef0",
+   "start_ms": 8600,
+   "end_ms": 8800
+  }
+ },
+ {
+  "t": 16.126,
+  "direction": "server",
+  "event": {
+   "type": "output_transcript.added",
+   "end_ms": 8000,
+   "item": {
+    "id": "item_ETA9RSQu1f5vFcgW46lHh",
+    "type": "output_transcript",
+    "text": " forty"
+   },
+   "start_ms": 7800
+  }
+ },
+ {
+  "t": 16.127,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " forty",
+   "end_ms": 8000,
+   "start_ms": 7800,
+   "turn_id": "turn_ETA9Q2RCFRNudjgWWp8kS"
+  }
+ },
+ {
+  "t": 16.29,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "uAINA5wClQLfAnICuQJjAxoDBAMSA/IC4QIlA7wCYgLFAkIC+QF3AnUBUgFXArIC",
+   "start_ms": 8800,
+   "end_ms": 9000
+  }
+ },
+ {
+  "t": 16.293,
+  "direction": "server",
+  "event": {
+   "type": "output_transcript.added",
+   "end_ms": 8200,
+   "item": {
+    "id": "item_ETA9Rag43G7UyGdEzpElg",
+    "type": "output_transcript",
+    "text": " dollars"
+   },
+   "start_ms": 8000
+  }
+ },
+ {
+  "t": 16.294,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " dollars",
+   "end_ms": 8200,
+   "start_ms": 8000,
+   "turn_id": "turn_ETA9Q2RCFRNudjgWWp8kS"
+  }
+ },
+ {
+  "t": 16.295,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 16.496,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 16.539,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "Gvc99zz38PYW9wX3APcq92f3RPd897b31Pdo+Nj4dflS+hT77fut/NL9oP7Q/wsB",
+   "start_ms": 9000,
+   "end_ms": 9200
+  }
+ },
+ {
+  "t": 16.694,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 16.737,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "Dv4r/gH+vP1M/az8K/zI+6L7d/sW+636Efqq+bv5w/nW+X/5O/nv+MT40vgG+T35",
+   "start_ms": 9200,
+   "end_ms": 9400
+  }
+ },
+ {
+  "t": 16.74,
+  "direction": "server",
+  "event": {
+   "type": "output_transcript.added",
+   "end_ms": 8600,
+   "item": {
+    "id": "item_ETA9Sgv9CdoHfKaLtscKo",
+    "type": "output_transcript",
+    "text": " for"
+   },
+   "start_ms": 8400
+  }
+ },
+ {
+  "t": 16.743,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " for",
+   "end_ms": 8600,
+   "start_ms": 8400,
+   "turn_id": "turn_ETA9Q2RCFRNudjgWWp8kS"
+  }
+ },
+ {
+  "t": 16.893,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 16.916,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "7QNoBAwFiwUeBmcG+wa3B3gICgquCkMM2Q17D8MSahV1GdIbcR0pHw0g3SH7Ipgj",
+   "start_ms": 9400,
+   "end_ms": 9600
+  }
+ },
+ {
+  "t": 17.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 17.115,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "BwZPA7f+fPoO94YCrP8TCPMFXvUwANACbwNSACkAvP/CANv2NwFPB3sDbwWI9/77",
+   "start_ms": 9600,
+   "end_ms": 9800
+  }
+ },
+ {
+  "t": 17.118,
+  "direction": "server",
+  "event": {
+   "type": "output_transcript.added",
+   "end_ms": 9000,
+   "item": {
+    "id": "item_ETA9S2uqlW5MoZ3jz9xig",
+    "type": "output_transcript",
+    "text": " each"
+   },
+   "start_ms": 8800
+  }
+ },
+ {
+  "t": 17.12,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " each",
+   "end_ms": 9000,
+   "start_ms": 8800,
+   "turn_id": "turn_ETA9Q2RCFRNudjgWWp8kS"
+  }
+ },
+ {
+  "t": 17.286,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "I/0Q/SX99fzf/Mf8lvxz/Hj8h/yd/M78Cf06/Wb9mv3R/eP9OP5Q/ov+4P4K/3T/",
+   "start_ms": 9800,
+   "end_ms": 10000
+  }
+ },
+ {
+  "t": 17.29,
+  "direction": "server",
+  "event": {
+   "type": "output_transcript.added",
+   "end_ms": 9200,
+   "item": {
+    "id": "item_ETA9SD5AILZ7uVeVGThTp",
+    "type": "output_transcript",
+    "text": " phase."
+   },
+   "start_ms": 9000
+  }
+ },
+ {
+  "t": 17.291,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " phase.",
+   "end_ms": 9200,
+   "start_ms": 9000,
+   "turn_id": "turn_ETA9Q2RCFRNudjgWWp8kS"
+  }
+ },
+ {
+  "t": 17.294,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 17.493,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 17.519,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "sv39/RX+Nf5J/mL+ev6k/r/+5v7m/vn+Df8o/07/ef+P/5j/o/+0/8T/7f8SABAA",
+   "start_ms": 10000,
+   "end_ms": 10200
+  }
+ },
+ {
+  "t": 17.694,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 17.716,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "9f4LAAH/cgAp//7/egAoAWoBlwFTAecBlwH6/93/k/62/3r/gf8+/6QBtP8iAvgB",
+   "start_ms": 10200,
+   "end_ms": 10400
+  }
+ },
+ {
+  "t": 17.893,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 17.945,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "OQHaAUMCiQLNAr8CFAMkA2ID1QPrA2IEkARmBJIEAQTYA7sDnAPiAwQE0wPIA2kD",
+   "start_ms": 10400,
+   "end_ms": 10600
+  }
+ },
+ {
+  "t": 18.019,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "y/7EAXcB5/53/lj+MAGMA6n/I/3i/QcCGQPq/r/9ev+VAGQBV/+c/zsDkgBy/xv+",
+   "start_ms": 10600,
+   "end_ms": 10800
+  }
+ },
+ {
+  "t": 18.095,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 18.294,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 18.388,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 11000,
+   "end_ms": 11200
+  }
+ },
+ {
+  "t": 18.493,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 18.638,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 11200,
+   "end_ms": 11400
+  }
+ },
+ {
+  "t": 18.692,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 18.811,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 11400,
+   "end_ms": 11600
+  }
+ },
+ {
+  "t": 18.892,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 19.0,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 11600,
+   "end_ms": 11800
+  }
+ },
+ {
+  "t": 19.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 19.194,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 11800,
+   "end_ms": 12000
+  }
+ },
+ {
+  "t": 19.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 19.391,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 12000,
+   "end_ms": 12200
+  }
+ },
+ {
+  "t": 19.396,
+  "direction": "server",
+  "event": {
+   "type": "turn.done",
+   "turn": {
+    "id": "turn_ETA9Q2RCFRNudjgWWp8kS",
+    "end_ms": 11400,
+    "role": "assistant",
+    "start_ms": 7000,
+    "transcript": " Eighty dollars in total, split as forty dollars for each phase."
+   }
+  }
+ },
+ {
+  "t": 19.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 19.582,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 12200,
+   "end_ms": 12400
+  }
+ },
+ {
+  "t": 19.692,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 19.801,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 12400,
+   "end_ms": 12600
+  }
+ },
+ {
+  "t": 19.892,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 19.994,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 12600,
+   "end_ms": 12800
+  }
+ },
+ {
+  "t": 20.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 20.185,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 12800,
+   "end_ms": 13000
+  }
+ },
+ {
+  "t": 20.293,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 20.4,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 13000,
+   "end_ms": 13200
+  }
+ },
+ {
+  "t": 20.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 20.59,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 13200,
+   "end_ms": 13400
+  }
+ },
+ {
+  "t": 20.693,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 20.786,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 13400,
+   "end_ms": 13600
+  }
+ },
+ {
+  "t": 20.892,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 20.987,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 13600,
+   "end_ms": 13800
+  }
+ },
+ {
+  "t": 21.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 21.203,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 13800,
+   "end_ms": 14000
+  }
+ },
+ {
+  "t": 21.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 21.392,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 14000,
+   "end_ms": 14200
+  }
+ },
+ {
+  "t": 21.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 21.588,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 14200,
+   "end_ms": 14400
+  }
+ },
+ {
+  "t": 21.693,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 21.781,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 14400,
+   "end_ms": 14600
+  }
+ },
+ {
+  "t": 21.807,
+  "direction": "server",
+  "event": {
+   "type": "session.usage.updated",
+   "usage": {
+    "audio_duration_ms": 14400,
+    "backend_model_usage": []
+   },
+   "usage_limit": {
+    "status": null,
+    "reset_seconds": null
+   }
+  }
+ },
+ {
+  "t": 21.893,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 22.006,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 14600,
+   "end_ms": 14800
+  }
+ },
+ {
+  "t": 22.094,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 22.193,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 14800,
+   "end_ms": 15000
+  }
+ },
+ {
+  "t": 22.293,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 22.384,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 15000,
+   "end_ms": 15200
+  }
+ },
+ {
+  "t": 22.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 22.58,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 15200,
+   "end_ms": 15400
+  }
+ },
+ {
+  "t": 22.693,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 22.796,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 15400,
+   "end_ms": 15600
+  }
+ },
+ {
+  "t": 22.892,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 22.991,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 15600,
+   "end_ms": 15800
+  }
+ },
+ {
+  "t": 23.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 23.184,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 15800,
+   "end_ms": 16000
+  }
+ },
+ {
+  "t": 23.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 23.38,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 16000,
+   "end_ms": 16200
+  }
+ },
+ {
+  "t": 23.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 23.574,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 16200,
+   "end_ms": 16400
+  }
+ },
+ {
+  "t": 23.693,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 23.796,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 16400,
+   "end_ms": 16600
+  }
+ },
+ {
+  "t": 23.894,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 23.989,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 16600,
+   "end_ms": 16800
+  }
+ },
+ {
+  "t": 24.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 24.18,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 16800,
+   "end_ms": 17000
+  }
+ },
+ {
+  "t": 24.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 24.375,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 17000,
+   "end_ms": 17200
+  }
+ },
+ {
+  "t": 24.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 24.571,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 17200,
+   "end_ms": 17400
+  }
+ },
+ {
+  "t": 24.693,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 24.792,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 17400,
+   "end_ms": 17600
+  }
+ },
+ {
+  "t": 24.893,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 24.985,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 17600,
+   "end_ms": 17800
+  }
+ },
+ {
+  "t": 25.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 25.204,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 17800,
+   "end_ms": 18000
+  }
+ },
+ {
+  "t": 25.293,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 25.397,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 18000,
+   "end_ms": 18200
+  }
+ },
+ {
+  "t": 25.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 25.591,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 18200,
+   "end_ms": 18400
+  }
+ },
+ {
+  "t": 25.692,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 25.78,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 18400,
+   "end_ms": 18600
+  }
+ },
+ {
+  "t": 25.892,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 26.002,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 18600,
+   "end_ms": 18800
+  }
+ },
+ {
+  "t": 26.093,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 26.197,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 18800,
+   "end_ms": 19000
+  }
+ },
+ {
+  "t": 26.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 26.389,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 19000,
+   "end_ms": 19200
+  }
+ },
+ {
+  "t": 26.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 26.586,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 19200,
+   "end_ms": 19400
+  }
+ },
+ {
+  "t": 26.697,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 26.783,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 19400,
+   "end_ms": 19600
+  }
+ },
+ {
+  "t": 26.892,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 27.002,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 19600,
+   "end_ms": 19800
+  }
+ },
+ {
+  "t": 27.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 27.195,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 19800,
+   "end_ms": 20000
+  }
+ },
+ {
+  "t": 27.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 27.392,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 20000,
+   "end_ms": 20200
+  }
+ },
+ {
+  "t": 27.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 27.584,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 20200,
+   "end_ms": 20400
+  }
+ },
+ {
+  "t": 27.692,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 27.775,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 20400,
+   "end_ms": 20600
+  }
+ },
+ {
+  "t": 27.892,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 27.996,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 20600,
+   "end_ms": 20800
+  }
+ },
+ {
+  "t": 28.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 28.187,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 20800,
+   "end_ms": 21000
+  }
+ },
+ {
+  "t": 28.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 28.379,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 21000,
+   "end_ms": 21200
+  }
+ },
+ {
+  "t": 28.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 28.603,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 21200,
+   "end_ms": 21400
+  }
+ },
+ {
+  "t": 28.693,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 28.8,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 21400,
+   "end_ms": 21600
+  }
+ },
+ {
+  "t": 28.892,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 28.996,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 21600,
+   "end_ms": 21800
+  }
+ },
+ {
+  "t": 29.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 29.188,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 21800,
+   "end_ms": 22000
+  }
+ },
+ {
+  "t": 29.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 29.381,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 22000,
+   "end_ms": 22200
+  }
+ },
+ {
+  "t": 29.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 29.578,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 22200,
+   "end_ms": 22400
+  }
+ },
+ {
+  "t": 29.692,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 29.796,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 22400,
+   "end_ms": 22600
+  }
+ },
+ {
+  "t": 29.893,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 29.989,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 22600,
+   "end_ms": 22800
+  }
+ },
+ {
+  "t": 30.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 30.181,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 22800,
+   "end_ms": 23000
+  }
+ },
+ {
+  "t": 30.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 30.378,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 23000,
+   "end_ms": 23200
+  }
+ },
+ {
+  "t": 30.493,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 30.604,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 23200,
+   "end_ms": 23400
+  }
+ },
+ {
+  "t": 30.692,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 30.805,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 23400,
+   "end_ms": 23600
+  }
+ },
+ {
+  "t": 30.893,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 31.005,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 23600,
+   "end_ms": 23800
+  }
+ },
+ {
+  "t": 31.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 31.199,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 23800,
+   "end_ms": 24000
+  }
+ },
+ {
+  "t": 31.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 31.394,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 24000,
+   "end_ms": 24200
+  }
+ },
+ {
+  "t": 31.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 31.59,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 24200,
+   "end_ms": 24400
+  }
+ },
+ {
+  "t": 31.692,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 31.786,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 24400,
+   "end_ms": 24600
+  }
+ },
+ {
+  "t": 31.893,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 31.984,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 24600,
+   "end_ms": 24800
+  }
+ },
+ {
+  "t": 32.093,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 32.184,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 24800,
+   "end_ms": 25000
+  }
+ },
+ {
+  "t": 32.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 32.378,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 25000,
+   "end_ms": 25200
+  }
+ },
+ {
+  "t": 32.493,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 32.604,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 25200,
+   "end_ms": 25400
+  }
+ },
+ {
+  "t": 32.693,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 32.798,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 25400,
+   "end_ms": 25600
+  }
+ },
+ {
+  "t": 32.893,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 32.995,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 25600,
+   "end_ms": 25800
+  }
+ },
+ {
+  "t": 33.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 33.192,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 25800,
+   "end_ms": 26000
+  }
+ },
+ {
+  "t": 33.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 33.389,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 26000,
+   "end_ms": 26200
+  }
+ },
+ {
+  "t": 33.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 33.588,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 26200,
+   "end_ms": 26400
+  }
+ },
+ {
+  "t": 33.692,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 33.785,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 26400,
+   "end_ms": 26600
+  }
+ },
+ {
+  "t": 33.893,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 33.983,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 26600,
+   "end_ms": 26800
+  }
+ },
+ {
+  "t": 34.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 34.181,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 26800,
+   "end_ms": 27000
+  }
+ },
+ {
+  "t": 34.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 34.376,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 27000,
+   "end_ms": 27200
+  }
+ },
+ {
+  "t": 34.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 34.611,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 27200,
+   "end_ms": 27400
+  }
+ },
+ {
+  "t": 34.692,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 34.801,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 27400,
+   "end_ms": 27600
+  }
+ },
+ {
+  "t": 34.892,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 34.997,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 27600,
+   "end_ms": 27800
+  }
+ },
+ {
+  "t": 35.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 35.19,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 27800,
+   "end_ms": 28000
+  }
+ },
+ {
+  "t": 35.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 35.389,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 28000,
+   "end_ms": 28200
+  }
+ },
+ {
+  "t": 35.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 35.583,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 28200,
+   "end_ms": 28400
+  }
+ },
+ {
+  "t": 35.692,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 35.781,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 28400,
+   "end_ms": 28600
+  }
+ },
+ {
+  "t": 35.894,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 35.976,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 28600,
+   "end_ms": 28800
+  }
+ },
+ {
+  "t": 36.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 36.2,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 28800,
+   "end_ms": 29000
+  }
+ },
+ {
+  "t": 36.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 36.39,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 29000,
+   "end_ms": 29200
+  }
+ },
+ {
+  "t": 36.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 36.587,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 29200,
+   "end_ms": 29400
+  }
+ },
+ {
+  "t": 36.692,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 36.776,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 29400,
+   "end_ms": 29600
+  }
+ },
+ {
+  "t": 36.808,
+  "direction": "server",
+  "event": {
+   "type": "session.usage.updated",
+   "usage": {
+    "audio_duration_ms": 29400,
+    "backend_model_usage": []
+   },
+   "usage_limit": {
+    "status": null,
+    "reset_seconds": null
+   }
+  }
+ },
+ {
+  "t": 36.893,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 36.999,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 29600,
+   "end_ms": 29800
+  }
+ },
+ {
+  "t": 37.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 37.193,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 29800,
+   "end_ms": 30000
+  }
+ },
+ {
+  "t": 37.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 37.384,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 30000,
+   "end_ms": 30200
+  }
+ },
+ {
+  "t": 37.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 37.584,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 30200,
+   "end_ms": 30400
+  }
+ },
+ {
+  "t": 37.692,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 37.783,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 30400,
+   "end_ms": 30600
+  }
+ },
+ {
+  "t": 37.892,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 37.978,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 30600,
+   "end_ms": 30800
+  }
+ },
+ {
+  "t": 38.093,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 38.215,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 30800,
+   "end_ms": 31000
+  }
+ },
+ {
+  "t": 38.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 38.389,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 31000,
+   "end_ms": 31200
+  }
+ },
+ {
+  "t": 38.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 38.599,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 31200,
+   "end_ms": 31400
+  }
+ },
+ {
+  "t": 38.692,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 38.795,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 31400,
+   "end_ms": 31600
+  }
+ },
+ {
+  "t": 38.892,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 38.99,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 31600,
+   "end_ms": 31800
+  }
+ },
+ {
+  "t": 39.093,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 39.189,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 31800,
+   "end_ms": 32000
+  }
+ },
+ {
+  "t": 39.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 39.384,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 32000,
+   "end_ms": 32200
+  }
+ },
+ {
+  "t": 39.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 39.589,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 32200,
+   "end_ms": 32400
+  }
+ },
+ {
+  "t": 39.693,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 39.892,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 39.896,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 32400,
+   "end_ms": 32600
+  }
+ },
+ {
+  "t": 39.982,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 32600,
+   "end_ms": 32800
+  }
+ },
+ {
+  "t": 40.092,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 40.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 40.393,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 33000,
+   "end_ms": 33200
+  }
+ },
+ {
+  "t": 40.492,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 40.588,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 33200,
+   "end_ms": 33400
+  }
+ },
+ {
+  "t": 40.693,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 40.782,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 33400,
+   "end_ms": 33600
+  }
+ },
+ {
+  "t": 40.893,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 40.998,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 33600,
+   "end_ms": 33800
+  }
+ },
+ {
+  "t": 41.093,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 41.192,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 33800,
+   "end_ms": 34000
+  }
+ },
+ {
+  "t": 41.292,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 41.382,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 34000,
+   "end_ms": 34200
+  }
+ },
+ {
+  "t": 41.493,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 41.579,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 34200,
+   "end_ms": 34400
+  }
+ },
+ {
+  "t": 41.692,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 41.8,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 34400,
+   "end_ms": 34600
+  }
+ },
+ {
+  "t": 41.893,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 41.998,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 34600,
+   "end_ms": 34800
+  }
+ }
+]

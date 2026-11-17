@@ -1,0 +1,2725 @@
+[
+ {
+  "t": 6.95,
+  "direction": "server",
+  "event": {
+   "type": "session.started",
+   "session": {
+    "id": "rtc_u2_ETA7Wp3oMxy7wHLzBNYdQQnlMU43FFY2",
+    "status": "active",
+    "expires_at": 1790626322
+   }
+  }
+ },
+ {
+  "t": 7.133,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 7.334,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 7.443,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 200,
+   "end_ms": 400
+  }
+ },
+ {
+  "t": 7.535,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 7.628,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 400,
+   "end_ms": 600
+  }
+ },
+ {
+  "t": 7.734,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 7.84,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 600,
+   "end_ms": 800
+  }
+ },
+ {
+  "t": 7.935,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 8.048,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 800,
+   "end_ms": 1000
+  }
+ },
+ {
+  "t": 8.134,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 8.228,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 1000,
+   "end_ms": 1200
+  }
+ },
+ {
+  "t": 8.334,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 8.432,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 1200,
+   "end_ms": 1400
+  }
+ },
+ {
+  "t": 8.534,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 8.636,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 1400,
+   "end_ms": 1600
+  }
+ },
+ {
+  "t": 8.734,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "ISyjMss2ajWlMasrCSE7Fy8UQBKjDIsFVPpS63rkiuoz9dP/JQeWAiP0YugA4lPd"
+  }
+ },
+ {
+  "t": 8.841,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 1600,
+   "end_ms": 1800
+  }
+ },
+ {
+  "t": 8.934,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "evvi+nH7Nv0o+2T5Avt//LD83vz++0D75fzI/Pv75vwx/On7UP2S/Xj9Vf7W/5EA"
+  }
+ },
+ {
+  "t": 9.046,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 1800,
+   "end_ms": 2000
+  }
+ },
+ {
+  "t": 9.134,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 9.282,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 2000,
+   "end_ms": 2200
+  }
+ },
+ {
+  "t": 9.334,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "ZAFPAToBHAH7AOEA1QDZAMcAlgBXAB8AFABVAKAAvgDmAAIBBgHrALIAlwDBAGcA"
+  }
+ },
+ {
+  "t": 9.515,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 2200,
+   "end_ms": 2400
+  }
+ },
+ {
+  "t": 9.518,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 2200,
+   "item": {
+    "id": "item_ETA7ZfnlUm2FQG72JUaph",
+    "type": "input_transcript",
+    "text": " What"
+   },
+   "start_ms": 2000
+  }
+ },
+ {
+  "t": 9.519,
+  "direction": "server",
+  "event": {
+   "type": "turn.created",
+   "turn": {
+    "id": "turn_ETA7ZxZRgIych6pQYJ7l2",
+    "end_ms": 2200,
+    "role": "user",
+    "start_ms": 2000,
+    "transcript": " What"
+   }
+  }
+ },
+ {
+  "t": 9.549,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "CABW/WX0zfTE91H3Jf3zBGAHxwWABVH/1vqr+Ff4rvs+/k4DwAZICIsGTgHS/37+"
+  }
+ },
+ {
+  "t": 9.64,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 2400,
+   "end_ms": 2600
+  }
+ },
+ {
+  "t": 9.642,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 2400,
+   "item": {
+    "id": "item_ETA7Z7zGgQC9njvAwWII4",
+    "type": "input_transcript",
+    "text": " is the"
+   },
+   "start_ms": 2200
+  }
+ },
+ {
+  "t": 9.643,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " is the",
+   "end_ms": 2400,
+   "start_ms": 2200,
+   "turn_id": "turn_ETA7ZxZRgIych6pQYJ7l2"
+  }
+ },
+ {
+  "t": 9.734,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "2gDYANYA1ADSANEA0QDPANAAzwDPAM8AzgDLAMcAxAC/ALoAtgCyAK8AqgClAKAA"
+  }
+ },
+ {
+  "t": 9.901,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 2600,
+   "end_ms": 2800
+  }
+ },
+ {
+  "t": 9.935,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "wgCLAesDZQe/CqMMlAzcCpIIrQZCBbcDXwGI/iv8tfvW/XkBegTlBH4CvP7v++z7"
+  }
+ },
+ {
+  "t": 10.028,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 2800,
+   "end_ms": 3000
+  }
+ },
+ {
+  "t": 10.031,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 2800,
+   "item": {
+    "id": "item_ETA7ZoBq4iLudfns3eJdm",
+    "type": "input_transcript",
+    "text": " test"
+   },
+   "start_ms": 2600
+  }
+ },
+ {
+  "t": 10.032,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " test",
+   "end_ms": 2800,
+   "start_ms": 2600,
+   "turn_id": "turn_ETA7ZxZRgIych6pQYJ7l2"
+  }
+ },
+ {
+  "t": 10.134,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "/vnE8O3tH+8d8ojwmubY2aHQ/cumy2HPfdR02brgIuzf+OcDXQ2FFPsY7B14JNoo"
+  }
+ },
+ {
+  "t": 10.286,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 3000,
+   "end_ms": 3200
+  }
+ },
+ {
+  "t": 10.334,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "xv6Z/0oAuP9s/7b/7v/WABAB3P9a/+j/Uf9F/nn++P4r/sb9n/5G/6f/yP8i/23+"
+  }
+ },
+ {
+  "t": 10.494,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 3200,
+   "end_ms": 3400
+  }
+ },
+ {
+  "t": 10.497,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 3200,
+   "item": {
+    "id": "item_ETA7ZEA2bYSbtaJ40dHg2",
+    "type": "input_transcript",
+    "text": " code"
+   },
+   "start_ms": 3000
+  }
+ },
+ {
+  "t": 10.498,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " code",
+   "end_ms": 3200,
+   "start_ms": 3000,
+   "turn_id": "turn_ETA7ZxZRgIych6pQYJ7l2"
+  }
+ },
+ {
+  "t": 10.533,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "0f57/7AAlQAl/9b9xPzz/Af+EP7t/af9VP2//Rb/dv8p/5v/CQAOASUBOgHmAg4D"
+  }
+ },
+ {
+  "t": 10.706,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 3400,
+   "end_ms": 3600
+  }
+ },
+ {
+  "t": 10.709,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 3400,
+   "item": {
+    "id": "item_ETA7a1wkOIUxcuMQTxid0",
+    "type": "input_transcript",
+    "text": " word"
+   },
+   "start_ms": 3200
+  }
+ },
+ {
+  "t": 10.711,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " word",
+   "end_ms": 3400,
+   "start_ms": 3200,
+   "turn_id": "turn_ETA7ZxZRgIych6pQYJ7l2"
+  }
+ },
+ {
+  "t": 10.734,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "IAFHAV0C1QMkBSsGKge/BxgHBwU/AiAAt//iAGICzwK0Aev/0/4i/0oACwF7AK3+"
+  }
+ },
+ {
+  "t": 10.893,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 3600,
+   "end_ms": 3800
+  }
+ },
+ {
+  "t": 10.897,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 3600,
+   "item": {
+    "id": "item_ETA7aAJRSi9LcOjUy3vQx",
+    "type": "input_transcript",
+    "text": " on"
+   },
+   "start_ms": 3400
+  }
+ },
+ {
+  "t": 10.899,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " on",
+   "end_ms": 3600,
+   "start_ms": 3400,
+   "turn_id": "turn_ETA7ZxZRgIych6pQYJ7l2"
+  }
+ },
+ {
+  "t": 10.933,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "RwHHAXj+rf2O/8YAHQAjAMMBLQFwAH3/4f4CAXwDeQHc/Cv9Bf9JAKcDHgPAABv/"
+  }
+ },
+ {
+  "t": 11.135,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 11.206,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 3800,
+   "end_ms": 4000
+  }
+ },
+ {
+  "t": 11.209,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 3800,
+   "item": {
+    "id": "item_ETA7aChycAss7SlDL0hFQ",
+    "type": "input_transcript",
+    "text": " this"
+   },
+   "start_ms": 3600
+  }
+ },
+ {
+  "t": 11.21,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " this",
+   "end_ms": 3800,
+   "start_ms": 3600,
+   "turn_id": "turn_ETA7ZxZRgIych6pQYJ7l2"
+  }
+ },
+ {
+  "t": 11.334,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 11.368,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 4000,
+   "end_ms": 4200
+  }
+ },
+ {
+  "t": 11.371,
+  "direction": "server",
+  "event": {
+   "type": "output_transcript.added",
+   "end_ms": 4000,
+   "item": {
+    "id": "item_ETA7a4EtKPNkayuVmjnK2",
+    "type": "output_transcript",
+    "text": " The test"
+   },
+   "start_ms": 3800
+  }
+ },
+ {
+  "t": 11.534,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 11.636,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "dQFmAbwBGAPWAysFWwccCJ4KFw45D48S5RUxGY4ezB2HGgIb/BkuGEEYDhnxGmcc",
+   "start_ms": 4200,
+   "end_ms": 4400
+  }
+ },
+ {
+  "t": 11.639,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 4200,
+   "item": {
+    "id": "item_ETA7bsSd9eAsODkEZBOoJ",
+    "type": "input_transcript",
+    "text": " page"
+   },
+   "start_ms": 4000
+  }
+ },
+ {
+  "t": 11.64,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " page",
+   "end_ms": 4200,
+   "start_ms": 4000,
+   "turn_id": "turn_ETA7ZxZRgIych6pQYJ7l2"
+  }
+ },
+ {
+  "t": 11.734,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 11.784,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AwVvBVIGBAd+BtkGrAcxCIAJ3wnACUMJvQhzCjoNvBDxFLEb7yHkKMMv8TEpMiUu",
+   "start_ms": 4400,
+   "end_ms": 4600
+  }
+ },
+ {
+  "t": 11.788,
+  "direction": "server",
+  "event": {
+   "type": "input_transcript.added",
+   "end_ms": 4400,
+   "item": {
+    "id": "item_ETA7baMVfW8rxjyA1DIh3",
+    "type": "input_transcript",
+    "text": "?"
+   },
+   "start_ms": 4200
+  }
+ },
+ {
+  "t": 11.788,
+  "direction": "server",
+  "event": {
+   "type": "output_transcript.added",
+   "end_ms": 4400,
+   "item": {
+    "id": "item_ETA7bnUsMQER0ZTXbzyHJ",
+    "type": "output_transcript",
+    "text": " code"
+   },
+   "start_ms": 4200
+  }
+ },
+ {
+  "t": 11.791,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": "?",
+   "end_ms": 4400,
+   "start_ms": 4200,
+   "turn_id": "turn_ETA7ZxZRgIych6pQYJ7l2"
+  }
+ },
+ {
+  "t": 11.935,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 11.964,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "nf83AFgATP+z/xkB8v+4/vkAZgBf/4H/1wA3AH3/Y/9+AEUAr/4SAIgAW/8IAFEA",
+   "start_ms": 4600,
+   "end_ms": 4800
+  }
+ },
+ {
+  "t": 12.134,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 12.196,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "DOTX43DkWeWu5lToeurN7GjvD/Kh82X1FPd09+j3Q/gE+HL3C/fH9vX2Pfcj+MX4",
+   "start_ms": 4800,
+   "end_ms": 5000
+  }
+ },
+ {
+  "t": 12.202,
+  "direction": "server",
+  "event": {
+   "type": "output_transcript.added",
+   "end_ms": 4800,
+   "item": {
+    "id": "item_ETA7bhQ8PuQSQp4ciBYHB",
+    "type": "output_transcript",
+    "text": " word"
+   },
+   "start_ms": 4600
+  }
+ },
+ {
+  "t": 12.334,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 12.385,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "Xf1O/Sz9QP03/R/9Ov0r/Un9Wv1a/XT9j/2V/cP9wf2l/a/9r/2W/b39sf2+/ff9",
+   "start_ms": 5000,
+   "end_ms": 5200
+  }
+ },
+ {
+  "t": 12.397,
+  "direction": "server",
+  "event": {
+   "type": "output_transcript.added",
+   "end_ms": 5000,
+   "item": {
+    "id": "item_ETA7bSH07CSGrKBbCLpPA",
+    "type": "output_transcript",
+    "text": " on"
+   },
+   "start_ms": 4800
+  }
+ },
+ {
+  "t": 12.533,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 12.598,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "qPrK+iD74fsk/Q//hQFVBGMHaQoMDSwPwRBvEUkRuRB0D9UNGQwZClYIkAbyBGcD",
+   "start_ms": 5200,
+   "end_ms": 5400
+  }
+ },
+ {
+  "t": 12.603,
+  "direction": "server",
+  "event": {
+   "type": "output_transcript.added",
+   "end_ms": 5200,
+   "item": {
+    "id": "item_ETA7cAAmZI3tIiMzn3qhr",
+    "type": "output_transcript",
+    "text": " this"
+   },
+   "start_ms": 5000
+  }
+ },
+ {
+  "t": 12.603,
+  "direction": "server",
+  "event": {
+   "type": "turn.done",
+   "turn": {
+    "id": "turn_ETA7ZxZRgIych6pQYJ7l2",
+    "end_ms": 5200,
+    "role": "user",
+    "start_ms": 2000,
+    "transcript": " What is the test code word on this page?"
+   }
+  }
+ },
+ {
+  "t": 12.604,
+  "direction": "server",
+  "event": {
+   "type": "turn.created",
+   "turn": {
+    "id": "turn_ETA7aWHfyw6g3LHpgMmmi",
+    "end_ms": 5200,
+    "role": "assistant",
+    "start_ms": 5000,
+    "transcript": " The test code word on"
+   }
+  }
+ },
+ {
+  "t": 12.604,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " this",
+   "end_ms": 5200,
+   "start_ms": 5000,
+   "turn_id": "turn_ETA7aWHfyw6g3LHpgMmmi"
+  }
+ },
+ {
+  "t": 12.734,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 12.759,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "SAa4CQgN7hJfGQodESD/IR8iRSKAIaIf8RykGKATKQ6dCNIE1gER/579MfyC+4/8",
+   "start_ms": 5400,
+   "end_ms": 5600
+  }
+ },
+ {
+  "t": 12.761,
+  "direction": "server",
+  "event": {
+   "type": "output_transcript.added",
+   "end_ms": 5400,
+   "item": {
+    "id": "item_ETA7cVxMejrB6OlIkek8z",
+    "type": "output_transcript",
+    "text": " page"
+   },
+   "start_ms": 5200
+  }
+ },
+ {
+  "t": 12.799,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " page",
+   "end_ms": 5400,
+   "start_ms": 5200,
+   "turn_id": "turn_ETA7aWHfyw6g3LHpgMmmi"
+  }
+ },
+ {
+  "t": 12.934,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 12.995,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "egjp+WkJ+fub9eEPMfwS8zsIzQQ/+r7/swFyACP7l/6TDBH8yvYv/pMD3w+n99bu",
+   "start_ms": 5600,
+   "end_ms": 5800
+  }
+ },
+ {
+  "t": 13.133,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 13.155,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "XPp4+bj3VPWG8gnwhu7C7YDtVu1O7SXt9OxG7eDtje7l7pDuD+6v7Tbu1O+68Ub0",
+   "start_ms": 5800,
+   "end_ms": 6000
+  }
+ },
+ {
+  "t": 13.158,
+  "direction": "server",
+  "event": {
+   "type": "output_transcript.added",
+   "end_ms": 5800,
+   "item": {
+    "id": "item_ETA7c8HLl17m5HKevAEvE",
+    "type": "output_transcript",
+    "text": " is"
+   },
+   "start_ms": 5600
+  }
+ },
+ {
+  "t": 13.16,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " is",
+   "end_ms": 5800,
+   "start_ms": 5600,
+   "turn_id": "turn_ETA7aWHfyw6g3LHpgMmmi"
+  }
+ },
+ {
+  "t": 13.334,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 13.395,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "JgRRBFwEJgTmA9QDswNqAyMDHgNrA/cDRATAA80CUAJwAt0CWQN8A2EDQAMeAxID",
+   "start_ms": 6000,
+   "end_ms": 6200
+  }
+ },
+ {
+  "t": 13.533,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 13.584,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "kP+f/5n/iP+W/6r/ov+b/57/mv+I/5T/pv+d/6f/tf+4/6n/l/+Q/47/if+i/6//",
+   "start_ms": 6200,
+   "end_ms": 6400
+  }
+ },
+ {
+  "t": 13.587,
+  "direction": "server",
+  "event": {
+   "type": "output_transcript.added",
+   "end_ms": 6200,
+   "item": {
+    "id": "item_ETA7dIxRlo8b9nVyhdyxi",
+    "type": "output_transcript",
+    "text": " \"qu"
+   },
+   "start_ms": 6000
+  }
+ },
+ {
+  "t": 13.588,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " \"qu",
+   "end_ms": 6200,
+   "start_ms": 6000,
+   "turn_id": "turn_ETA7aWHfyw6g3LHpgMmmi"
+  }
+ },
+ {
+  "t": 13.734,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 13.745,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "1QJQAqEC1QL2AnsDWQTMBeAGzwjvCikMUA20DL0MJwz4C/EMkg2uDgUPbA8NECkQ",
+   "start_ms": 6400,
+   "end_ms": 6600
+  }
+ },
+ {
+  "t": 13.748,
+  "direction": "server",
+  "event": {
+   "type": "output_transcript.added",
+   "end_ms": 6400,
+   "item": {
+    "id": "item_ETA7dLzyLkQStlTvzJhTE",
+    "type": "output_transcript",
+    "text": "artz"
+   },
+   "start_ms": 6200
+  }
+ },
+ {
+  "t": 13.75,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": "artz",
+   "end_ms": 6400,
+   "start_ms": 6200,
+   "turn_id": "turn_ETA7aWHfyw6g3LHpgMmmi"
+  }
+ },
+ {
+  "t": 13.934,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 13.98,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "nf/A/+L/vP+r/5D/kf+0/9v/wv+V/9H/GwD4//X/2//W/wMA4//R/8//xP/9//r/",
+   "start_ms": 6600,
+   "end_ms": 6800
+  }
+ },
+ {
+  "t": 14.133,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 14.138,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "mvnI+Wr68Pre+j77L/w7/Hb8Wv1Q/tX+uf+fASwEAQbICBQOBRI4FXIahB5KIQAl",
+   "start_ms": 6800,
+   "end_ms": 7000
+  }
+ },
+ {
+  "t": 14.142,
+  "direction": "server",
+  "event": {
+   "type": "output_transcript.added",
+   "end_ms": 6800,
+   "item": {
+    "id": "item_ETA7dAAK72F8OB85PH7KV",
+    "type": "output_transcript",
+    "text": " lantern.\""
+   },
+   "start_ms": 6600
+  }
+ },
+ {
+  "t": 14.144,
+  "direction": "server",
+  "event": {
+   "type": "turn.delta",
+   "delta": " lantern.\"",
+   "end_ms": 6800,
+   "start_ms": 6600,
+   "turn_id": "turn_ETA7aWHfyw6g3LHpgMmmi"
+  }
+ },
+ {
+  "t": 14.334,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 14.349,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "DwW7ANYII/t69UEJvP8o+04CGv/f/ngBZQDAARj6fvu7DgwAn/Sg+QYDugzDAHzx",
+   "start_ms": 7000,
+   "end_ms": 7200
+  }
+ },
+ {
+  "t": 14.534,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 14.561,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "WwWIBckFEwY8BkUGYwZWBoIGgwYlBtUFogWmBVAFxgROBBUEjQMGA5ECEAKiATcB",
+   "start_ms": 7200,
+   "end_ms": 7400
+  }
+ },
+ {
+  "t": 14.734,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 14.772,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "afTu83rzEfPT8qXye/Jc8kjyHvLr8cbxtPHC8erxIfJf8pXyufK78rvy1fLg8vby",
+   "start_ms": 7400,
+   "end_ms": 7600
+  }
+ },
+ {
+  "t": 14.849,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "sf2F/Wf9W/1Y/Wf9hf2m/cb9+P0i/j3+Vv5w/pn+rP6z/tT+7v76/g7/FP8o/xn/",
+   "start_ms": 7600,
+   "end_ms": 7800
+  }
+ },
+ {
+  "t": 14.934,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 15.134,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 15.254,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 8000,
+   "end_ms": 8200
+  }
+ },
+ {
+  "t": 15.333,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 15.47,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 8200,
+   "end_ms": 8400
+  }
+ },
+ {
+  "t": 15.534,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 15.67,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 8400,
+   "end_ms": 8600
+  }
+ },
+ {
+  "t": 15.734,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 15.868,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 8600,
+   "end_ms": 8800
+  }
+ },
+ {
+  "t": 15.935,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 16.058,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 8800,
+   "end_ms": 9000
+  }
+ },
+ {
+  "t": 16.134,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 16.243,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 9000,
+   "end_ms": 9200
+  }
+ },
+ {
+  "t": 16.248,
+  "direction": "server",
+  "event": {
+   "type": "turn.done",
+   "turn": {
+    "id": "turn_ETA7aWHfyw6g3LHpgMmmi",
+    "end_ms": 9000,
+    "role": "assistant",
+    "start_ms": 5000,
+    "transcript": " The test code word on this page is \"quartz lantern.\""
+   }
+  }
+ },
+ {
+  "t": 16.335,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 16.427,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 9200,
+   "end_ms": 9400
+  }
+ },
+ {
+  "t": 16.534,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 16.631,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 9400,
+   "end_ms": 9600
+  }
+ },
+ {
+  "t": 16.735,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 16.84,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 9600,
+   "end_ms": 9800
+  }
+ },
+ {
+  "t": 16.934,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 17.047,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 9800,
+   "end_ms": 10000
+  }
+ },
+ {
+  "t": 17.135,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 17.225,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 10000,
+   "end_ms": 10200
+  }
+ },
+ {
+  "t": 17.335,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 17.43,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 10200,
+   "end_ms": 10400
+  }
+ },
+ {
+  "t": 17.533,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 17.639,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 10400,
+   "end_ms": 10600
+  }
+ },
+ {
+  "t": 17.735,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 17.822,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 10600,
+   "end_ms": 10800
+  }
+ },
+ {
+  "t": 17.935,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 18.03,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 10800,
+   "end_ms": 11000
+  }
+ },
+ {
+  "t": 18.136,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 18.233,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 11000,
+   "end_ms": 11200
+  }
+ },
+ {
+  "t": 18.335,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 18.444,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 11200,
+   "end_ms": 11400
+  }
+ },
+ {
+  "t": 18.534,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 18.623,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 11400,
+   "end_ms": 11600
+  }
+ },
+ {
+  "t": 18.734,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 18.832,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 11600,
+   "end_ms": 11800
+  }
+ },
+ {
+  "t": 18.933,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 19.036,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 11800,
+   "end_ms": 12000
+  }
+ },
+ {
+  "t": 19.134,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 19.243,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 12000,
+   "end_ms": 12200
+  }
+ },
+ {
+  "t": 19.334,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 19.478,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 12200,
+   "end_ms": 12400
+  }
+ },
+ {
+  "t": 19.534,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 19.629,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 12400,
+   "end_ms": 12600
+  }
+ },
+ {
+  "t": 19.735,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 19.835,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 12600,
+   "end_ms": 12800
+  }
+ },
+ {
+  "t": 19.936,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 20.041,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 12800,
+   "end_ms": 13000
+  }
+ },
+ {
+  "t": 20.135,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 20.248,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 13000,
+   "end_ms": 13200
+  }
+ },
+ {
+  "t": 20.335,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 20.426,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 13200,
+   "end_ms": 13400
+  }
+ },
+ {
+  "t": 20.536,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 20.63,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 13400,
+   "end_ms": 13600
+  }
+ },
+ {
+  "t": 20.734,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 20.838,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 13600,
+   "end_ms": 13800
+  }
+ },
+ {
+  "t": 20.934,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 21.043,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 13800,
+   "end_ms": 14000
+  }
+ },
+ {
+  "t": 21.134,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 21.247,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 14000,
+   "end_ms": 14200
+  }
+ },
+ {
+  "t": 21.334,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 21.425,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 14200,
+   "end_ms": 14400
+  }
+ },
+ {
+  "t": 21.536,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 21.626,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 14400,
+   "end_ms": 14600
+  }
+ },
+ {
+  "t": 21.69,
+  "direction": "server",
+  "event": {
+   "type": "session.usage.updated",
+   "usage": {
+    "audio_duration_ms": 14400,
+    "backend_model_usage": []
+   },
+   "usage_limit": {
+    "status": null,
+    "reset_seconds": null
+   }
+  }
+ },
+ {
+  "t": 21.737,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 21.836,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 14600,
+   "end_ms": 14800
+  }
+ },
+ {
+  "t": 21.933,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 22.044,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 14800,
+   "end_ms": 15000
+  }
+ },
+ {
+  "t": 22.134,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 22.229,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 15000,
+   "end_ms": 15200
+  }
+ },
+ {
+  "t": 22.333,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 22.436,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 15200,
+   "end_ms": 15400
+  }
+ },
+ {
+  "t": 22.534,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 22.658,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 15400,
+   "end_ms": 15600
+  }
+ },
+ {
+  "t": 22.733,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 22.839,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 15600,
+   "end_ms": 15800
+  }
+ },
+ {
+  "t": 22.935,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 23.028,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 15800,
+   "end_ms": 16000
+  }
+ },
+ {
+  "t": 23.133,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 23.239,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 16000,
+   "end_ms": 16200
+  }
+ },
+ {
+  "t": 23.334,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 23.426,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 16200,
+   "end_ms": 16400
+  }
+ },
+ {
+  "t": 23.534,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 23.638,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 16400,
+   "end_ms": 16600
+  }
+ },
+ {
+  "t": 23.734,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 23.85,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 16600,
+   "end_ms": 16800
+  }
+ },
+ {
+  "t": 23.934,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 24.031,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 16800,
+   "end_ms": 17000
+  }
+ },
+ {
+  "t": 24.134,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 24.244,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 17000,
+   "end_ms": 17200
+  }
+ },
+ {
+  "t": 24.333,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 24.43,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 17200,
+   "end_ms": 17400
+  }
+ },
+ {
+  "t": 24.534,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 24.641,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 17400,
+   "end_ms": 17600
+  }
+ },
+ {
+  "t": 24.737,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 24.858,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 17600,
+   "end_ms": 17800
+  }
+ },
+ {
+  "t": 24.934,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 25.055,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 17800,
+   "end_ms": 18000
+  }
+ },
+ {
+  "t": 25.134,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 25.232,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 18000,
+   "end_ms": 18200
+  }
+ },
+ {
+  "t": 25.333,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 25.446,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 18200,
+   "end_ms": 18400
+  }
+ },
+ {
+  "t": 25.533,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 25.633,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 18400,
+   "end_ms": 18600
+  }
+ },
+ {
+  "t": 25.733,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 25.856,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 18600,
+   "end_ms": 18800
+  }
+ },
+ {
+  "t": 25.934,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 26.034,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 18800,
+   "end_ms": 19000
+  }
+ },
+ {
+  "t": 26.133,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 26.252,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 19000,
+   "end_ms": 19200
+  }
+ },
+ {
+  "t": 26.334,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 26.437,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 19200,
+   "end_ms": 19400
+  }
+ },
+ {
+  "t": 26.534,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 26.645,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 19400,
+   "end_ms": 19600
+  }
+ },
+ {
+  "t": 26.733,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 26.83,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 19600,
+   "end_ms": 19800
+  }
+ },
+ {
+  "t": 26.936,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 27.045,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 19800,
+   "end_ms": 20000
+  }
+ },
+ {
+  "t": 27.133,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 27.232,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 20000,
+   "end_ms": 20200
+  }
+ },
+ {
+  "t": 27.334,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 27.443,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 20200,
+   "end_ms": 20400
+  }
+ },
+ {
+  "t": 27.534,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 27.629,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 20400,
+   "end_ms": 20600
+  }
+ },
+ {
+  "t": 27.733,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 27.837,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 20600,
+   "end_ms": 20800
+  }
+ },
+ {
+  "t": 27.934,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 28.047,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 20800,
+   "end_ms": 21000
+  }
+ },
+ {
+  "t": 28.133,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 28.235,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 21000,
+   "end_ms": 21200
+  }
+ },
+ {
+  "t": 28.333,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 28.448,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 21200,
+   "end_ms": 21400
+  }
+ },
+ {
+  "t": 28.533,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 28.633,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 21400,
+   "end_ms": 21600
+  }
+ },
+ {
+  "t": 28.733,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 28.845,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 21600,
+   "end_ms": 21800
+  }
+ },
+ {
+  "t": 28.934,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 29.053,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 21800,
+   "end_ms": 22000
+  }
+ },
+ {
+  "t": 29.133,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 29.316,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 22000,
+   "end_ms": 22200
+  }
+ },
+ {
+  "t": 29.334,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 29.445,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 22200,
+   "end_ms": 22400
+  }
+ },
+ {
+  "t": 29.534,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 29.63,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 22400,
+   "end_ms": 22600
+  }
+ },
+ {
+  "t": 29.734,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 29.843,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 22600,
+   "end_ms": 22800
+  }
+ },
+ {
+  "t": 29.934,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 30.029,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 22800,
+   "end_ms": 23000
+  }
+ },
+ {
+  "t": 30.133,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 30.243,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 23000,
+   "end_ms": 23200
+  }
+ },
+ {
+  "t": 30.333,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 30.43,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 23200,
+   "end_ms": 23400
+  }
+ },
+ {
+  "t": 30.534,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 30.642,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 23400,
+   "end_ms": 23600
+  }
+ },
+ {
+  "t": 30.734,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 30.827,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 23600,
+   "end_ms": 23800
+  }
+ },
+ {
+  "t": 30.934,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 31.044,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 23800,
+   "end_ms": 24000
+  }
+ },
+ {
+  "t": 31.134,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 31.232,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 24000,
+   "end_ms": 24200
+  }
+ },
+ {
+  "t": 31.334,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 31.445,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 24200,
+   "end_ms": 24400
+  }
+ },
+ {
+  "t": 31.533,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 31.635,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 24400,
+   "end_ms": 24600
+  }
+ },
+ {
+  "t": 31.734,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ },
+ {
+  "t": 31.853,
+  "direction": "server",
+  "event": {
+   "type": "session.output_audio.delta",
+   "delta": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+   "start_ms": 24600,
+   "end_ms": 24800
+  }
+ },
+ {
+  "t": 31.933,
+  "direction": "server",
+  "event": {
+   "type": "session.input_audio.append",
+   "audio": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
+ }
+]
