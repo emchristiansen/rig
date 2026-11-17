@@ -508,3 +508,200 @@ async fn the_body_ends_with_the_chunk_that_completes_the_terminal() {
     assert_eq!(handed_on, [Bytes::from(chunks[0].clone())]);
     observation.inspect(|view| assert_eq!(view.committed_prefix, [terminal]));
 }
+
+/// One ordinary (unobserved) stream of the same request on the same wire,
+/// read to its end: what it sent and how it ended.
+async fn ordinary(
+    transport: &SequencedHttpClient,
+) -> Result<rig_core::completion::CompletionResponse, ProviderError> {
+    let wire = wire();
+    let model = Model::new(wire.clone(), CodexHttpClient::new(transport.clone(), wire));
+    let mut stream = model.stream(CompletionRequest::new("say hi"))?;
+    while let Some(item) = stream.next().await {
+        item?;
+    }
+    stream.finish().await
+}
+
+/// An observed stream sends exactly the request an ordinary stream of the
+/// same wire sends: same target, headers and body.
+#[tokio::test]
+async fn observed_and_ordinary_streams_send_the_same_request() {
+    let observed_transport = replying(sse(&turn_data()));
+    let (_observation, writer) = Observation::prepare();
+    let mut stream = wire()
+        .raw_stream_observed(
+            &observed_transport,
+            CompletionRequest::new("say hi"),
+            writer,
+        )
+        .expect("the request encodes");
+    drain(&mut stream).await;
+    stream.finish().await.expect("the turn finishes");
+
+    let ordinary_transport = replying(sse(&turn_data()));
+    ordinary(&ordinary_transport)
+        .await
+        .expect("the turn finishes");
+
+    let observed = observed_transport.requests();
+    let plain = ordinary_transport.requests();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(plain.len(), 1);
+    assert_eq!(observed[0].uri, plain[0].uri);
+    assert_eq!(observed[0].body, plain[0].body);
+    // Rig draws its own session id per request when the wire names no
+    // conversation; every other header is the same.
+    let headers = |request: &rig_http::test_utils::CapturedHttpRequest| {
+        let mut headers: Vec<(String, Vec<u8>)> = request
+            .headers
+            .iter()
+            .filter(|(name, _)| !matches!(name.as_str(), "session-id" | "session_id"))
+            .map(|(name, value)| (name.as_str().to_owned(), value.as_bytes().to_vec()))
+            .collect();
+        headers.sort();
+        headers
+    };
+    assert_eq!(headers(&observed[0]), headers(&plain[0]));
+}
+
+/// A refused reply fails an observed stream with the error an ordinary
+/// stream reports for it.
+#[tokio::test]
+async fn refused_statuses_report_what_the_ordinary_stream_reports() {
+    for status in [
+        StatusCode::BAD_REQUEST,
+        StatusCode::UNAUTHORIZED,
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::INTERNAL_SERVER_ERROR,
+    ] {
+        let refusing = || {
+            SequencedHttpClient::new([MockHttpResponse::ErrorResponse(
+                status,
+                Bytes::from_static(br#"{"error":{"message":"refused","code":"some_code"}}"#),
+            )])
+        };
+        let expected = ordinary(&refusing())
+            .await
+            .expect_err("the reply is refused");
+
+        let (observation, writer) = Observation::prepare();
+        let mut stream = wire()
+            .raw_stream_observed(&refusing(), CompletionRequest::new("say hi"), writer)
+            .expect("the request encodes");
+        let items = drain(&mut stream).await;
+        assert!(matches!(items.as_slice(), [Err(_)]), "{status}: {items:?}");
+        observation.inspect(|view| {
+            let error = view.native_error.expect("Rig's error is kept");
+            assert_eq!(error.to_string(), expected.to_string(), "{status}");
+            assert_eq!(error.report(), expected.report(), "{status}");
+        });
+    }
+}
+
+/// A stream dropped before it is polled sent nothing and is cancelled.
+#[tokio::test]
+async fn dropping_an_unpolled_observed_stream_cancels_without_dispatch() {
+    let transport = replying(sse(&turn_data()));
+    let (observation, writer) = Observation::prepare();
+    let stream = wire()
+        .raw_stream_observed(&transport, CompletionRequest::new("say hi"), writer)
+        .expect("the request encodes");
+    drop(stream);
+    assert!(transport.requests().is_empty());
+    observation.inspect(|view| {
+        assert_eq!(view.stage, ObservationStage::Cancelled);
+        assert_eq!(view.dispatch, ObservationDispatch::NotDispatched);
+        assert!(view.committed_prefix.is_empty());
+        assert!(view.reply_head.is_none());
+    });
+}
+
+/// Whatever shares the terminal's chunk after it is ignored: more events,
+/// a second terminal, or bytes that are not UTF-8. The turn finishes and
+/// the ledger ends at the first terminal.
+#[tokio::test]
+async fn the_first_terminal_ends_the_turn_whatever_follows_it() {
+    let data = turn_data();
+    let later_terminal = json!({"type": "response.failed", "sequence_number": 6, "response": response("failed", json!([]))}).to_string();
+    for tail in [
+        sse(std::slice::from_ref(&data[0])).to_vec(),
+        sse(std::slice::from_ref(&later_terminal)).to_vec(),
+        b"data: \xff\xfe\n\n".to_vec(),
+    ] {
+        let mut body = sse(&data).to_vec();
+        body.extend_from_slice(&tail);
+        let transport = replying(Bytes::from(body));
+        let (observation, writer) = Observation::prepare();
+        let mut stream = wire()
+            .raw_stream_observed(&transport, CompletionRequest::new("say hi"), writer)
+            .expect("the request encodes");
+        let items = drain(&mut stream).await;
+        assert!(items.iter().all(Result::is_ok), "{items:?}");
+        let result = stream.finish().await.expect("the turn finishes");
+        assert_eq!(result.body.response.text(), "hello");
+        observation.inspect(|view| {
+            assert_eq!(view.stage, ObservationStage::NativeSucceeded);
+            assert_eq!(view.committed_prefix, data.as_slice());
+        });
+    }
+}
+
+/// A reply that ends without a terminal event fails the stream after its
+/// delivered text, as Rig's own stream does (the fork reported it at
+/// finalization instead), and what was committed stays.
+#[tokio::test]
+async fn a_reply_without_a_terminal_is_a_failure_that_keeps_its_prefix() {
+    let mut data = turn_data();
+    data.pop();
+    let transport = replying(sse(&data));
+    let (observation, writer) = Observation::prepare();
+    let mut stream = wire()
+        .raw_stream_observed(&transport, CompletionRequest::new("say hi"), writer)
+        .expect("the request encodes");
+    let items = drain(&mut stream).await;
+    let Some(Err(failure)) = items.last() else {
+        panic!("the stream's last item is the failure, got {items:?}");
+    };
+    assert_eq!(failure.kind, ObservedFailureKind::Stream);
+    assert_eq!(items.iter().filter(|item| item.is_ok()).count(), 2);
+    let finished = stream.finish().await.expect_err("no terminal, no response");
+    assert_eq!(finished.kind, ObservedFailureKind::Stream);
+    observation.inspect(|view| {
+        assert_eq!(view.stage, ObservationStage::NativeFailed);
+        assert_eq!(view.committed_prefix, data.as_slice());
+        assert!(view.native_error.is_some());
+    });
+}
+
+/// The reply's head is kept whole: repeated headers and values that are
+/// not UTF-8 included.
+#[tokio::test]
+async fn the_reply_head_is_kept_whole() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("text/event-stream; charset=utf-8"),
+    );
+    headers.append("x-codex-note", http::HeaderValue::from_static("one"));
+    headers.append("x-codex-note", http::HeaderValue::from_static("two"));
+    headers.insert(
+        "x-opaque",
+        http::HeaderValue::from_bytes(b"\xff\xfe").expect("an opaque header value"),
+    );
+    let transport = SequencedHttpClient::new([MockHttpResponse::SuccessWithHeaders(
+        sse(&turn_data()),
+        headers.clone(),
+    )]);
+    let (observation, writer) = Observation::prepare();
+    let mut stream = wire()
+        .raw_stream_observed(&transport, CompletionRequest::new("say hi"), writer)
+        .expect("the request encodes");
+    drain(&mut stream).await;
+    stream.finish().await.expect("the turn finishes");
+    observation.inspect(|view| {
+        let head = view.reply_head.expect("the reply's head");
+        assert!(head.accepted_sse);
+        assert_eq!(head.headers, headers);
+    });
+}
