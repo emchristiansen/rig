@@ -197,3 +197,105 @@ async fn no_send_path_forces_the_reasoning_include() {
         );
     }
 }
+
+/// Every path that sends a request sends a custom call's answer as one
+/// string naming the tool that ran, and so does the projection a caller
+/// builds an incremental turn's items with.
+#[tokio::test]
+async fn every_send_path_sends_a_custom_calls_answer_as_one_named_string() {
+    use rig_core::message::ToolResultContent;
+    let content = || {
+        vec![
+            ToolResultContent::text("Done: "),
+            ToolResultContent::Json {
+                value: json!({"files": 1}),
+            },
+        ]
+    };
+    let answer = json!({
+        "type": "custom_tool_call_output", "call_id": "call_c",
+        "name": "apply_patch", "output": "Done: {\"files\":1}"
+    });
+
+    let frames =
+        frames_of_every_send_path(plain_wire(), answering(custom_call_item(), content())).await;
+    for frame in [&frames[0], &frames[2], &frames[3]] {
+        let input = raw_input(frame);
+        assert_eq!(
+            serde_json::from_str::<Value>(&input[2]).expect("JSON"),
+            answer,
+            "{frame}"
+        );
+        if !preserves_order() {
+            assert_eq!(
+                input[2],
+                r#"{"call_id":"call_c","name":"apply_patch","output":"Done: {\"files\":1}","type":"custom_tool_call_output"}"#
+            );
+        }
+    }
+
+    // The answer alone, appended to stored state.
+    let items = input_items(&plain_wire(), answering_stored_custom_call(content()))
+        .expect("the appended answer encodes");
+    assert_eq!(items, vec![answer.clone()]);
+    let script = Script::new()
+        .turn([completed("resp_1")])
+        .turn([completed("resp_2")]);
+    let mut session = session_on(plain_wire(), &script);
+    session
+        .send(user_request("patch it"))
+        .await
+        .expect("a send");
+    finish(&mut session).await;
+    session
+        .send_incremental(InputDelta::new(items).expect("non-empty"))
+        .await
+        .expect("an incremental send");
+    let delta = &script.sent()[1];
+    assert_eq!(raw_input(delta), [written(&answer)], "{delta}");
+}
+
+/// No path sends an image Rig v0.46.0 would send as a part of a custom
+/// call's answer: a full send, a send with options and a warmup refuse the
+/// request and write no frame, and the projection of an incremental turn's
+/// items refuses it.
+#[tokio::test]
+async fn no_send_path_sends_an_image_in_a_custom_calls_answer() {
+    use rig_core::message::ToolResultContent;
+    for image in images_rig_sends_in_a_result() {
+        let content = || {
+            vec![
+                ToolResultContent::text("see "),
+                ToolResultContent::Image(image.clone()),
+            ]
+        };
+        let request = answering(custom_call_item(), content());
+        let script = Script::new();
+        let mut session = session_on(plain_wire(), &script);
+
+        let full = session
+            .send(request.clone())
+            .await
+            .expect_err("a full send");
+        let with_options = session
+            .send_with_options(request.clone(), ResponsesWebSocketCreateOptions::warmup())
+            .await
+            .expect_err("a send with options");
+        let warmup = session.warmup(request).await.expect_err("a warmup");
+        let projection = input_items(&plain_wire(), answering_stored_custom_call(content()))
+            .expect_err("the projection of appended items");
+        for refusal in [
+            format!("{full}"),
+            format!("{with_options}"),
+            format!("{warmup}"),
+            format!("{projection}"),
+        ] {
+            assert!(refusal.contains(CUSTOM_IMAGE_REFUSAL), "{refusal}");
+        }
+        assert!(
+            script.sent().is_empty(),
+            "nothing is written: {:?}",
+            script.sent()
+        );
+    }
+}
