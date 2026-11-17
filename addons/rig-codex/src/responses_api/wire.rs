@@ -38,7 +38,7 @@ use rig_core::providers::openai::wire::Auth;
 use rig_core::wire::{Body, Descriptor, Encoded, Mode, Wire, WireFrame};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 /// The `include` entry asking for reasoning ciphertext.
 const REASONING_CIPHERTEXT: &str = "reasoning.encrypted_content";

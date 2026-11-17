@@ -6,11 +6,13 @@ fn derived_identity() -> CodexIdentity {
     CodexIdentity::from_ids("session-derived", "thread-derived").expect("header-safe ids")
 }
 
-fn object(value: serde_json::Value) -> Map<String, Value> {
-    match value {
-        Value::Object(map) => map,
-        other => panic!("expected an object, got {other}"),
-    }
+fn object(value: serde_json::Value) -> RequestBody {
+    RequestBody::parse(&serde_json::to_vec(&value).expect("serializes")).expect("is an object")
+}
+
+/// `body` as it is written, read back as JSON.
+fn written(body: &RequestBody) -> Value {
+    serde_json::from_slice(&body.to_vec().expect("serializes")).expect("is JSON")
 }
 
 /// Caller-derived ids are sent verbatim, so an id no header can carry, or an
@@ -70,7 +72,7 @@ fn stamping_names_the_conversation_in_a_body_that_does_not() {
     let mut body = object(json!({"model": "gpt-5.4"}));
     derived_identity().stamp(&mut body).expect("stamps");
     assert_eq!(
-        Value::Object(body),
+        written(&body),
         json!({
             "model": "gpt-5.4",
             "prompt_cache_key": "thread-derived",
@@ -89,7 +91,7 @@ fn stamping_keeps_what_the_request_already_says() {
     }));
     derived_identity().stamp(&mut body).expect("stamps");
     assert_eq!(
-        Value::Object(body),
+        written(&body),
         json!({
             "prompt_cache_key": "caller-key",
             "client_metadata": {
@@ -114,7 +116,7 @@ fn stamping_refuses_metadata_that_is_not_an_object() {
     };
     assert_eq!(found, json!("not a map"));
     assert_eq!(
-        body["client_metadata"], "not a map",
+        written(&body)["client_metadata"], "not a map",
         "the body is untouched"
     );
 }

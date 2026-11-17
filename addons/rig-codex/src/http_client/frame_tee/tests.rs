@@ -233,7 +233,7 @@ async fn a_frame_rigs_decoder_refuses_is_kept_as_the_provider_sent_it() {
         capacity(8),
     );
     let kept = tee.frames();
-    let model = Model::new(wire.wire.clone(), CodexHttpClient::new(tee, wire));
+    let model = Model::new(wire.clone(), CodexHttpClient::new(tee, wire));
     let mut stream = model
         .stream(CompletionRequest::new("say hi"))
         .expect("the request encodes");
@@ -258,7 +258,7 @@ async fn a_frame_rigs_decoder_refuses_in_a_unary_call_is_kept_too() {
         capacity(8),
     );
     let kept = tee.frames();
-    let model = Model::new(wire.wire.clone(), CodexHttpClient::new(tee, wire));
+    let model = Model::new(wire.clone(), CodexHttpClient::new(tee, wire));
     model
         .call(CompletionRequest::new("say hi"))
         .await

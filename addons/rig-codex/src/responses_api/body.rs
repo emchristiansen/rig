@@ -54,6 +54,11 @@ impl RequestBody {
         Ok(body)
     }
 
+    /// The number of fields.
+    pub(crate) fn len(&self) -> usize {
+        self.values.len()
+    }
+
     /// Whether the body has `key`.
     pub(crate) fn contains(&self, key: &str) -> bool {
         self.values.contains_key(key)

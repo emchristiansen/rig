@@ -1,11 +1,13 @@
 //! An HTTP client that sends a Codex wire's requests as the Codex backend
 //! expects them.
 //!
-//! Rig's Responses wire encodes the request. [`CodexHttpClient`] wraps the
-//! transport that sends it and, as the last hop, makes the request carry
-//! exactly the wire's caller identity, its conversation identity in headers
-//! and body, its request headers and its body compression. A wire with no
-//! caller identity sends nothing. [`HttpFrameTee`] is a second wrapper, which
+//! [`CodexResponses`] is the wire: it encodes the request with the caller's
+//! declared tools and `include` as written and the conversation identity in
+//! the body. [`CodexHttpClient`] wraps the transport that sends it and, as
+//! the last hop, makes the request carry exactly the wire's caller identity,
+//! its conversation identity in headers, its request headers and its body
+//! compression. It sends a JSON body only when that wire encoded it, and a
+//! wire with no caller identity sends nothing. [`HttpFrameTee`] is a second wrapper, which
 //! keeps the frames of the replies it hands on.
 //!
 //! ```
@@ -20,7 +22,7 @@
 //! # ) -> Result<(), rig_codex::responses_api::codex_identity::NotACodexWire> {
 //! let wire = OpenAIConfig::with_key(&chatgpt::DIALECT, "access-token");
 //! let wire = CodexResponses::new(Responses::new(wire, "gpt-5.4"))?;
-//! let model = rig_core::Model::new(wire.wire.clone(), CodexHttpClient::new(http, wire));
+//! let model = rig_core::Model::new(wire.clone(), CodexHttpClient::new(http, wire));
 //! # let _ = model;
 //! # Ok(())
 //! # }
@@ -30,8 +32,7 @@ mod frame_tee;
 
 pub use frame_tee::HttpFrameTee;
 
-use crate::responses_api::BodyFields;
-use crate::responses_api::wire::{CodexRequestError, CodexResponses};
+use crate::responses_api::wire::{CodexEncoded, CodexRequestError, CodexResponses};
 use bytes::Bytes;
 use http::header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE};
 use http::{HeaderValue, Method};
@@ -39,7 +40,6 @@ use rig_http::http_client::{
     HttpClientExt, LazyBody, MultipartForm, Request, Response, Result, StreamingResponse,
 };
 use rig_http::wasm_compat::WasmCompatSend;
-use serde_json::Value;
 
 /// An [`HttpClientExt`] that applies a Codex wire's settings to every request
 /// before `inner` sends it.
@@ -67,8 +67,8 @@ impl<H> CodexHttpClient<H> {
     }
 
     /// The request as it leaves: `request` with the wire's exact headers,
-    /// and, for a JSON `POST`, the conversation identity stamped into the
-    /// body and the body compressed.
+    /// and, for a JSON `POST`, the body compressed. A JSON `POST` whose body
+    /// the Codex wire did not encode is refused.
     fn prepare<T: Into<Bytes>>(
         &self,
         request: Request<T>,
@@ -86,22 +86,10 @@ impl<H> CodexHttpClient<H> {
                 .and_then(|value| value.to_str().ok())
                 .is_some_and(|value| value.starts_with("application/json"));
         if json_post {
-            if let Some(identity) = &self.wire.codex_identity {
-                let mut fields = match serde_json::from_slice::<Value>(&body) {
-                    Ok(Value::Object(fields)) => fields,
-                    Ok(other) => {
-                        return Err(CodexRequestError::Body(
-                            <serde_json::Error as serde::de::Error>::custom(format!(
-                                "expected a JSON object, got {other}"
-                            )),
-                        ));
-                    }
-                    Err(error) => return Err(CodexRequestError::Body(error)),
-                };
-                identity.stamp(&mut fields)?;
-                body = serde_json::to_vec(&BodyFields(&fields))
-                    .map_err(CodexRequestError::Body)?
-                    .into();
+            // The body's fidelity and identity are the wire's work; a body some
+            // other wire wrote has neither.
+            if parts.extensions.get::<CodexEncoded>().is_none() {
+                return Err(CodexRequestError::NotEncodedByCodexWire);
             }
             let (encoding, encoded) = self.wire.request_compression.apply(body.to_vec())?;
             if let Some(encoding) = encoding {

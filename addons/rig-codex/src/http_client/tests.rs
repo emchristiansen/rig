@@ -1,4 +1,5 @@
 use super::*;
+use crate::responses_api::wire::CodexEncoded;
 use crate::responses_api::codex_identity::CodexIdentity;
 use crate::responses_api::request_headers::RequestHeaders;
 use crate::wire::{CallerIdentity, MissingCallerIdentity};
@@ -10,7 +11,7 @@ use rig_core::providers::openai::OpenAIConfig;
 use rig_core::providers::openai::responses_api::wire::Responses;
 use rig_http::http_client::Error;
 use rig_http::test_utils::{CapturedHttpRequest, MockHttpResponse, SequencedHttpClient};
-use serde_json::json;
+use serde_json::{Value, json};
 
 const ACCESS_TOKEN: &str = "test-token";
 
@@ -50,7 +51,7 @@ fn refusing() -> SequencedHttpClient {
 async fn sent_request(wire: &CodexResponses, request: CompletionRequest) -> CapturedHttpRequest {
     let transport = refusing();
     let model = Model::new(
-        wire.wire.clone(),
+        wire.clone(),
         CodexHttpClient::new(transport.clone(), wire.clone()),
     );
     model
@@ -90,7 +91,14 @@ async fn through(wire: &CodexResponses, request: Request<Bytes>) -> Result<Captu
     Ok(requests.remove(0))
 }
 
+/// A JSON `POST` as [`CodexResponses`] hands one over: marked as its own
+/// encoding.
 fn json_post() -> http::request::Builder {
+    foreign_json_post().extension(CodexEncoded)
+}
+
+/// A JSON `POST` some other wire encoded.
+fn foreign_json_post() -> http::request::Builder {
     Request::builder()
         .method(Method::POST)
         .uri("https://chatgpt.com/backend-api/codex/responses")
@@ -269,7 +277,7 @@ async fn a_wire_without_a_caller_identity_sends_nothing() {
 
     // The driver reports the same refusal as a failed call.
     let model = Model::new(
-        wire.wire.clone(),
+        wire.clone(),
         CodexHttpClient::new(transport.clone(), wire),
     );
     model
@@ -319,37 +327,49 @@ async fn the_headers_that_leave_are_exactly_the_wires() {
 }
 
 /// The body keeps the encoder's order with the conversation last: the
-/// identity is added ahead of `input`, and `max_output_tokens` stays after
-/// it.
+/// identity is added ahead of `input`, which stays the body's last field.
 #[tokio::test]
 async fn the_identity_is_stamped_ahead_of_the_conversation() {
     let wire = chatgpt()
         .with_codex_identity(derived_identity())
         .expect("a Codex wire");
-    let body =
-        br#"{"model":"gpt-5.4","stream":true,"input":[{"role":"user"}],"max_output_tokens":64}"#;
-    let request = json_post()
-        .header(CONTENT_LENGTH, body.len())
-        .body(Bytes::from_static(body))
-        .expect("builds");
-    let sent = through(&wire, request).await.expect("sends");
+    let sent = sent(&wire).await;
     let text = std::str::from_utf8(&sent.body).expect("the body is JSON text");
-    assert!(
-        text.ends_with(r#""input":[{"role":"user"}],"max_output_tokens":64}"#),
-        "{text}"
-    );
-    let input_at = text.find(r#""input":"#).expect("input");
+    let input_at = text.find(r#""input":["#).expect("input");
+    let input: Value = serde_json::from_str(
+        text[input_at + r#""input":"#.len()..]
+            .strip_suffix('}')
+            .expect("an object"),
+    )
+    .expect("`input` is the last field");
+    assert!(input.is_array(), "{text}");
     for key in [
         r#""client_metadata":"#,
         r#""prompt_cache_key":"#,
         r#""model":"#,
     ] {
-        assert!(text.find(key).expect("field") < input_at, "{key} in {text}");
+        let at = text.find(key).expect("field");
+        assert!(at < input_at, "{key} in {text}");
     }
+}
+
+/// A stated length is left as it is when the body is: the client changes a
+/// body only by compressing it.
+#[tokio::test]
+async fn an_uncompressed_body_and_its_stated_length_leave_as_they_came() {
+    let wire = chatgpt()
+        .with_codex_identity(derived_identity())
+        .expect("a Codex wire");
+    let body = br#"{"model":"gpt-5.4",  "stream":true,"input":[{"role":"user"}]}"#;
+    let request = json_post()
+        .header(CONTENT_LENGTH, body.len())
+        .body(Bytes::from_static(body))
+        .expect("builds");
+    let sent = through(&wire, request).await.expect("sends");
+    assert_eq!(sent.body, Bytes::from_static(body));
     assert_eq!(
         sent.headers[CONTENT_LENGTH],
-        sent.body.len().to_string().as_str(),
-        "a stated length is the length of the body as it leaves"
+        body.len().to_string().as_str()
     );
 }
 
@@ -380,35 +400,64 @@ async fn a_request_without_a_json_body_keeps_its_body() {
     assert_eq!(sent.body, Bytes::from_static(b"not json"));
 }
 
-/// A JSON body the identity cannot be stamped into is refused before
-/// anything is sent, by a typed error.
+/// A JSON body some other wire encoded is refused before anything is sent,
+/// by a typed error: its tools, `include` and identity are not the Codex
+/// wire's.
 #[tokio::test]
-async fn a_body_the_identity_cannot_be_stamped_into_is_refused() {
+async fn a_json_body_the_codex_wire_did_not_encode_is_refused() {
+    let transport = refusing();
     let wire = chatgpt()
         .with_codex_identity(derived_identity())
         .expect("a Codex wire");
-    for (body, expected) in [
-        (&b"[1,2]"[..], "a Codex request body must be a JSON object"),
-        (
-            &b"{not json"[..],
-            "a Codex request body must be a JSON object",
-        ),
-        (
-            &br#"{"client_metadata":"text"}"#[..],
-            "`client_metadata` must be a JSON object",
-        ),
-    ] {
-        let request = json_post()
-            .body(Bytes::copy_from_slice(body))
-            .expect("builds");
-        let Err(Error::Instance(inner)) = through(&wire, request).await else {
-            panic!("{expected}: the body must be refused");
-        };
-        let error = inner
-            .downcast_ref::<CodexRequestError>()
-            .expect("the typed refusal");
-        assert!(error.to_string().contains(expected), "{error}");
-    }
+    let client = CodexHttpClient::new(transport.clone(), wire.clone());
+    let request = foreign_json_post()
+        .body(Bytes::from_static(br#"{"model":"gpt-5.4","input":[]}"#))
+        .expect("builds");
+    let Err(Error::Instance(inner)) = client.send::<Bytes, Bytes>(request).await else {
+        panic!("a body another wire encoded must be refused");
+    };
+    assert!(matches!(
+        inner.downcast_ref::<CodexRequestError>(),
+        Some(CodexRequestError::NotEncodedByCodexWire)
+    ));
+    assert!(transport.requests().is_empty());
+
+    // Rig's own Responses wire on the Codex client is such a wire.
+    let model = Model::new(
+        wire.wire.clone(),
+        CodexHttpClient::new(transport.clone(), wire),
+    );
+    model
+        .call(prompt())
+        .await
+        .expect_err("Rig's encoding is not the Codex wire's");
+    assert!(transport.requests().is_empty());
+}
+
+/// A request whose `client_metadata` the identity cannot be stamped into is
+/// refused before anything is sent.
+#[tokio::test]
+async fn a_body_the_identity_cannot_be_stamped_into_is_refused() {
+    let transport = refusing();
+    let wire = chatgpt()
+        .with_codex_identity(derived_identity())
+        .expect("a Codex wire");
+    let model = Model::new(
+        wire.clone(),
+        CodexHttpClient::new(transport.clone(), wire),
+    );
+    let mut request = prompt();
+    request.additional_params = Some(json!({"client_metadata": "text"}));
+    let error = model
+        .call(request)
+        .await
+        .expect_err("the identity has no object to go in");
+    assert!(
+        format!("{error:?}").contains("ClientMetadataNotAnObject")
+            || error.to_string().contains("`client_metadata` must be a JSON object"),
+        "{error:?}"
+    );
+    assert!(transport.requests().is_empty());
 }
 
 #[cfg(feature = "request-compression")]

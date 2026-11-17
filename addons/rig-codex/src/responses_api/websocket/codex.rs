@@ -71,7 +71,8 @@ use crate::error::CodexSessionError;
 use crate::responses_api::codex_identity::{CLIENT_METADATA_FIELD, require_codex};
 use crate::responses_api::streaming::ResponseChunkKind;
 use crate::responses_api::wire::{CodexResponses, UnsupportedCodexControl, set};
-use crate::responses_api::{BodyFields, ResponseStatus, encode_body};
+use crate::responses_api::ResponseStatus;
+use crate::responses_api::body::RequestBody;
 use crate::ws_client::{
     BoxedWebSocketConnection, ConnectOptions, Frame, ReadyFrame, UnsupportedCapability,
     WebSocketClientExt,
@@ -79,11 +80,13 @@ use crate::ws_client::{
 use rig_core::completion::{CompletionRequest, Message};
 use rig_core::error::{EncodeError, ProviderError};
 use rig_core::http_client::{self, NoBody};
-use rig_core::json_utils::remove_preserving_order;
+use rig_core::operation::Completion;
 use rig_core::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use rig_http::ws_client::WebSocketConnection as _;
 use serde::Serialize;
 use serde::ser::SerializeMap;
+use rig_core::wire::{Mode, Operation, Wire};
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -170,11 +173,11 @@ impl FrameStamps {
     /// Stamp the frame metadata over the frame's own `client_metadata`
     /// values, then the send instant. The identity has already made
     /// `client_metadata` an object.
-    fn stamp(&self, body: &mut Map<String, Value>) -> Result<(), EncodeError> {
+    fn stamp(&self, body: &mut RequestBody) -> Result<(), EncodeError> {
         if self.metadata.is_empty() && self.clock.is_none() {
             return Ok(());
         }
-        let Some(Value::Object(metadata)) = body.get_mut(CLIENT_METADATA_FIELD) else {
+        let Some(Ok(mut metadata)) = body.get::<Map<String, Value>>(CLIENT_METADATA_FIELD) else {
             return Err(EncodeError::request(
                 "a Codex frame's `client_metadata` must be a JSON object to carry frame metadata",
             ));
@@ -188,7 +191,8 @@ impl FrameStamps {
                 Value::String(clock.unix_millis().to_string()),
             );
         }
-        Ok(())
+        body.insert(CLIENT_METADATA_FIELD, &metadata)
+            .map_err(EncodeError::request)
     }
 }
 
@@ -573,8 +577,8 @@ impl CodexWebSocketSession {
             }
         };
         let mut request = (*envelope).clone();
-        request.insert("input".to_owned(), Value::Array(delta.into_vec()));
-        request.insert("previous_response_id".to_owned(), Value::String(tip));
+        request.insert("input", &delta.into_vec())?;
+        request.insert("previous_response_id", &tip)?;
         let frame = self.encode_frame(&request, None)?;
         // The captured envelope, not the delta request, is what a later
         // delta continues from.
@@ -662,7 +666,7 @@ impl CodexWebSocketSession {
         &self,
         mut completion_request: CompletionRequest,
         options: &ResponsesWebSocketCreateOptions,
-    ) -> Result<Map<String, Value>, ProviderError> {
+    ) -> Result<RequestBody, ProviderError> {
         // Direct session requests bypass builder validation.
         completion_request.validate_message_content()?;
         if let Some(control) = UnsupportedCodexControl::in_request(&completion_request) {
@@ -683,12 +687,13 @@ impl CodexWebSocketSession {
                 .push(Arc::new(Message::user(WARMUP_PLACEHOLDER)));
         }
 
-        let mut body = encode_body(&self.wire.wire, completion_request)?;
+        let request = Completion::prepare(completion_request, &self.wire.wire.describe())?;
+        let (_, mut body) = self.wire.encode_body(request, Mode::Streaming)?;
         if input_free {
             remove_warmup_placeholder(&mut body)?;
         }
-        body.insert("stream".to_owned(), Value::Bool(true));
-        remove_preserving_order(&mut body, "background");
+        body.insert("stream", &true)?;
+        body.remove("background");
         Ok(body)
     }
 
@@ -696,12 +701,12 @@ impl CodexWebSocketSession {
     /// session's identity and frame metadata into it.
     fn encode_frame(
         &self,
-        request: &Map<String, Value>,
+        request: &RequestBody,
         generate: Option<bool>,
     ) -> Result<String, ProviderError> {
         let mut body = request.clone();
         if let Some(generate) = generate {
-            body.insert("generate".to_owned(), Value::Bool(generate));
+            body.insert("generate", &generate)?;
         }
         self.identity.stamp(&mut body)?;
         self.frame_stamps.stamp(&mut body)?;
@@ -715,7 +720,7 @@ impl CodexWebSocketSession {
     /// turn completes.
     async fn send_encoded(
         &mut self,
-        envelope: Map<String, Value>,
+        envelope: RequestBody,
         frame: String,
     ) -> Result<(), ProviderError> {
         self.ensure_can_send()?;
@@ -1134,35 +1139,39 @@ impl std::fmt::Debug for CodexWebSocketSession {
 }
 
 /// One `response.create` frame: the event tag, then the body's fields.
-struct CreateFrame<'a>(&'a Map<String, Value>);
+struct CreateFrame<'a>(&'a RequestBody);
 
 impl Serialize for CreateFrame<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut map = serializer.serialize_map(Some(self.0.len().saturating_add(1)))?;
         map.serialize_entry("type", "response.create")?;
-        BodyFields(self.0).serialize_into(&mut map)?;
+        self.0.serialize_into(&mut map)?;
         map.end()
     }
 }
 
 /// Take the warmup stand-in back out of an encoded body's `input`, leaving
 /// the input the request really has.
-fn remove_warmup_placeholder(body: &mut Map<String, Value>) -> Result<(), EncodeError> {
-    let stand_in = body
-        .get_mut("input")
-        .and_then(Value::as_array_mut)
-        .and_then(Vec::pop);
-    let is_stand_in = stand_in.as_ref().is_some_and(|item| {
-        item.get("role").and_then(Value::as_str) == Some("user")
-            && item.pointer("/content/0/text").and_then(Value::as_str) == Some(WARMUP_PLACEHOLDER)
-    });
-    if is_stand_in {
-        Ok(())
-    } else {
-        Err(EncodeError::request(
+fn remove_warmup_placeholder(body: &mut RequestBody) -> Result<(), EncodeError> {
+    let misplaced = || {
+        EncodeError::request(
             "the Responses encoder did not place the warmup stand-in last in `input`",
-        ))
+        )
+    };
+    let mut input: Vec<Box<RawValue>> = body
+        .get("input")
+        .ok_or_else(misplaced)?
+        .map_err(EncodeError::request)?;
+    let stand_in: Value = input
+        .pop()
+        .ok_or_else(misplaced)
+        .and_then(|item| serde_json::from_str(item.get()).map_err(EncodeError::request))?;
+    let is_stand_in = stand_in.get("role").and_then(Value::as_str) == Some("user")
+        && stand_in.pointer("/content/0/text").and_then(Value::as_str) == Some(WARMUP_PLACEHOLDER);
+    if !is_stand_in {
+        return Err(misplaced());
     }
+    body.insert("input", &input).map_err(EncodeError::request)
 }
 
 fn event_timeout_error(timeout: Duration) -> ProviderError {

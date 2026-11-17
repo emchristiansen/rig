@@ -12,6 +12,7 @@
 //! ```
 
 use crate::error::{CodexSessionError, CorruptFrame};
+use crate::responses_api::body::RequestBody;
 use crate::responses_api::streaming::{
     DecodedFrame, ItemChunk, ResponseChunk, ResponseChunkKind, StreamingCompletionChunk,
     decode_frame,
@@ -423,11 +424,11 @@ pub(crate) enum Continuation {
     Blocked(IncrementalSendRefused),
     /// A turn built from this envelope is in flight. It becomes the eligible
     /// envelope only if that turn completes.
-    InFlight(Box<Map<String, Value>>),
+    InFlight(Box<RequestBody>),
     /// The last turn completed as `tip`; a delta may continue it by reusing
     /// `envelope`'s non-input configuration.
     Eligible {
-        envelope: Box<Map<String, Value>>,
+        envelope: Box<RequestBody>,
         tip: String,
     },
 }
