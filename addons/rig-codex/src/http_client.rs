@@ -160,4 +160,6 @@ impl<H: HttpClientExt> HttpClientExt for CodexHttpClient<H> {
 }
 
 #[cfg(test)]
+mod fidelity_tests;
+#[cfg(test)]
 mod tests;

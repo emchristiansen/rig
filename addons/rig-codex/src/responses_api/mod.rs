@@ -1429,6 +1429,8 @@ impl OutputText {
 
 #[cfg(test)]
 pub(crate) mod corrupt_frame_fixtures;
+#[cfg(test)]
+pub(crate) mod fidelity_fixtures;
 
 #[cfg(test)]
 mod tests;

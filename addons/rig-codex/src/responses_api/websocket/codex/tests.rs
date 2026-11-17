@@ -454,14 +454,11 @@ async fn the_response_create_frame_carries_the_codex_shaping() {
     );
 }
 
-/// The pin stated the encrypted-reasoning `include` only alongside
-/// `reasoning`, as the official client does.
-///
-/// Not provided on v0.46.0: Rig's encoder states the include on every Codex
-/// request, because the contract stores nothing. The session sends what the
-/// encoder wrote.
+/// The encrypted-reasoning `include` is stated only alongside `reasoning`,
+/// as the official client does: Rig's encoder states it on every Codex
+/// request, and the Codex wire takes it back out of a turn that neither
+/// reasons nor asked for it.
 #[tokio::test]
-#[ignore = "v0.46.0's encoder states the encrypted-reasoning include on every Codex request"]
 async fn no_include_is_forced_onto_a_turn_without_reasoning() {
     let script = Script::new().turn([completed("resp_1")]);
     let mut session = session_over(&script);
@@ -962,13 +959,10 @@ async fn keepalive_between_turns_keeps_the_continuation_eligible() {
 /// The Codex websocket lane, with strict tools, sends a declared
 /// Responses-lite `functions` namespace on the `response.create` frame
 /// exactly as written: the empty description survives and no `strict` is
-/// added to the namespace or its member.
-///
-/// Not provided on v0.46.0: Rig's encoder reads each declared tool into its
-/// own tool type and writes it back, which leaves an empty namespace
-/// `description` out. The session sends what the encoder wrote.
+/// added to the namespace or its member. Rig's encoder reads each declared
+/// tool into its own tool type and writes it back, which leaves an empty
+/// namespace `description` out; the Codex wire puts the declaration back.
 #[tokio::test]
-#[ignore = "v0.46.0's encoder rewrites declared tools and drops an empty namespace description"]
 async fn a_declared_namespace_reaches_the_codex_frame_verbatim_under_strict_mode() {
     let namespace = json!({
         "type": "namespace",
@@ -2189,3 +2183,5 @@ async fn a_binary_frame_that_is_not_utf8_carries_its_bytes_as_received() {
         Some(&FrameEvidence::Bytes(received))
     );
 }
+
+mod fidelity;
