@@ -19,7 +19,7 @@ use rig_live::chatgpt as realtime;
 use rig_live::support::{CallerIdentity, CodexIdentity, RequestHeaders};
 use rig_webrtc::{LivePeer, PeerEvent};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 
@@ -57,10 +57,9 @@ impl Received {
     }
 }
 
-/// Serve one HTTP/1.1 request: record it, answer the offer in its body with
-/// an in-process peer, and reply 201 with the answer and a `Location`.
-async fn serve_call(listener: TcpListener) -> (Received, common::AnsweringPeer) {
-    let (mut stream, _) = listener.accept().await.expect("a connection");
+/// Read one HTTP/1.1 request: its request line, its headers, and the body
+/// its `content-length` states, which is empty when it states none.
+async fn read_request(stream: &mut TcpStream) -> Received {
     let mut buffer = Vec::new();
     let head_end = loop {
         let mut chunk = [0u8; 4096];
@@ -85,14 +84,27 @@ async fn serve_call(listener: TcpListener) -> (Received, common::AnsweringPeer) 
             .headers
             .push((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
     }
-    let length: usize = received.single("content-length").parse().expect("a length");
+    let length: usize = received
+        .headers
+        .iter()
+        .find(|(name, _)| name == "content-length")
+        .map_or(0, |(_, value)| value.parse().expect("a length"));
     let mut body = buffer[head_end..].to_vec();
     while body.len() < length {
         let mut chunk = [0u8; 4096];
         let read = stream.read(&mut chunk).await.expect("reads");
+        assert!(read > 0, "the body ended early");
         body.extend_from_slice(&chunk[..read]);
     }
     received.body = body;
+    received
+}
+
+/// Serve one HTTP/1.1 request: record it, answer the offer in its body with
+/// an in-process peer, and reply 201 with the answer and a `Location`.
+async fn serve_call(listener: TcpListener) -> (Received, common::AnsweringPeer) {
+    let (mut stream, _) = listener.accept().await.expect("a connection");
+    let received = read_request(&mut stream).await;
 
     let request: serde_json::Value = serde_json::from_slice(&received.body).expect("JSON");
     let answering = common::answer(request["sdp"].as_str().expect("an offer").to_owned()).await;
@@ -153,15 +165,94 @@ async fn serve_control(listener: TcpListener) -> (Received, Vec<serde_json::Valu
     (handshake, client)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_call_runs_end_to_end_against_local_servers() {
-    let http = TcpListener::bind("127.0.0.1:0").await.expect("binds");
-    let ws = TcpListener::bind("127.0.0.1:0").await.expect("binds");
-    let http_addr = http.local_addr().expect("an address");
-    let ws_addr = ws.local_addr().expect("an address");
-    let call_server = tokio::spawn(serve_call(http));
-    let control_server = tokio::spawn(serve_control(ws));
+/// Serve one HTTP/1.1 request: record it and reply 204.
+async fn serve_bare(listener: TcpListener) -> Received {
+    let (mut stream, _) = listener.accept().await.expect("a connection");
+    let received = read_request(&mut stream).await;
+    stream
+        .write_all(b"HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n")
+        .await
+        .expect("replies");
+    stream.shutdown().await.expect("closes");
+    received
+}
 
+/// The `accept-encoding` value `transport` adds by itself to a request that
+/// names none, or `None` when it adds no such header: what a local server
+/// receives for a bare `GET` this crate had no part in.
+///
+/// reqwest adds the header when it was compiled with `gzip`, `brotli`,
+/// `zstd` or `deflate`, and Cargo compiles one reqwest for every package it
+/// builds together, so whether a default client sends it depends on which
+/// other packages are in the build. The tests ask the transport instead of
+/// assuming either answer.
+async fn automatic_accept_encoding(transport: &rig_reqwest::ReqwestClient) -> Option<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+    let addr = listener.local_addr().expect("an address");
+    let server = tokio::spawn(serve_bare(listener));
+    transport
+        .inner()
+        .expect("reqwest built the client")
+        .get(format!("http://{addr}/"))
+        .send()
+        .await
+        .expect("the bare request is answered");
+    let received = server.await.expect("the bare server finishes");
+    let values: Vec<&str> = received
+        .headers
+        .iter()
+        .filter(|(name, _)| name == "accept-encoding")
+        .map(|(_, value)| value.as_str())
+        .collect();
+    match values.as_slice() {
+        [] => None,
+        [value] => Some((*value).to_owned()),
+        repeated => panic!("the transport repeated `accept-encoding`: {repeated:?}"),
+    }
+}
+
+/// A reqwest transport that asks for no compressed response in any build:
+/// the four switches exist whether or not the features they turn off do.
+fn transport_without_compression() -> rig_reqwest::ReqwestClient {
+    rig_reqwest::reqwest::Client::builder()
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
+        .build()
+        .expect("reqwest builds its client")
+        .into()
+}
+
+/// The headers the protocol and the caller put on the call request and on
+/// the control handshake, in the order the Codex client sends them.
+const EXPECTED_CALL_HEADERS: [(&str, &str); 10] = [
+    ("authorization", "Bearer test-token"),
+    ("chatgpt-account-id", "acct-123"),
+    ("openai-alpha", "quicksilver=v2"),
+    ("originator", "codex_cli_rs"),
+    (
+        "user-agent",
+        "codex_cli_rs/0.155.1 (NixOS 26.05; x86_64) unknown",
+    ),
+    ("version", "0.155.1"),
+    ("session-id", "session-1"),
+    ("thread-id", "thread-1"),
+    ("x-session-id", "session-1"),
+    ("x-codex-turn-metadata", r#"{"thread_source":"user"}"#),
+];
+
+/// The headers reqwest and the request's JSON body add to every call
+/// request, beside [`EXPECTED_CALL_HEADERS`].
+const TRANSPORT_CALL_HEADERS: [&str; 4] = ["content-type", "content-length", "host", "accept"];
+
+/// The calls of the test's caller against the HTTP server at `http_addr`,
+/// with the control socket at `control_base_url`.
+fn live_calls(
+    http_addr: std::net::SocketAddr,
+    control_base_url: String,
+    transport: rig_reqwest::ReqwestClient,
+) -> realtime::LiveCalls {
     let identity = CallerIdentity::new(
         "codex_cli_rs",
         "codex_cli_rs/0.155.1 (NixOS 26.05; x86_64) unknown",
@@ -171,9 +262,9 @@ async fn a_call_runs_end_to_end_against_local_servers() {
     let provider = OpenAIConfig::with_key(&chatgpt::DIALECT, "test-token")
         .with_base_url(format!("http://{http_addr}/backend-api/codex"))
         .with_account_id("acct-123")
-        .connect(rig_reqwest::ReqwestClient::default());
+        .connect(transport);
     let conversation = CodexIdentity::from_ids("session-1", "thread-1").expect("ids");
-    let calls = realtime::LiveCalls::new(provider, conversation)
+    realtime::LiveCalls::new(provider, conversation)
         .expect("the Codex backend")
         .with_caller_identity(identity)
         .with_request_headers(
@@ -182,19 +273,110 @@ async fn a_call_runs_end_to_end_against_local_servers() {
                 .expect("a valid header"),
         )
         .expect("not a Live header")
-        .with_control_base_url(format!("ws://{ws_addr}/v1/live"));
+        .with_control_base_url(control_base_url)
+}
 
-    let peer = LivePeer::builder()
+/// A peer offering over loopback.
+async fn offering_peer() -> LivePeer {
+    LivePeer::builder()
         .with_udp_addrs(vec!["127.0.0.1:0".to_owned()])
         .with_tcp_addrs(Vec::new())
         .with_loopback_candidates(true)
         .build()
         .await
-        .expect("the peer builds");
+        .expect("the peer builds")
+}
+
+/// What the call server received is the call request: the method, target
+/// and every header the protocol, the caller and the JSON body own, by
+/// value.
+fn assert_call_request(received: &Received, http_addr: std::net::SocketAddr) {
+    assert_eq!(received.method, "POST");
+    assert_eq!(
+        received.target,
+        "/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas"
+    );
+    for (name, value) in EXPECTED_CALL_HEADERS {
+        assert_eq!(received.single(name), value, "{name}");
+    }
+    assert_eq!(received.single("content-type"), "application/json");
+    assert_eq!(received.single("accept"), "*/*");
+    assert_eq!(received.single("host"), http_addr.to_string());
+}
+
+/// Over a transport that asks for no compression, the call request names
+/// exactly the protocol's, the caller's and the transport's fixed headers,
+/// in every build.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_over_a_transport_without_compression_names_a_fixed_set_of_headers() {
+    let transport = transport_without_compression();
+    assert_eq!(automatic_accept_encoding(&transport).await, None);
+
+    let http = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+    let http_addr = http.local_addr().expect("an address");
+    let call_server = tokio::spawn(serve_call(http));
+    let calls = live_calls(
+        http_addr,
+        "ws://127.0.0.1:9/v1/live".to_owned(),
+        transport.clone(),
+    );
+    let peer = offering_peer().await;
+    let offer = peer.offer().await.expect("an offer");
+    calls
+        .create_call(
+            &transport,
+            &offer,
+            &realtime::SessionConfig::new("Answer briefly."),
+        )
+        .await
+        .expect("the call is created");
+    let (received, answering) = call_server.await.expect("the call server finishes");
+
+    assert_call_request(&received, http_addr);
+    let call_names: BTreeSet<&str> = EXPECTED_CALL_HEADERS
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(TRANSPORT_CALL_HEADERS)
+        .collect();
+    assert_eq!(received.names(), call_names);
+    assert_eq!(
+        received.headers.len(),
+        call_names.len(),
+        "a repeated header"
+    );
+
+    peer.close().await.expect("the peer closes");
+    answering
+        .connection
+        .close()
+        .await
+        .expect("the answerer closes");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_runs_end_to_end_against_local_servers() {
+    let http = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+    let ws = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+    let http_addr = http.local_addr().expect("an address");
+    let ws_addr = ws.local_addr().expect("an address");
+    let call_server = tokio::spawn(serve_call(http));
+    let control_server = tokio::spawn(serve_control(ws));
+
+    // The client a caller gets by default. Whether it adds
+    // `accept-encoding` is the build's, so the transport is asked first.
+    let transport = rig_reqwest::ReqwestClient::default();
+    let automatic = automatic_accept_encoding(&transport).await;
+    let calls = live_calls(
+        http_addr,
+        format!("ws://{ws_addr}/v1/live"),
+        transport.clone(),
+    );
+
+    let peer = offering_peer().await;
     let offer = peer.offer().await.expect("an offer");
     let call = calls
         .create_call(
-            &rig_reqwest::ReqwestClient::default(),
+            &transport,
             &offer,
             &realtime::SessionConfig::new("Answer briefly."),
         )
@@ -204,38 +386,20 @@ async fn a_call_runs_end_to_end_against_local_servers() {
     let (received, answering) = call_server.await.expect("the call server finishes");
     assert_eq!(call.answer_sdp, answering.answer);
 
-    assert_eq!(received.method, "POST");
-    assert_eq!(
-        received.target,
-        "/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas"
-    );
-    let expected_call_headers = [
-        ("authorization", "Bearer test-token"),
-        ("chatgpt-account-id", "acct-123"),
-        ("openai-alpha", "quicksilver=v2"),
-        ("originator", "codex_cli_rs"),
-        (
-            "user-agent",
-            "codex_cli_rs/0.155.1 (NixOS 26.05; x86_64) unknown",
-        ),
-        ("version", "0.155.1"),
-        ("session-id", "session-1"),
-        ("thread-id", "thread-1"),
-        ("x-session-id", "session-1"),
-        ("x-codex-turn-metadata", r#"{"thread_source":"user"}"#),
-    ];
-    for (name, value) in expected_call_headers {
-        assert_eq!(received.single(name), value, "{name}");
-    }
-    assert_eq!(received.single("content-type"), "application/json");
-    assert_eq!(received.single("accept"), "*/*");
-    assert_eq!(received.single("host"), http_addr.to_string());
-    let call_names: BTreeSet<&str> = expected_call_headers
+    assert_call_request(&received, http_addr);
+    // Beside the fixed headers, exactly what the transport adds by itself:
+    // `accept-encoding` with the transport's own value when this build's
+    // reqwest negotiates compression, and no such header when it does not.
+    let call_names: BTreeSet<&str> = EXPECTED_CALL_HEADERS
         .iter()
         .map(|(name, _)| *name)
-        .chain(["content-type", "content-length", "host", "accept"])
+        .chain(TRANSPORT_CALL_HEADERS)
+        .chain(automatic.as_ref().map(|_| "accept-encoding"))
         .collect();
     assert_eq!(received.names(), call_names);
+    if let Some(automatic) = &automatic {
+        assert_eq!(received.single("accept-encoding"), automatic);
+    }
     assert_eq!(
         received.headers.len(),
         call_names.len(),
@@ -311,7 +475,7 @@ async fn a_call_runs_end_to_end_against_local_servers() {
 
     assert_eq!(handshake.method, "GET");
     assert_eq!(handshake.target, format!("/v1/live/{CALL_ID}"));
-    for (name, value) in expected_call_headers {
+    for (name, value) in EXPECTED_CALL_HEADERS {
         assert_eq!(handshake.single(name), value, "{name}");
     }
     assert_eq!(handshake.single("host"), ws_addr.to_string());
@@ -319,7 +483,7 @@ async fn a_call_runs_end_to_end_against_local_servers() {
     assert_eq!(handshake.single("upgrade"), "websocket");
     assert_eq!(handshake.single("sec-websocket-version"), "13");
     assert!(!handshake.single("sec-websocket-key").is_empty());
-    let handshake_names: BTreeSet<&str> = expected_call_headers
+    let handshake_names: BTreeSet<&str> = EXPECTED_CALL_HEADERS
         .iter()
         .map(|(name, _)| *name)
         .chain([

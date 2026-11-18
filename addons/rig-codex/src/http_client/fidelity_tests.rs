@@ -124,9 +124,14 @@ async fn the_codex_lane_sends_the_pinned_body() {
 }
 
 /// The conversation identity on the wire states the same cache key and
-/// metadata a caller would: the body is the same bytes either way.
+/// metadata a caller would: the same JSON value with `input` last in any
+/// build, and the same bytes in a build that sorts keys. A build that keeps
+/// insertion order has no one place a caller's own fields go, since it
+/// writes them where the caller stated them; there the wire writes the
+/// identity's two fields last before `input`, the cache key first, so they
+/// are part of the bytes a conversation's requests share.
 #[tokio::test]
-async fn an_identity_on_the_wire_writes_the_bytes_the_caller_would() {
+async fn an_identity_on_the_wire_states_what_the_caller_would() {
     let mut request = muninn_shaped_request();
     request.additional_params = Some(serde_json::json!({
         "reasoning": {"effort": "high"},
@@ -140,10 +145,25 @@ async fn an_identity_on_the_wire_writes_the_bytes_the_caller_would() {
         )
         .expect("a Codex wire");
     let body = sent(&identified, request).await;
-    assert_eq!(
-        body,
-        sent(&muninn_configured(), muninn_shaped_request()).await
-    );
+    let stated = sent(&muninn_configured(), muninn_shaped_request()).await;
+    assert_eq!(value(&body), value(&stated));
+    for body in [&body, &stated] {
+        assert!(
+            body.ends_with(&format!(r#""input":{}}}"#, raw_fields(body)["input"].get())),
+            "`input` is the last field: {body}"
+        );
+    }
+    if preserves_order() {
+        assert!(
+            body.ends_with(&format!(
+                r#","prompt_cache_key":"thread-7","client_metadata":{{"session_id":"session-7","thread_id":"thread-7"}},"input":{}}}"#,
+                raw_fields(&body)["input"].get()
+            )),
+            "the identity's fields are the last before `input`: {body}"
+        );
+    } else {
+        assert_eq!(body, stated);
+    }
 }
 
 /// Declared tools reach the HTTP body as the bytes of the JSON values the

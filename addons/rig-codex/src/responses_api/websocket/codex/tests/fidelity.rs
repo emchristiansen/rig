@@ -152,13 +152,15 @@ async fn every_send_path_keeps_declared_tools_under_strict_mode() {
     request.additional_params = Some(json!({ "tools": [namespace(), declared_function()] }));
     let frames = frames_of_every_send_path(plain_wire().with_strict_tools(), request).await;
 
+    // The members strict mode adds, in the order it adds them: a build that
+    // keeps insertion order sends them so.
     let mut strict_function = declared_function();
     strict_function["strict"] = json!(true);
     strict_function["parameters"] = json!({
         "type": "object",
         "properties": {"body": {"type": "string"}},
-        "required": ["body"],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "required": ["body"]
     });
     let expected = format!("[{},{}]", written(&namespace()), written(&strict_function));
     for frame in &frames {
@@ -212,9 +214,11 @@ async fn every_send_path_sends_a_custom_calls_answer_as_one_named_string() {
             },
         ]
     };
+    // The wire states the name after the members Rig wrote: a build that
+    // keeps insertion order sends them so.
     let answer = json!({
         "type": "custom_tool_call_output", "call_id": "call_c",
-        "name": "apply_patch", "output": "Done: {\"files\":1}"
+        "output": "Done: {\"files\":1}", "name": "apply_patch"
     });
 
     let frames =
