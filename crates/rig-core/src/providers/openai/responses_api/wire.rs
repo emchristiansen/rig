@@ -240,6 +240,22 @@ impl crate::completion::ReplayTarget for Responses {
         item.str("type") == Some("reasoning")
     }
 
+    /// On the Codex contract (the ChatGPT backend), a reasoning item that
+    /// ends its turn goes back as its item; on every other contract it does
+    /// not.
+    ///
+    /// This is a divergence of Eric's fork (`emchristiansen/rig`) from
+    /// upstream Rig, which never sends a reasoning item without the item it
+    /// preceded, so a turn that holds only reasoning, or ends in it, loses
+    /// that reasoning. The fork's consumer, Muninn's Conta, serves turns
+    /// that hold only reasoning and must replay them (its spec: "Reasoning
+    /// continuity is preserved"). That the ChatGPT backend's own client keeps
+    /// such items in the history it sends is a claim not tested here.
+    fn replays_when_last(&self, item: &Value) -> bool {
+        self.provider.dialect.quirks.responses.contract == ResponsesContract::Codex
+            && item.str("type") == Some("reasoning")
+    }
+
     /// Responses reads images in user input and in function outputs, never
     /// in assistant messages, and only on a model with vision input. Every
     /// documented model calls tools except `o1-mini` and `o1-preview`.
