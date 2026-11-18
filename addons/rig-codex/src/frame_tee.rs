@@ -28,8 +28,17 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// The frames a tee has kept, shared with the tee.
 ///
-/// Holds at most the tee's capacity: when another frame would exceed it, the
-/// oldest kept frame is dropped.
+/// Of frames read one at a time, a websocket's or a streamed HTTP reply's,
+/// it holds at most the tee's capacity: when another frame would exceed it,
+/// the oldest kept frame is dropped.
+///
+/// A reply delivered whole is the one exception. A unary HTTP body reaches
+/// Rig all at once, and nothing says which of its frames a later failure is
+/// about, so [`HttpFrameTee`](crate::http_client::HttpFrameTee) keeps every
+/// frame of the body, however many, and the store holds them until
+/// [`take`](Self::take) or the next frame kept, which brings it back within
+/// its capacity. The capacity therefore bounds the store for a caller that
+/// streams its replies, and does not for one that reads a reply whole.
 #[derive(Debug)]
 pub struct RetainedFrames<F> {
     capacity: NonZeroUsize,
@@ -46,7 +55,7 @@ impl<F> Clone for RetainedFrames<F> {
 }
 
 impl<F> RetainedFrames<F> {
-    /// An empty store of at most `capacity` frames.
+    /// An empty store whose capacity is `capacity` frames.
     pub(crate) fn new(capacity: NonZeroUsize) -> Self {
         Self {
             capacity,
@@ -54,7 +63,8 @@ impl<F> RetainedFrames<F> {
         }
     }
 
-    /// The most frames kept at once.
+    /// The most frames kept at once of those read one at a time. The frames
+    /// of a reply delivered whole are kept together beyond it; see the type.
     #[must_use]
     pub fn capacity(&self) -> NonZeroUsize {
         self.capacity
@@ -66,27 +76,30 @@ impl<F> RetainedFrames<F> {
         self.lock().drain(..).collect()
     }
 
-    /// Keep `batch`, the frames one chunk of a reply completed, as the most
-    /// recent. Older frames are dropped down to capacity; no frame of
-    /// `batch` is, so every frame handed on with a chunk is kept while that
-    /// chunk is being read.
-    pub(crate) fn keep_batch(&self, batch: impl IntoIterator<Item = F>) {
-        let batch: Vec<F> = batch.into_iter().collect();
-        let mut frames = self.lock();
-        let older = self.capacity.get().saturating_sub(batch.len());
-        while frames.len() > older {
-            frames.pop_front();
-        }
-        frames.extend(batch);
-    }
-
-    /// Keep `frame` as the most recent, dropping the oldest at capacity.
+    /// Keep `frame` as the most recent, dropping the oldest frames down to
+    /// capacity: one at capacity, and after a reply kept whole, all that it
+    /// held beyond it, with the room they took.
     pub(crate) fn keep(&self, frame: F) {
         let mut frames = self.lock();
-        if frames.len() >= self.capacity.get() {
-            frames.pop_front();
+        let room = self.capacity.get() - 1;
+        let excess = frames.len().saturating_sub(room);
+        frames.drain(..excess);
+        if excess > 1 {
+            frames.shrink_to(self.capacity.get());
         }
         frames.push_back(frame);
+    }
+
+    /// Keep `body`, every frame of a reply delivered whole, as the most
+    /// recent. Older frames are dropped down to capacity; no frame of `body`
+    /// is, whatever the capacity.
+    pub(crate) fn keep_whole(&self, body: impl IntoIterator<Item = F>) {
+        let body: Vec<F> = body.into_iter().collect();
+        let mut frames = self.lock();
+        let older = self.capacity.get().saturating_sub(body.len());
+        let excess = frames.len().saturating_sub(older);
+        frames.drain(..excess);
+        frames.extend(body);
     }
 
     /// The frame queue. A panic in another holder leaves the queue as that

@@ -350,8 +350,9 @@ async fn a_refused_reply_is_a_stream_failure_with_its_head_and_no_captured_strin
 }
 
 /// A frame of a modelled type that fails to decode is committed, exactly as
-/// supplied, before it fails the stream: the ledger's last string is the
-/// frame the failure is about.
+/// supplied, before it fails the stream. Here it is the reply's last frame,
+/// so it is the ledger's last string; the test below shows that is not so
+/// in general.
 #[tokio::test]
 async fn a_corrupt_frame_is_committed_before_it_fails_the_stream() {
     let malformed = crate::responses_api::corrupt_frame_fixtures::MALFORMED_KNOWN_FRAMES[0].frame;
@@ -373,6 +374,45 @@ async fn a_corrupt_frame_is_committed_before_it_fails_the_stream() {
         let last = view.committed_prefix.last().expect("the malformed frame");
         let corrupt = decode_frame(last).expect_err("the kept frame is the corrupt one");
         assert_eq!(corrupt.frame(), Some(malformed));
+    });
+}
+
+/// The ledger of a failed call holds the frame Rig's decoder refused, and
+/// does not end with it when other frames arrived in the same chunk: every
+/// event a chunk completes is committed, up to the first terminal, before
+/// Rig decodes any of them. So the last string does not name the failure,
+/// and a terminal event in the ledger of a failed call does not say the
+/// call succeeded; the stage does.
+#[tokio::test]
+async fn frames_that_follow_a_refused_frame_in_its_chunk_are_committed_too() {
+    let refused = "{nope}".to_owned();
+    let mut data = turn_data();
+    data.insert(1, refused.clone());
+    let transport = replying(sse(&data));
+    let (observation, writer) = Observation::prepare();
+    let mut stream = wire()
+        .raw_stream_observed(&transport, CompletionRequest::new("say hi"), writer)
+        .expect("the request encodes");
+
+    let items = drain(&mut stream).await;
+    let [Err(failure)] = items.as_slice() else {
+        panic!("the stream yields the failure alone, got {items:?}");
+    };
+    assert_eq!(failure.kind, ObservedFailureKind::Stream);
+    observation.inspect(|view| {
+        assert_eq!(view.stage, ObservationStage::NativeFailed);
+        assert_eq!(
+            view.committed_prefix,
+            data.as_slice(),
+            "the refused frame, and the frames after it through the terminal"
+        );
+        assert_eq!(view.committed_prefix.get(1), Some(&refused));
+        assert!(
+            view.committed_prefix
+                .last()
+                .is_some_and(|last| last.contains("response.completed")),
+            "the ledger ends with a terminal the decoder never reached"
+        );
     });
 }
 

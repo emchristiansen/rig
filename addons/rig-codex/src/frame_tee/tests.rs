@@ -23,6 +23,43 @@ fn the_most_recent_frames_are_kept_in_arrival_order_up_to_capacity() {
     assert_eq!(handle.snapshot(), [4]);
 }
 
+/// A reply kept whole is held beyond the capacity, every frame of it, with
+/// older frames dropped down to capacity; the next frame kept one at a time
+/// brings the store back within its capacity.
+#[test]
+fn a_reply_kept_whole_exceeds_the_capacity_until_the_next_frame_is_kept() {
+    let frames = RetainedFrames::<u32>::new(capacity(3));
+    frames.keep(1);
+    frames.keep(2);
+    frames.keep_whole([10]);
+    assert_eq!(
+        frames.snapshot(),
+        [1, 2, 10],
+        "a whole reply smaller than the capacity leaves older frames their room"
+    );
+    frames.keep_whole(100..10_100);
+    let held = frames.snapshot();
+    assert_eq!(
+        held.len(),
+        10_000,
+        "every frame of the reply, and no older one"
+    );
+    assert_eq!((held.first(), held.last()), (Some(&100), Some(&10_099)));
+    assert_eq!(frames.capacity(), capacity(3));
+
+    frames.keep(7);
+    assert_eq!(
+        frames.snapshot(),
+        [10_098, 10_099, 7],
+        "back within the capacity with the next frame"
+    );
+
+    let one = RetainedFrames::<u32>::new(capacity(1));
+    one.keep_whole(0..10_000);
+    one.keep(7);
+    assert_eq!(one.snapshot(), [7]);
+}
+
 /// Evidence is the frame's text when it is text, its bytes when it is not,
 /// and nothing for a websocket frame that carries no payload.
 #[test]
