@@ -153,6 +153,24 @@ async fn serve_control(listener: TcpListener) -> (Received, Vec<serde_json::Valu
     (handshake, client)
 }
 
+/// The reqwest transport, asking for no compressed response. A default
+/// client adds `accept-encoding` when reqwest was compiled with `gzip`,
+/// `brotli`, `deflate` or `zstd`, and Cargo compiles one reqwest for every
+/// package it builds together, so whether that header is sent would depend
+/// on which other packages are in the build. The switches exist whether or
+/// not the features do, so the request names the same headers in every
+/// build.
+fn transport() -> rig_reqwest::ReqwestClient {
+    rig_reqwest::reqwest::Client::builder()
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
+        .build()
+        .expect("reqwest builds its client")
+        .into()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_call_runs_end_to_end_against_local_servers() {
     let http = TcpListener::bind("127.0.0.1:0").await.expect("binds");
@@ -171,7 +189,7 @@ async fn a_call_runs_end_to_end_against_local_servers() {
     let provider = OpenAIConfig::with_key(&chatgpt::DIALECT, "test-token")
         .with_base_url(format!("http://{http_addr}/backend-api/codex"))
         .with_account_id("acct-123")
-        .connect(rig_reqwest::ReqwestClient::default());
+        .connect(transport());
     let conversation = CodexIdentity::from_ids("session-1", "thread-1").expect("ids");
     let calls = realtime::LiveCalls::new(provider, conversation)
         .expect("the Codex backend")
@@ -194,7 +212,7 @@ async fn a_call_runs_end_to_end_against_local_servers() {
     let offer = peer.offer().await.expect("an offer");
     let call = calls
         .create_call(
-            &rig_reqwest::ReqwestClient::default(),
+            &transport(),
             &offer,
             &realtime::SessionConfig::new("Answer briefly."),
         )
