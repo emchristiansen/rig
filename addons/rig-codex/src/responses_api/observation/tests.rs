@@ -406,6 +406,64 @@ async fn the_ledger_of_a_failed_call_ends_with_the_frame_the_decoder_refused() {
     });
 }
 
+/// A bounded ledger keeps a reply that fits whole, to the byte, and fails a
+/// call whose reply does not: the string that would pass the limit is not
+/// committed, the strings before it stay as they were, none is dropped or
+/// shortened, and the fault names the limit and holds the string that did
+/// not fit.
+#[tokio::test]
+async fn a_bounded_ledger_keeps_the_whole_reply_or_fails_the_call() {
+    let data = turn_data();
+    let whole: usize = data.iter().map(String::len).sum();
+    let bounded = |limit: usize| {
+        Observation::prepare_bounded(NonZeroUsize::new(limit).expect("a non-zero limit"))
+    };
+
+    let transport = replying(sse(&data));
+    let (observation, writer) = bounded(whole);
+    let mut stream = wire()
+        .raw_stream_observed(&transport, CompletionRequest::new("say hi"), writer)
+        .expect("the request encodes");
+    let items = drain(&mut stream).await;
+    assert!(items.iter().all(Result::is_ok), "the reply fits: {items:?}");
+    stream.finish().await.expect("the call succeeds");
+    observation.inspect(|view| {
+        assert_eq!(view.committed_prefix, data.as_slice());
+        assert!(view.capture_fault.is_none());
+    });
+
+    let transport = replying(sse(&data));
+    let (observation, writer) = bounded(whole - 1);
+    let mut stream = wire()
+        .raw_stream_observed(&transport, CompletionRequest::new("say hi"), writer)
+        .expect("the request encodes");
+    let items = drain(&mut stream).await;
+    let Some(Err(failure)) = items.last() else {
+        panic!("the stream ends in a failure, got {items:?}");
+    };
+    assert_eq!(failure.kind, ObservedFailureKind::CaptureOnly);
+    let (terminal, before) = data.split_last().expect("the terminal event");
+    let held: usize = before.iter().map(String::len).sum();
+    observation.inspect(|view| {
+        assert_eq!(view.stage, ObservationStage::NativeFailed);
+        assert_eq!(
+            view.committed_prefix, before,
+            "every string that fitted, whole"
+        );
+        let fault = view.capture_fault.expect("the limit is a capture fault");
+        assert!(
+            matches!(
+                fault.cause,
+                CaptureCause::LimitExceeded { limit, committed, offered }
+                    if limit == whole - 1 && committed == held && offered == terminal.len()
+            ),
+            "the fault states the limit: {:?}",
+            fault.cause
+        );
+        assert_eq!(fault.offending_string.as_ref(), Some(terminal));
+    });
+}
+
 /// The observed body hands the reply on with its bytes unchanged and in
 /// order, in pieces that each complete at most one event, and commits an
 /// event before its piece is handed on. It ends with the piece that
