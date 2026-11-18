@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 2992322369403042042,
+    "run_spec": 1238955108246867705,
     "handlers": [
       {
         "key": "golden/model:default",
@@ -19,11 +19,6 @@
     "hooks": [],
     "required": {
       "golden/model:default": "completion"
-    },
-    "bus": {
-      "command_capacity": 16,
-      "stream_capacity": 64,
-      "serial_per_handler": false
     }
   },
   "records": [
@@ -70,11 +65,12 @@
             }
           ],
           "usage": {},
-          "message_id": null,
-          "response_id": null,
+          "origin": {
+            "api": "mock.script",
+            "provider": "mock",
+            "model": "mock-model"
+          },
           "finish_reason": null,
-          "provider": "mock",
-          "model": null,
           "raw": {
             "choice": [
               {
@@ -83,7 +79,6 @@
               }
             ],
             "usage": {},
-            "message_id": null,
             "response_id": null,
             "provider_request_id": null,
             "finish_reason": null

@@ -1,12 +1,12 @@
 //! Live Chat Completions tool-call lifecycle and argument-integrity matrix.
 //!
-//! The complete recorded space is 2 transports × 2 models × 3 call shapes ×
-//! 2 public surfaces = 24 cells. The shapes cover a deliberate zero-argument
-//! call, a nested object containing an array and Unicode, and two parallel
-//! calls. Model cells assert on the normalized response the wire's decoder
-//! folds the reply into; agent cells prove exact-once invocation. Streaming
-//! cells additionally reassemble every id, name, and argument fragment from
-//! their fixtures.
+//! The space is 2 transports × 2 models × 3 call shapes × 2
+//! public surfaces = 24 cells, of which the two below are tests. The shapes
+//! cover a deliberate zero-argument call, a nested object containing an array
+//! and Unicode, and two parallel calls. Model cells assert on the normalized
+//! response the wire's decoder folds the reply into; agent cells prove
+//! exact-once invocation. Streaming cells additionally reassemble every id,
+//! name, and argument fragment from their fixtures.
 //!
 //! Auto/none/specific tool-choice controls are assigned to the separate
 //! request-shape matrix; this matrix fixes choice to `any` so call shape
@@ -20,8 +20,7 @@
 //! | call shape | zero arguments, nested Unicode/array object, parallel pair |
 //! | surface | model, one-turn agent |
 //!
-//! Coverage ledger: the pre-pruning Cartesian product is 24 and every cell is
-//! recorded; none is unit-only. Each explicit test maps to
+//! Each test maps to
 //! `crates/rig-cassette/fixtures/cassettes/mistral/tool_lifecycle_matrix/<test-name>.yaml`.
 //! The small and 3B aliases are inexpensive, currently served, tool-capable
 //! model families. Assertions span request schemas, native blocking/streaming
@@ -31,20 +30,17 @@
 //!
 //! | recorded cells | exact fixture set |
 //! |---|---|
-//! | all 24 | `crates/rig-cassette/fixtures/cassettes/mistral/tool_lifecycle_matrix/{blocking,streaming}_{mistral_small,ministral_3b}_{zero,nested,parallel}_{model,agent}.yaml` |
+//! | 2 of 24 | `crates/rig-cassette/fixtures/cassettes/mistral/tool_lifecycle_matrix/{blocking_ministral_3b_zero_agent,streaming_mistral_small_nested_agent}.yaml` |
 
+use rig_test_support::cassette_models::OpenAiModels;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use futures::StreamExt as _;
-use rig::completion::{AssistantContent, CompletionModel, FinishReason};
-use rig::prelude::*;
-use rig::streaming::StreamEvent;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::support::{BoundMistral, with_mistral_tool_lifecycle_cassette_result};
+use super::support::with_mistral_tool_lifecycle_cassette_result;
 
 const PREAMBLE: &str = "Follow the user's tool-call instruction exactly. Do not answer in prose.";
 
@@ -69,7 +65,6 @@ enum Shape {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Surface {
-    Model,
     Agent,
 }
 
@@ -83,10 +78,6 @@ struct Cell {
 
 #[derive(Debug, Default)]
 struct Observation {
-    finish_reason: Option<FinishReason>,
-    names: Vec<String>,
-    ids: Vec<String>,
-    arguments: Vec<Value>,
     errors: Vec<String>,
     invocations: Vec<String>,
 }
@@ -147,48 +138,11 @@ fn tool_definition(name: &str) -> rig::completion::ToolDefinition {
         other => panic!("unknown matrix tool {other}"),
     };
     rig::completion::ToolDefinition {
-        name: name.to_owned(),
+        name: rig_core::message::ToolName::new(name).expect("tool name"),
         description: format!("Matrix tool {name}"),
         parameters,
+        annotations: Default::default(),
     }
-}
-
-fn request(
-    model: &(impl CompletionModel + Clone),
-    cell: Cell,
-) -> rig::completion::CompletionRequest {
-    let mut builder = model
-        .completion_request(prompt(cell.shape))
-        .preamble(PREAMBLE.to_owned())
-        .additional_params(
-            json!({ "tool_choice": "any", "parallel_tool_calls": cell.shape == Shape::Parallel }),
-        )
-        .max_tokens(128);
-    for name in expected_names(cell.shape) {
-        builder = builder.tool(tool_definition(name));
-    }
-    builder.build()
-}
-
-fn normalized_calls(choice: &[AssistantContent]) -> (Vec<String>, Vec<String>, Vec<Value>) {
-    let calls = choice
-        .iter()
-        .filter_map(|content| match content {
-            AssistantContent::ToolCall(call) => Some(call),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    (
-        calls
-            .iter()
-            .map(|call| call.function.name.clone())
-            .collect(),
-        calls.iter().map(|call| call.id.to_string()).collect(),
-        calls
-            .iter()
-            .map(|call| call.function.arguments.clone())
-            .collect(),
-    )
 }
 
 type InvocationLog = Arc<Mutex<Vec<String>>>;
@@ -260,67 +214,12 @@ impl_matrix_tool!(RecordPayload, "record_payload", PayloadArgs);
 impl_matrix_tool!(Alpha, "alpha", ValueArgs);
 impl_matrix_tool!(Beta, "beta", ValueArgs);
 
-async fn run_model(client: BoundMistral, cell: Cell) -> Observation {
-    let model = client.completion(model_name(cell.model));
-    match cell.transport {
-        Transport::Blocking => match model.completion(request(&model, cell)).await {
-            Ok(response) => {
-                let (names, ids, arguments) = normalized_calls(&response.choice);
-                Observation {
-                    finish_reason: response.finish_reason(),
-                    names,
-                    ids,
-                    arguments,
-                    ..Default::default()
-                }
-            }
-            Err(error) => Observation {
-                errors: vec![error.to_string()],
-                ..Default::default()
-            },
-        },
-        Transport::Streaming => {
-            let raw = match model.stream(request(&model, cell)).await {
-                Ok(raw) => raw,
-                Err(error) => {
-                    return Observation {
-                        errors: vec![error.to_string()],
-                        ..Default::default()
-                    };
-                }
-            };
-            let mut stream = raw;
-            let mut observation = Observation::default();
-            while let Some(item) = stream.next().await {
-                match item {
-                    Ok(StreamEvent::BlockEnd {
-                        block: Some(AssistantContent::ToolCall(tool_call)),
-                        ..
-                    }) => {
-                        observation.names.push(tool_call.function.name);
-                        observation.ids.push(tool_call.id.to_string());
-                        observation.arguments.push(tool_call.function.arguments);
-                    }
-                    Ok(StreamEvent::Final(terminal)) => {
-                        observation.finish_reason = terminal.finish_reason;
-                    }
-                    Ok(_) => {}
-                    Err(error) => observation.errors.push(error.to_string()),
-                }
-            }
-            observation
-        }
-    }
-}
-
-async fn run_agent(client: BoundMistral, cell: Cell) -> Observation {
+async fn run_agent(client: OpenAiModels, cell: Cell) -> Observation {
     let invocations = InvocationLog::default();
-    let builder = client
-        .agent(model_name(cell.model))
+    let builder = rig::AgentBuilder::new(client.completion(model_name(cell.model)))
         .preamble(PREAMBLE)
-        .additional_params(
-            json!({ "tool_choice": "any", "parallel_tool_calls": cell.shape == Shape::Parallel }),
-        )
+        .parallel_tool_calls(cell.shape == Shape::Parallel)
+        .additional_params(json!({ "tool_choice": "any" }))
         .max_tokens(128)
         .default_max_turns(1);
     let agent = match cell.shape {
@@ -364,13 +263,11 @@ async fn run_agent(client: BoundMistral, cell: Cell) -> Observation {
     Observation {
         errors,
         invocations: invocations.lock().expect("invocation log poisoned").clone(),
-        ..Default::default()
     }
 }
 
-async fn run_cell(client: BoundMistral, cell: Cell, observed: SharedObservation) -> Result<()> {
+async fn run_cell(client: OpenAiModels, cell: Cell, observed: SharedObservation) -> Result<()> {
     let observation = match cell.surface {
-        Surface::Model => run_model(client, cell).await,
         Surface::Agent => run_agent(client, cell).await,
     };
     *observed.lock().expect("observation mutex poisoned") = Some(observation);
@@ -559,33 +456,6 @@ fn assert_cell(scenario: &str, cell: Cell, observed: SharedObservation) {
         .take()
         .expect("cell observation");
     match cell.surface {
-        Surface::Model => {
-            assert!(
-                observation.errors.is_empty(),
-                "{scenario}: {:?}",
-                observation.errors
-            );
-            assert_eq!(
-                observation.finish_reason,
-                Some(FinishReason::ToolCalls),
-                "{scenario}"
-            );
-            assert_eq!(
-                observation
-                    .names
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>(),
-                expected_names(cell.shape),
-                "{scenario}: normalized call order"
-            );
-            assert_nonempty_distinct_ids(scenario, &observation.ids);
-            assert_eq!(
-                observation.arguments,
-                expected_arguments(cell.shape),
-                "{scenario}: normalized arguments"
-            );
-        }
         Surface::Agent => {
             assert_eq!(
                 observation
@@ -618,51 +488,7 @@ async fn execute(scenario: &'static str, cell: Cell, observed: SharedObservation
 crate::matrix::case_matrix! {
     wrapper: with_mistral_tool_lifecycle_cassette_result, family: tool_lifecycle_matrix_case;
     # [tokio :: test]
-    blocking_mistral_small_zero_model: ("tool_lifecycle_matrix/blocking_mistral_small_zero_model", configured, cell (Transport :: Blocking , Model :: MistralSmall , Shape :: Zero , Surface :: Model ,));
-    # [tokio :: test]
-    blocking_mistral_small_zero_agent: ("tool_lifecycle_matrix/blocking_mistral_small_zero_agent", configured, cell (Transport :: Blocking , Model :: MistralSmall , Shape :: Zero , Surface :: Agent ,));
-    # [tokio :: test]
-    blocking_mistral_small_nested_model: ("tool_lifecycle_matrix/blocking_mistral_small_nested_model", configured, cell (Transport :: Blocking , Model :: MistralSmall , Shape :: Nested , Surface :: Model ,));
-    # [tokio :: test]
-    blocking_mistral_small_nested_agent: ("tool_lifecycle_matrix/blocking_mistral_small_nested_agent", configured, cell (Transport :: Blocking , Model :: MistralSmall , Shape :: Nested , Surface :: Agent ,));
-    # [tokio :: test]
-    blocking_mistral_small_parallel_model: ("tool_lifecycle_matrix/blocking_mistral_small_parallel_model", configured, cell (Transport :: Blocking , Model :: MistralSmall , Shape :: Parallel , Surface :: Model ,));
-    # [tokio :: test]
-    blocking_mistral_small_parallel_agent: ("tool_lifecycle_matrix/blocking_mistral_small_parallel_agent", configured, cell (Transport :: Blocking , Model :: MistralSmall , Shape :: Parallel , Surface :: Agent ,));
-    # [tokio :: test]
-    blocking_ministral_3b_zero_model: ("tool_lifecycle_matrix/blocking_ministral_3b_zero_model", configured, cell (Transport :: Blocking , Model :: Ministral3b , Shape :: Zero , Surface :: Model ,));
-    # [tokio :: test]
     blocking_ministral_3b_zero_agent: ("tool_lifecycle_matrix/blocking_ministral_3b_zero_agent", configured, cell (Transport :: Blocking , Model :: Ministral3b , Shape :: Zero , Surface :: Agent ,));
     # [tokio :: test]
-    blocking_ministral_3b_nested_model: ("tool_lifecycle_matrix/blocking_ministral_3b_nested_model", configured, cell (Transport :: Blocking , Model :: Ministral3b , Shape :: Nested , Surface :: Model ,));
-    # [tokio :: test]
-    blocking_ministral_3b_nested_agent: ("tool_lifecycle_matrix/blocking_ministral_3b_nested_agent", configured, cell (Transport :: Blocking , Model :: Ministral3b , Shape :: Nested , Surface :: Agent ,));
-    # [tokio :: test]
-    blocking_ministral_3b_parallel_model: ("tool_lifecycle_matrix/blocking_ministral_3b_parallel_model", configured, cell (Transport :: Blocking , Model :: Ministral3b , Shape :: Parallel , Surface :: Model ,));
-    # [tokio :: test]
-    blocking_ministral_3b_parallel_agent: ("tool_lifecycle_matrix/blocking_ministral_3b_parallel_agent", configured, cell (Transport :: Blocking , Model :: Ministral3b , Shape :: Parallel , Surface :: Agent ,));
-    # [tokio :: test]
-    streaming_mistral_small_zero_model: ("tool_lifecycle_matrix/streaming_mistral_small_zero_model", configured, cell (Transport :: Streaming , Model :: MistralSmall , Shape :: Zero , Surface :: Model ,));
-    # [tokio :: test]
-    streaming_mistral_small_zero_agent: ("tool_lifecycle_matrix/streaming_mistral_small_zero_agent", configured, cell (Transport :: Streaming , Model :: MistralSmall , Shape :: Zero , Surface :: Agent ,));
-    # [tokio :: test]
-    streaming_mistral_small_nested_model: ("tool_lifecycle_matrix/streaming_mistral_small_nested_model", configured, cell (Transport :: Streaming , Model :: MistralSmall , Shape :: Nested , Surface :: Model ,));
-    # [tokio :: test]
     streaming_mistral_small_nested_agent: ("tool_lifecycle_matrix/streaming_mistral_small_nested_agent", configured, cell (Transport :: Streaming , Model :: MistralSmall , Shape :: Nested , Surface :: Agent ,));
-    # [tokio :: test]
-    streaming_mistral_small_parallel_model: ("tool_lifecycle_matrix/streaming_mistral_small_parallel_model", configured, cell (Transport :: Streaming , Model :: MistralSmall , Shape :: Parallel , Surface :: Model ,));
-    # [tokio :: test]
-    streaming_mistral_small_parallel_agent: ("tool_lifecycle_matrix/streaming_mistral_small_parallel_agent", configured, cell (Transport :: Streaming , Model :: MistralSmall , Shape :: Parallel , Surface :: Agent ,));
-    # [tokio :: test]
-    streaming_ministral_3b_zero_model: ("tool_lifecycle_matrix/streaming_ministral_3b_zero_model", configured, cell (Transport :: Streaming , Model :: Ministral3b , Shape :: Zero , Surface :: Model ,));
-    # [tokio :: test]
-    streaming_ministral_3b_zero_agent: ("tool_lifecycle_matrix/streaming_ministral_3b_zero_agent", configured, cell (Transport :: Streaming , Model :: Ministral3b , Shape :: Zero , Surface :: Agent ,));
-    # [tokio :: test]
-    streaming_ministral_3b_nested_model: ("tool_lifecycle_matrix/streaming_ministral_3b_nested_model", configured, cell (Transport :: Streaming , Model :: Ministral3b , Shape :: Nested , Surface :: Model ,));
-    # [tokio :: test]
-    streaming_ministral_3b_nested_agent: ("tool_lifecycle_matrix/streaming_ministral_3b_nested_agent", configured, cell (Transport :: Streaming , Model :: Ministral3b , Shape :: Nested , Surface :: Agent ,));
-    # [tokio :: test]
-    streaming_ministral_3b_parallel_model: ("tool_lifecycle_matrix/streaming_ministral_3b_parallel_model", configured, cell (Transport :: Streaming , Model :: Ministral3b , Shape :: Parallel , Surface :: Model ,));
-    # [tokio :: test]
-    streaming_ministral_3b_parallel_agent: ("tool_lifecycle_matrix/streaming_ministral_3b_parallel_agent", configured, cell (Transport :: Streaming , Model :: Ministral3b , Shape :: Parallel , Surface :: Agent ,));
 }

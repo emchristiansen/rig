@@ -1,12 +1,12 @@
 //! Vector-store insertion and similarity-search interfaces.
-//! [`VectorStoreIndex`] implementations also implement [`PortableTool`] when their
+//! [`VectorStoreIndex`] implementations also implement [`Tool`] when their
 //! filter is deserializable and uses JSON values.
 //!
 //! ```
-//! use rig_core::vector_store::builder::InMemoryVectorStoreBuilder;
+//! use rig_core::vector_store::in_memory_store::InMemoryVectorStore;
 //!
-//! let store = InMemoryVectorStoreBuilder::<String>::new().build();
-//! # let _ = store;
+//! let store = InMemoryVectorStore::<String>::from_documents([]);
+//! assert!(store.is_empty());
 //! ```
 
 use http::StatusCode;
@@ -18,15 +18,33 @@ use crate::error::ProviderError;
 use crate::{
     Embed,
     embeddings::Embedding,
-    tool::PortableTool,
+    tool::{Tool, ToolContext},
     vector_store::request::{FilterError, SearchFilter},
     wasm_compat::{WasmCompatSend, WasmCompatSync},
 };
 
-pub mod builder;
 pub mod in_memory_store;
 pub mod lsh;
 pub mod request;
+
+/// How the in-memory vector store picks the documents a search scores.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IndexStrategy {
+    /// Scores every document: exact results.
+    #[default]
+    BruteForce,
+    /// Scores only the documents sharing an [`lsh::LSHIndex`] bucket with the
+    /// query, exactly. Faster on large stores, but a true neighbor in no
+    /// shared bucket is missed, so a search can return fewer or other results
+    /// than [`Self::BruteForce`].
+    LSH {
+        /// Hash tables; more find more true neighbors. `0` scores every
+        /// document, like [`Self::BruteForce`].
+        num_tables: usize,
+        /// Hyperplanes per table (at most 64); more make smaller buckets.
+        num_hyperplanes: usize,
+    },
+}
 
 /// Errors from vector store operations.
 #[derive(Debug, thiserror::Error)]
@@ -70,9 +88,14 @@ pub enum VectorStoreError {
     #[error("External call to API returned an error. Error code: {0} Message: {1}")]
     ExternalAPIError(StatusCode, String),
 
-    /// A vector search request builder received invalid input.
-    #[error("Error while building VectorSearchRequest: {0}")]
-    BuilderError(String),
+    /// The requested sample count exceeds what the backend can express.
+    #[error("Requested {requested} samples, but this vector store returns at most {max}")]
+    SamplesOutOfRange {
+        /// Sample count from the search request.
+        requested: u64,
+        /// Largest sample count the backend accepts.
+        max: u64,
+    },
 }
 
 impl VectorStoreError {
@@ -129,31 +152,42 @@ pub trait VectorStoreIndex: WasmCompatSend + WasmCompatSync {
     /// The filter type for this backend.
     type Filter: SearchFilter + WasmCompatSend + WasmCompatSync;
 
-    /// Returns the top N most similar documents as `(score, id, document)` tuples.
+    /// Returns the top N most similar documents, most similar first.
     fn top_n<T: DeserializeOwned + WasmCompatSend>(
         &self,
         req: VectorSearchRequest<Self::Filter>,
-    ) -> impl std::future::Future<Output = Result<Vec<(f64, String, T)>, VectorStoreError>>
+    ) -> impl std::future::Future<Output = Result<Vec<VectorSearchResult<T>>, VectorStoreError>>
     + WasmCompatSend;
 
-    /// Returns the top N most similar document IDs as `(score, id)` tuples.
+    /// Returns the top N most similar document IDs, most similar first.
     fn top_n_ids(
         &self,
         req: VectorSearchRequest<Self::Filter>,
-    ) -> impl std::future::Future<Output = Result<Vec<(f64, String)>, VectorStoreError>> + WasmCompatSend;
+    ) -> impl std::future::Future<Output = Result<Vec<VectorSearchIdResult>, VectorStoreError>>
+    + WasmCompatSend;
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct VectorStoreOutput {
-    /// Similarity score returned by the vector store.
+/// One document returned by [`VectorStoreIndex::top_n`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VectorSearchResult<T> {
+    /// Backend similarity score. Its scale and direction follow the backend's metric.
     pub score: f64,
-    /// Document ID returned by the vector store.
+    /// Backend document ID.
     pub id: String,
-    /// Serialized document payload.
-    pub document: Value,
+    /// The stored document, deserialized as `T`.
+    pub document: T,
 }
 
-impl<T, F> PortableTool for T
+/// One document ID returned by [`VectorStoreIndex::top_n_ids`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VectorSearchIdResult {
+    /// Backend similarity score. Its scale and direction follow the backend's metric.
+    pub score: f64,
+    /// Backend document ID.
+    pub id: String,
+}
+
+impl<T, F> Tool for T
 where
     F: SearchFilter<Value = serde_json::Value>
         + WasmCompatSend
@@ -164,7 +198,7 @@ where
     const NAME: &'static str = "search_vector_store";
     type Error = VectorStoreError;
     type Args = VectorSearchRequest<F>;
-    type Output = Vec<VectorStoreOutput>;
+    type Output = Vec<VectorSearchResult<Value>>;
 
     fn description(&self) -> String {
         "Retrieves the most relevant documents from a vector store based on a query.".to_string()
@@ -193,33 +227,13 @@ where
         })
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let results = self.top_n(args).await?;
-        Ok(results
-            .into_iter()
-            .map(|(score, id, document)| VectorStoreOutput {
-                score,
-                id,
-                document,
-            })
-            .collect())
+    async fn call(
+        &self,
+        _: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
+        self.top_n(args).await
     }
-}
-
-/// Candidate-selection strategy for the in-memory vector store.
-#[derive(Clone, Debug, Default)]
-pub enum IndexStrategy {
-    /// Checks all documents in the vector store to find the most relevant documents.
-    #[default]
-    BruteForce,
-
-    /// Uses LSH to find candidates then computes exact distances.
-    LSH {
-        /// Number of tables to use for LSH.
-        num_tables: usize,
-        /// Number of hyperplanes to use for LSH.
-        num_hyperplanes: usize,
-    },
 }
 
 #[cfg(test)]

@@ -1,3 +1,4 @@
+use super::ProviderResponseError;
 use http::StatusCode;
 
 /// The one funnel preserves a provider's status and body across every route:
@@ -262,11 +263,12 @@ fn attaching_headers_to_a_slotless_variant_is_a_no_op() {
     assert!(error.provider_response_headers().is_none());
     assert_eq!(error.to_string(), "ProviderError: rig diagnostic");
 
-    let error = crate::error::ProviderError::Http(crate::http_client::Error::StreamEnded)
+    let error = crate::error::ProviderError::Http(crate::http_client::Error::StreamEnded.into())
         .with_response_headers(Some(retry_after_headers()));
     assert!(matches!(
         error,
-        crate::error::ProviderError::Http(crate::http_client::Error::StreamEnded)
+        crate::error::ProviderError::Http(ref error)
+            if matches!(**error, crate::http_client::Error::StreamEnded)
     ));
     assert!(error.provider_response_headers().is_none());
 }
@@ -368,116 +370,326 @@ fn provider_response_error_round_trips_its_identity_and_not_its_headers() {
     assert!(serde_json::from_str::<ProviderResponseError>(bad).is_err());
 }
 
-/// The machine code a reply names is the transport's own when it gave one,
-/// else the body's: `error.code` as a string, else `error.status`, else
-/// `error.type`; a numeric `code` is the status again and is skipped; a
-/// prose envelope, a non-JSON body and an empty string name none.
+/// A provider error that arrives with no HTTP status (an error frame inside
+/// a stream, a gRPC reply) is still retried when the provider's own code
+/// says the condition is transient. Ported from #2524, with one deliberate
+/// change: a known code now outranks the `transient` hint.
 #[test]
-fn a_reply_names_its_machine_code_from_the_transport_then_the_body() {
-    use super::{ProviderResponseError, body_code};
-    assert_eq!(
-        body_code(
-            r#"{"error":{"code":"model_not_found","type":"invalid_request_error","message":"m"}}"#
-        )
-        .as_deref(),
-        Some("model_not_found"),
-        "the OpenAI shape: `error.code` first"
+fn a_body_borne_transient_code_is_retryable_without_a_status() {
+    let overloaded = ProviderResponseError::without_status(
+        r#"{"error":{"type":"overloaded_error","message":"Overloaded"}}"#,
     );
     assert_eq!(
-        body_code(r#"{"error":{"code":null,"type":"invalid_request_error","message":"m"}}"#)
-            .as_deref(),
-        Some("invalid_request_error"),
-        "a null code falls through to `error.type`"
+        overloaded.machine_code().as_deref(),
+        Some("overloaded_error")
     );
-    assert_eq!(
-        body_code(r#"{"error":{"code":404,"status":"NOT_FOUND","message":"m"}}"#).as_deref(),
-        Some("NOT_FOUND"),
-        "Google's shape: the number is the status, `error.status` is the code"
-    );
-    assert_eq!(
-        body_code(r#"{"type":"error","error":{"type":"authentication_error","message":"m"}}"#)
-            .as_deref(),
-        Some("authentication_error"),
-        "Anthropic's shape: `error.type`"
-    );
-    assert_eq!(
-        body_code(r#"{"error":"Specified model not found"}"#),
-        None,
-        "prose"
-    );
-    assert_eq!(
-        body_code(r#"{"error":{"code":"","message":"m"}}"#),
-        None,
-        "empty"
-    );
-    assert_eq!(body_code("not json"), None);
-    assert_eq!(body_code(""), None);
+    assert!(overloaded.is_retryable());
 
-    let bodied = ProviderResponseError::new(
-        StatusCode::NOT_FOUND,
-        r#"{"error":{"code":"model_not_found","message":"m"}}"#,
+    let throttled = ProviderResponseError::without_status(
+        r#"{"error":{"type":"rate_limit_error","message":"slow down"}}"#,
     );
-    assert_eq!(bodied.machine_code().as_deref(), Some("model_not_found"));
-    assert_eq!(bodied.code, None, "the field stays the transport's own");
-    let transport = bodied
-        .clone()
-        .with_code(Some("ResourceNotFoundException".into()));
-    assert_eq!(
-        transport.machine_code().as_deref(),
-        Some("ResourceNotFoundException"),
-        "the transport's code wins over the body's"
-    );
+    assert!(throttled.is_retryable());
 
-    // The report a completion failure becomes carries it.
-    let report =
-        crate::error::ErrorReport::from(&crate::error::ProviderError::ProviderResponse(bodied));
-    assert_eq!(report.code.as_deref(), Some("model_not_found"));
-    assert_eq!(report.http_status, Some(404));
-    let report = crate::error::ErrorReport::from(&crate::error::ProviderError::ProviderResponse(
-        ProviderResponseError::new(StatusCode::NOT_FOUND, r#"{"error":"prose"}"#),
-    ));
-    assert_eq!(report.code, None);
+    let grpc = ProviderResponseError::without_status(
+        r#"{"error":{"status":"UNAVAILABLE","message":"backend unavailable"}}"#,
+    );
+    assert!(grpc.is_retryable(), "the same condition, spelled by gRPC");
+
+    // A spent quota is not transient: the same call gets the same answer.
+    let quota = ProviderResponseError::without_status(
+        r#"{"error":{"type":"insufficient_quota","message":"billing"}}"#,
+    );
+    assert!(!quota.is_retryable());
+
+    // A code the table does not know decides nothing.
+    let unknown = ProviderResponseError::without_status(
+        r#"{"error":{"type":"invalid_request_error","message":"bad"}}"#,
+    );
+    assert!(!unknown.is_retryable());
+
+    // The provider's own code outranks a decoder's hint.
+    let hinted = ProviderResponseError::without_status(
+        r#"{"error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+    )
+    .with_transient(Some(false));
+    assert!(hinted.is_retryable());
+
+    // A refusal is never retried, whatever the code says.
+    let refusal = ProviderResponseError::without_status(
+        r#"{"error":{"type":"server_error","message":"blocked"}}"#,
+    )
+    .with_refusal(true);
+    assert!(!refusal.is_retryable());
 }
 
+/// Every place a provider puts its error, as [`ProviderResponseError::from_body`]
+/// reads it: (body, machine code, status, retryable).
 #[test]
-fn a_refusal_is_never_retryable_whatever_its_status_or_transport_verdict() {
-    use super::ProviderResponseError;
-    // The provider judged the content; the same call gets the same verdict,
-    // so a refusal beats a retryable status and a transient transport verdict.
-    let with_status =
-        ProviderResponseError::new(http::StatusCode::SERVICE_UNAVAILABLE, "blocked".to_owned())
-            .with_refusal(true);
-    assert!(!with_status.is_retryable());
-
-    let by_transport = ProviderResponseError::without_status("blocked".to_owned())
-        .with_transient(Some(true))
-        .with_refusal(true);
-    assert!(!by_transport.is_retryable());
-
-    let plain_block =
-        ProviderResponseError::without_status("blocked".to_owned()).with_refusal(true);
-    assert!(!plain_block.is_retryable());
+fn the_envelope_locator_reads_every_shape_once() {
+    let cases: &[(&str, Option<&str>, Option<u16>, bool)] = &[
+        // (a) Responses `response.failed`: the error nests in the response.
+        (
+            r#"{"type":"response.failed","response":{"error":{"code":"server_error","message":"x"}}}"#,
+            Some("server_error"),
+            None,
+            true,
+        ),
+        (
+            r#"{"type":"response.failed","response":{"error":{"code":"invalid_prompt","message":"x"}}}"#,
+            Some("invalid_prompt"),
+            None,
+            false,
+        ),
+        // (b) A top-level `error` object: Anthropic, Chat-compatible, Gemini.
+        (
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            Some("overloaded_error"),
+            None,
+            true,
+        ),
+        (
+            r#"{"error":{"code":"rate_limit_exceeded","type":"requests"}}"#,
+            Some("rate_limit_exceeded"),
+            None,
+            true,
+        ),
+        // A name says more than a number; the number is the status.
+        (
+            r#"{"error":{"code":503,"status":"UNAVAILABLE","message":"x"}}"#,
+            Some("UNAVAILABLE"),
+            Some(503),
+            true,
+        ),
+        (
+            r#"{"error":{"code":500,"status":"INTERNAL","message":"x"}}"#,
+            Some("INTERNAL"),
+            Some(500),
+            true,
+        ),
+        (r#"{"error":{"code":429}}"#, Some("429"), Some(429), true),
+        (r#"{"error":{"code":400}}"#, Some("400"), Some(400), false),
+        // A numeric string is a name the table does not know, not a status.
+        (r#"{"error":{"code":"503"}}"#, Some("503"), None, false),
+        // A number outside 400..=599 is neither a status nor a verdict.
+        (r#"{"error":{"code":14}}"#, Some("14"), None, false),
+        (r#"{"error":{"code":200}}"#, Some("200"), None, false),
+        // An `error` string is a message with no code.
+        (r#"{"error":"model failed to load"}"#, None, None, false),
+        // (c) The document is itself the error event: its code is `code`
+        // alone (`type` is the event tag), and it names no status.
+        (
+            r#"{"type":"error","code":"server_error","message":"x"}"#,
+            Some("server_error"),
+            None,
+            true,
+        ),
+        (
+            r#"{"type":"error","code":503,"message":"x"}"#,
+            Some("503"),
+            None,
+            true,
+        ),
+        (r#"{"type":"error","message":"x"}"#, None, None, false),
+        // No envelope at all.
+        (r#"{"error":null}"#, None, None, false),
+        (r#"{"error":{}}"#, None, None, false),
+        (r#"{"error":""}"#, None, None, false),
+        (
+            r#"{"type":"response.failed","response":{"error":null}}"#,
+            None,
+            None,
+            false,
+        ),
+        ("plain text", None, None, false),
+        ("", None, None, false),
+    ];
+    for (body, code, status, retryable) in cases {
+        let reply = ProviderResponseError::from_body(*body);
+        assert_eq!(reply.machine_code().as_deref(), *code, "{body}");
+        assert_eq!(reply.status.map(|s| s.as_u16()), *status, "{body}");
+        assert_eq!(reply.is_retryable(), *retryable, "{body}");
+        let report = crate::error::ProviderError::from_provider_body(*body).report();
+        assert_eq!(report.http_status, *status, "{body}");
+        assert_eq!(report.retryable, *retryable, "{body}");
+        assert_eq!(report.code.as_deref(), *code, "{body}");
+    }
 }
 
-/// An error envelope delivered under a 200 (Gemini's blocked prompt, a 2xx
-/// error body): the driver stamps the transport's real status so callers
-/// see it, but a success status is no retry verdict — the decoder's
-/// `transient` decides, exactly as it does with no status at all. A
-/// non-success status still classifies by the status table alone.
+/// The table: every transport's spelling of a transient condition retries,
+/// a spent quota and gRPC `INTERNAL` do not, and names match whatever their
+/// case.
 #[test]
-fn a_success_status_defers_to_the_transport_verdict() {
-    use super::ProviderResponseError;
-    let transient_under_200 = ProviderResponseError::without_status("blocked".to_owned())
-        .with_transient(Some(true))
-        .with_status(Some(http::StatusCode::OK));
-    assert!(transient_under_200.is_retryable());
+fn the_code_table_decides_known_codes_in_any_case() {
+    for (code, retryable) in [
+        ("UNAVAILABLE", true),
+        ("RESOURCE_EXHAUSTED", true),
+        ("DEADLINE_EXCEEDED", true),
+        ("ABORTED", true),
+        ("INTERNAL", false),
+        ("ThrottlingException", true),
+        ("ModelStreamErrorException", true),
+        ("ValidationException", false),
+        ("insufficient_quota", false),
+        ("Insufficient_Quota", false),
+        ("server_is_overloaded", true),
+        ("slow_down", true),
+    ] {
+        let reply = ProviderResponseError::without_status("opaque transport text")
+            .with_code(Some(code.to_owned()));
+        assert_eq!(reply.is_retryable(), retryable, "{code}");
+    }
+}
 
-    let silent_under_200 = ProviderResponseError::without_status("blocked".to_owned())
-        .with_status(Some(http::StatusCode::OK));
-    assert!(!silent_under_200.is_retryable());
+/// Precedence: refusal > non-success status > known code > `transient`.
+#[test]
+fn a_known_code_outranks_the_hint_and_a_status_outranks_the_code() {
+    let overloaded = r#"{"error":{"type":"overloaded_error"}}"#;
+    let quota = r#"{"error":{"type":"insufficient_quota"}}"#;
+    let unknown = r#"{"error":{"type":"mystery"}}"#;
+    // A decoder cannot stamp a verdict that contradicts the body.
+    assert!(
+        ProviderResponseError::without_status(overloaded)
+            .with_transient(Some(false))
+            .is_retryable()
+    );
+    assert!(
+        !ProviderResponseError::without_status(quota)
+            .with_transient(Some(true))
+            .is_retryable()
+    );
+    // An unknown code leaves the hint to decide.
+    assert!(
+        ProviderResponseError::without_status(unknown)
+            .with_transient(Some(true))
+            .is_retryable()
+    );
+    assert!(!ProviderResponseError::without_status(unknown).is_retryable());
+    // An explicit code is the code, even when the body names another.
+    assert!(
+        !ProviderResponseError::without_status(overloaded)
+            .with_code(Some("mystery".to_owned()))
+            .is_retryable()
+    );
+    // A non-success status decides before any code.
+    assert!(!ProviderResponseError::new(StatusCode::BAD_REQUEST, overloaded).is_retryable());
+    assert!(ProviderResponseError::new(StatusCode::SERVICE_UNAVAILABLE, quota).is_retryable());
+    // A 2xx envelope is classified by its code, as in band.
+    assert!(ProviderResponseError::new(StatusCode::OK, overloaded).is_retryable());
+    // A refusal beats everything.
+    assert!(
+        !ProviderResponseError::new(StatusCode::SERVICE_UNAVAILABLE, overloaded)
+            .with_refusal(true)
+            .is_retryable()
+    );
+}
 
-    let transient_under_400 = ProviderResponseError::without_status("bad".to_owned())
-        .with_transient(Some(true))
-        .with_status(Some(http::StatusCode::BAD_REQUEST));
-    assert!(!transient_under_400.is_retryable());
+/// A record read back re-derives its verdict from its body, so the wire
+/// needs no `transient` for an envelope with a known code.
+#[test]
+fn a_deserialized_record_re_derives_its_verdict_from_the_body() {
+    let reply = ProviderResponseError::from_body(r#"{"error":{"type":"overloaded_error"}}"#);
+    let Ok(wire) = serde_json::to_string(&reply) else {
+        panic!("the record serializes");
+    };
+    assert!(!wire.contains("transient"), "{wire}");
+    let Ok(back) = serde_json::from_str::<ProviderResponseError>(&wire) else {
+        panic!("the record reads back: {wire}");
+    };
+    assert!(back.is_retryable());
+    assert_eq!(back, reply);
+}
+
+/// The located error as JSON: nested errors under `error`, an error event
+/// as itself.
+#[test]
+fn the_envelope_json_is_the_located_error() {
+    use serde_json::json;
+    for (body, error) in [
+        (
+            r#"{"type":"response.failed","response":{"error":{"code":"x"}}}"#,
+            Some(json!({"error": {"code": "x"}})),
+        ),
+        (
+            r#"{"type":"error","error":{"type":"overloaded_error"}}"#,
+            Some(json!({"error": {"type": "overloaded_error"}})),
+        ),
+        (r#"{"error":"boom"}"#, Some(json!({"error": "boom"}))),
+        (
+            r#"{"type":"error","code":"x"}"#,
+            Some(json!({"type": "error", "code": "x"})),
+        ),
+        (r#"{"error":null}"#, None),
+        ("text", None),
+    ] {
+        let reply = ProviderResponseError::without_status(body);
+        assert_eq!(reply.envelope_json(), error, "{body}");
+    }
+}
+
+/// A body already known to be an error is classified even when a decoder
+/// hands over the inner error object, or a JSON array of documents, rather
+/// than the document: the verdict and code come from the bare object's own
+/// `code`, `status` or `type`, and an array from its first error. A bare
+/// object names no status, and the cassette's located-error JSON stays the
+/// strict envelope.
+#[test]
+fn a_bare_error_object_or_an_array_body_is_still_classified() {
+    let cases: &[(&str, Option<&str>, Option<u16>, bool)] = &[
+        (
+            r#"{"type":"overloaded_error","message":"x"}"#,
+            Some("overloaded_error"),
+            None,
+            true,
+        ),
+        (
+            r#"{"code":503,"status":"UNAVAILABLE","message":"x"}"#,
+            Some("UNAVAILABLE"),
+            None,
+            true,
+        ),
+        (r#"{"code":429,"message":"x"}"#, Some("429"), None, true),
+        (
+            r#"{"code":"insufficient_quota","message":"x"}"#,
+            Some("insufficient_quota"),
+            None,
+            false,
+        ),
+        (r#"[{"error":{"code":503}}]"#, Some("503"), Some(503), true),
+        (
+            r#"[{"candidates":[]},{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}]"#,
+            Some("RESOURCE_EXHAUSTED"),
+            Some(429),
+            true,
+        ),
+        // Without a message, or beside an `error`/`response` slot of its
+        // own, a document is not read as a bare error.
+        (r#"{"type":"overloaded_error"}"#, None, None, false),
+        (
+            r#"{"type":"response.failed","message":"x","response":{"error":null}}"#,
+            None,
+            None,
+            false,
+        ),
+        (
+            r#"{"type":"x","message":"x","error":null}"#,
+            None,
+            None,
+            false,
+        ),
+        ("[]", None, None, false),
+    ];
+    for (body, code, status, retryable) in cases {
+        let reply = ProviderResponseError::from_body(*body);
+        assert_eq!(reply.machine_code().as_deref(), *code, "{body}");
+        assert_eq!(reply.status.map(|s| s.as_u16()), *status, "{body}");
+        assert_eq!(reply.is_retryable(), *retryable, "{body}");
+    }
+    let bare = ProviderResponseError::from_body(r#"{"type":"overloaded_error","message":"x"}"#);
+    assert_eq!(bare.envelope_json(), None);
+    // The public hint on `ProviderError` is outranked the same way.
+    let hinted = crate::error::ProviderError::from_provider_body(
+        r#"{"type":"overloaded_error","message":"x"}"#,
+    )
+    .with_transient(Some(false));
+    assert!(hinted.report().retryable);
 }

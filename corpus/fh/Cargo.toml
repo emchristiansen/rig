@@ -1,0 +1,46 @@
+[package]
+name = "corpus-fh"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+description = "Plugin corpus: The plugins of the fresh held-out series (FH): one plugin per module, each written only against the harness's public API."
+
+[lints]
+workspace = true
+
+[features]
+default = ["tui"]
+tui = ["rig-basics/tui"]
+
+[dependencies]
+corpus-shared = { path = "../shared" }
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+async-channel = { workspace = true }
+bevy_ecs = { workspace = true }
+bevy_reflect = { workspace = true }
+bevy_tasks = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+glob = { workspace = true }
+ignore = { workspace = true }
+regex = { workspace = true }
+rig-basics = { path = "../../plugins/rig-basics", default-features = false }
+rig-core = { workspace = true }
+rig-harness = { path = "../../crates/rig-harness" }
+rig-memory = { path = "../../crates/rig-memory", default-features = false }
+rig-tools = { path = "../../crates/rig-tools" }
+rig-tui = { path = "../../plugins/rig-tui" }
+ring = { version = "0.17" }
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+similar = { workspace = true }
+toml = { version = "1" }
+
+[dev-dependencies]
+# The synthetic session format and its migration.
+rig-memory = { path = "../../crates/rig-memory", features = ["test-utils"] }
+rig-cassette = { workspace = true }
+rig-core = { workspace = true, features = ["test-utils"] }
+rig-defaults-test-support = { path = "../../test-support/rig-defaults-test-support" }
+rig-harness-test-support = { path = "../../test-support/rig-harness-test-support" }

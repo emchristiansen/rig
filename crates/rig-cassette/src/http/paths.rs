@@ -45,7 +45,6 @@ fn independent_downstream_graph_excludes_smithy_and_agent_runtimes() {
     for forbidden in [
         "rig",
         "rig-agent",
-        "rig-ecs",
         "aws-smithy-eventstream",
         "aws-smithy-types",
     ] {
@@ -70,6 +69,7 @@ fn write_fixture(root: &Path, scenario: &str, response: &str) {
             }],
             body: Some(r#"{"input":"hello"}"#.into()),
             body_encoding: BodyEncoding::Utf8,
+            withheld: None,
         },
         then: CassetteResponse {
             status: 200,
@@ -79,6 +79,7 @@ fn write_fixture(root: &Path, scenario: &str, response: &str) {
             }],
             body: Some(response.into()),
             body_encoding: BodyEncoding::Utf8,
+            withheld: None,
         },
     }];
     fs::write(path, serialize_cassette_interactions(&interactions)).expect("write fixture");
@@ -221,7 +222,7 @@ async fn both_constructors_replay_from_an_external_fixture_root() {
     for direct in [false, true] {
         let cassette = if direct {
             ProviderCassette::start_via(
-                Transport::Direct,
+                RecordVia::Direct,
                 &root,
                 "example",
                 "unary",

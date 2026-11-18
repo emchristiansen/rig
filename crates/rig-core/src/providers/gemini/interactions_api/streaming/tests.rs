@@ -1,376 +1,148 @@
 use super::*;
-use crate::streaming::Delta;
+use crate::message::{AssistantContent, Message};
+use crate::streaming::{Item, StreamEvent};
+use crate::test_utils::history::{assert_every_variant, assert_restated_agrees, decode};
+use crate::wire::Mode;
 use serde_json::json;
 
-/// The request every stream test below sends. The decoder is what they
-/// exercise, so the request only has to be well-formed.
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-fn interactions_request() -> crate::completion::CompletionRequest {
-    crate::completion::CompletionRequest {
-        model: None,
-        chat_history: vec![crate::message::Message::user("hello")],
-        documents: Vec::new(),
-        tools: Vec::new(),
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
+use super::super::{Interactions, create_request_body};
+
+fn wire() -> Interactions {
+    crate::providers::gemini::GeminiConfig::new("test-key").interactions("gemini-2.5-pro")
+}
+
+fn frame(value: serde_json::Value) -> WireFrame {
+    WireFrame::Text(value.to_string())
+}
+
+/// A whole interaction resource holding `steps`.
+fn whole(steps: Vec<serde_json::Value>) -> WireFrame {
+    frame(json!({"id": "int_1", "status": "completed", "steps": steps}))
+}
+
+fn start(index: usize, step: serde_json::Value) -> WireFrame {
+    frame(json!({"event_type": "step.start", "index": index, "step": step}))
+}
+
+fn delta(index: usize, delta: serde_json::Value) -> WireFrame {
+    frame(json!({"event_type": "step.delta", "index": index, "delta": delta}))
+}
+
+fn stop(index: usize) -> WireFrame {
+    frame(json!({"event_type": "step.stop", "index": index}))
+}
+
+fn completed() -> WireFrame {
+    frame(json!({
+        "event_type": "interaction.completed",
+        "interaction": {"id": "int_1", "status": "completed"},
+    }))
+}
+
+/// The steps the decoded turn of `response` encodes to for the same model,
+/// with the tools its calls name declared: what follows the user's prompt,
+/// without the results the request boundary adds for its calls.
+fn replayed(response: &crate::completion::CompletionResponse) -> Vec<serde_json::Value> {
+    let turn = response.message().expect("a turn");
+    let tools = match &turn {
+        Message::Assistant(turn) => turn
+            .tool_calls()
+            .map(|call| crate::completion::ToolDefinition {
+                name: call.function.name.clone(),
+                description: "A tool.".to_owned(),
+                parameters: json!({"type": "object", "properties": {}}),
+                annotations: Default::default(),
+            })
+            .map(Into::into)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let mut request =
+        crate::completion::CompletionRequest::from(vec![Message::user("hello"), turn]);
+    request.tools = tools;
+    let request = <Completion as crate::wire::Operation>::prepare(
+        request,
+        &crate::wire::Wire::describe(&wire()),
+    )
+    .expect("the request is valid");
+    let body = create_request_body(&wire(), &request, None).expect("the request builds");
+    let mut steps = body
+        .get("input")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    steps.remove(0);
+    steps.retain(|step| step["type"] != "function_result");
+    steps
+}
+
+/// How a model output content item decodes, by its `type`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContentKind {
+    Text,
+    /// An image block, or an opaque one when it states no data or URI.
+    Image,
+    /// Audio, video, a document, or a type rig does not know.
+    Other,
+}
+
+fn content_kind(content: &serde_json::Value) -> ContentKind {
+    match content.get("type").and_then(serde_json::Value::as_str) {
+        Some("text") => ContentKind::Text,
+        Some("image") => ContentKind::Image,
+        _ => ContentKind::Other,
     }
 }
 
+/// How the decoder classifies the frame `data`.
+fn classify_interactions_frame(data: &str) -> WireEvent<InteractionsEvent> {
+    InteractionsDecoder::default().classify(WireFrame::Text(data.to_owned()))
+}
+
 /// The Interactions wire bound to a transport answering with `frames` as
-/// one SSE body.
+/// one SSE body, driven through the full normalized path.
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-fn interactions_stream(
+async fn drive_frames(
     frames: &[&str],
-) -> crate::driver::Bound<
-    crate::providers::gemini::interactions_api::Interactions,
-    crate::test_utils::MockStreamingClient,
-> {
+) -> (
+    Vec<Result<Item<StreamEvent>, String>>,
+    Result<crate::completion::CompletionResponse, ProviderError>,
+) {
+    use futures::StreamExt;
+
     let sse_bytes = bytes::Bytes::from(
         frames
             .iter()
             .map(|event| format!("data: {event}\n\n"))
             .collect::<String>(),
     );
-    crate::driver::Bound::new(
-        crate::providers::gemini::Gemini::new("test-key").interactions("gemini-2.5-pro"),
-        crate::test_utils::MockStreamingClient { sse_bytes },
-    )
-}
-
-#[test]
-fn test_streaming_completion_response_has_model_version() {
-    let response = StreamingCompletionResponse {
-        usage: None,
-        interaction: None,
-        model_version: Some("gemini-2.5-pro-preview-05-06".to_string()),
-    };
-
-    assert_eq!(
-        response.model_version.as_deref(),
-        Some("gemini-2.5-pro-preview-05-06")
-    );
-
-    let json = serde_json::to_string(&response).unwrap();
-    let deserialized: StreamingCompletionResponse = serde_json::from_str(&json).unwrap();
-    assert_eq!(
-        deserialized.model_version.as_deref(),
-        Some("gemini-2.5-pro-preview-05-06")
-    );
-}
-
-#[test]
-fn test_content_delta_text_event() {
-    let event_json = json!({
-        "event_type": "step.delta",
-        "index": 0,
-        "delta": {
-            "type": "text",
-            "text": "Hello"
-        }
-    });
-
-    let event: InteractionSseEvent = serde_json::from_value(event_json).unwrap();
-    let InteractionSseEvent::StepDelta { delta, .. } = event else {
-        panic!("expected step delta");
-    };
-
-    let parts = delta_content(delta)
-        .and_then(|content| content_to_parts(content, &mut streaming::SyntheticIds::tool()))
-        .expect("parts should exist");
-    assert_eq!(parts.text.as_deref(), Some("Hello"));
-    assert!(parts.tool_events.is_empty());
-}
-
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-#[tokio::test]
-async fn truncated_stream_does_not_synthesize_a_terminal_record() {
-    use crate::streaming::StreamEvent;
-    use futures::StreamExt;
-
-    // Content deltas then EOF without `interaction.completed`: the
-    // truncated stream must deliver its content but never a synthesized
-    // terminal record.
-    let model = interactions_stream(&[
-        r#"{"event_type":"step.delta","index":0,"delta":{"type":"text","text":"hi"}}"#,
-    ]);
-    let mut stream = crate::completion::CompletionModel::stream(&model, interactions_request())
-        .await
+    let model =
+        crate::driver::Model::new(wire(), crate::test_utils::MockStreamingClient { sse_bytes });
+    let mut stream = model
+        .stream(crate::completion::CompletionRequest::new("hello"))
         .expect("stream should open");
-
-    let mut texts = Vec::new();
-    let mut saw_terminal = false;
-    while let Some(item) = stream.next().await {
-        match item.expect("stream item should be Ok") {
-            StreamEvent::BlockDelta {
-                delta: Delta::Text { text },
-                ..
-            } => texts.push(text),
-            StreamEvent::Final(_) => saw_terminal = true,
-            _ => {}
-        }
-    }
-
-    assert_eq!(texts, ["hi"]);
-    assert!(
-        !saw_terminal,
-        "EOF without interaction.completed must not synthesize a terminal record"
-    );
-    assert!(stream.response.is_none());
-}
-
-/// Drive Interactions SSE frames through the full normalized path and
-/// collect what the consumer sees, in order.
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-async fn drive_frames(
-    frames: &[&str],
-) -> (
-    Vec<Result<crate::streaming::StreamEvent, String>>,
-    crate::streaming::StreamingCompletionResponse,
-) {
-    use futures::StreamExt;
-
-    let model = interactions_stream(frames);
-    let mut stream = crate::completion::CompletionModel::stream(&model, interactions_request())
-        .await
-        .expect("stream should open");
-
     let mut items = Vec::new();
     while let Some(item) = stream.next().await {
         items.push(item.map_err(|error| error.to_string()));
     }
-    (items, stream)
+    (items, stream.finish().await)
 }
 
-/// A `model_output` step interleaving text and a function call in one
-/// step's `content`: every convertible item must surface, in wire
-/// order. `find_map` kept only the first — a `function_call` following
-/// text in the same step silently vanished.
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-#[tokio::test]
-async fn a_model_output_step_yields_every_convertible_item() {
-    use crate::message::AssistantContent;
-    use crate::streaming::StreamEvent;
-
-    let (items, _stream) = drive_frames(&[
-        r#"{"event_type":"step.start","index":0,"step":{"type":"model_output","content":[{"type":"text","text":"answer: "},{"type":"function_call","name":"add","arguments":{"x":1},"id":"fc_9"}]}}"#,
-        r#"{"event_type":"interaction.completed","interaction":{"id":"int_1","status":"completed"}}"#,
-    ])
-    .await;
-
-    let mut texts = Vec::new();
-    let mut calls = Vec::new();
-    for item in &items {
-        match item {
-            Ok(StreamEvent::BlockDelta {
-                delta: Delta::Text { text },
-                ..
-            }) => texts.push(text.clone()),
-            Ok(StreamEvent::BlockEnd {
-                block: Some(AssistantContent::ToolCall(tool_call)),
-                ..
-            }) => {
-                calls.push(tool_call.clone());
-            }
-            _ => {}
-        }
-    }
-    assert_eq!(texts, ["answer: "], "the text survives, got {items:?}");
-    assert_eq!(
-        calls.len(),
-        1,
-        "the function_call after text must also survive, got {items:?}"
-    );
-    let call = calls.first().expect("one call");
-    assert_eq!(call.function.name, "add");
-    assert_eq!(call.function.arguments, serde_json::json!({"x": 1}));
-}
-
-/// A `step.start` that announces non-empty arguments AND fragments the
-/// real payload across `arguments_delta` events: the deltas are the
-/// arguments. Concatenating the announce payload with the fragments
-/// yields `{..}{..}` — unparseable under the step's Error policy, so
-/// the call was lost outright.
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-#[tokio::test]
-async fn announce_arguments_never_concatenate_with_fragments() {
-    use crate::message::AssistantContent;
-    use crate::streaming::StreamEvent;
-
-    let (items, _stream) = drive_frames(&[
-        r#"{"event_type":"step.start","index":1,"step":{"arguments":{"x":1},"id":"fc_1","name":"add","type":"function_call"}}"#,
-        r#"{"delta":{"arguments":"{\"x\":1}","type":"arguments_delta"},"event_type":"step.delta","index":1}"#,
-        r#"{"event_type":"step.stop","index":1}"#,
-        r#"{"event_type":"interaction.completed","interaction":{"id":"int_1","status":"completed"}}"#,
-    ])
-    .await;
-
-    let tool_calls: Vec<_> = items
+fn texts_of(items: &[Result<Item<StreamEvent>, String>]) -> Vec<&str> {
+    items
         .iter()
         .filter_map(|item| match item {
-            Ok(StreamEvent::BlockEnd {
-                block: Some(AssistantContent::ToolCall(tool_call)),
-                ..
-            }) => Some(tool_call),
+            Ok(Item::Event(StreamEvent::Text { text, .. })) => Some(text.as_str()),
             _ => None,
         })
-        .collect();
-    assert_eq!(
-        tool_calls.len(),
-        1,
-        "the announced-then-fragmented call must survive, got {items:?}"
-    );
-    assert_eq!(
-        tool_calls.first().expect("one call").function.arguments,
-        serde_json::json!({"x": 1}),
-        "streamed fragments are the arguments; the announce payload is not prepended"
-    );
-}
-
-/// A partial announce with NO fragments: the announce payload is the
-/// only arguments the wire sent, so it finalizes the call
-/// (replace-if-no-deltas).
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-#[tokio::test]
-async fn announce_arguments_finalize_a_call_with_no_fragments() {
-    use crate::message::AssistantContent;
-    use crate::streaming::StreamEvent;
-
-    let (items, _stream) = drive_frames(&[
-        r#"{"event_type":"step.start","index":1,"step":{"arguments":{"x":7},"id":"fc_1","name":"add","type":"function_call"}}"#,
-        r#"{"event_type":"step.stop","index":1}"#,
-        r#"{"event_type":"interaction.completed","interaction":{"id":"int_1","status":"completed"}}"#,
-    ])
-    .await;
-
-    let tool_calls: Vec<_> = items
-        .iter()
-        .filter_map(|item| match item {
-            Ok(StreamEvent::BlockEnd {
-                block: Some(AssistantContent::ToolCall(tool_call)),
-                ..
-            }) => Some(tool_call),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(tool_calls.len(), 1, "got {items:?}");
-    assert_eq!(
-        tool_calls.first().expect("one call").function.arguments,
-        serde_json::json!({"x": 7})
-    );
-}
-
-/// Interactions is a single-identifier wire: its `fc_…` id must land
-/// in `provider.call_id` with `item_id` empty. Filling both slots
-/// fabricated a Responses-shaped dual identity whose fake item id
-/// passed the foreign-id guard on cross-provider replay.
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-#[tokio::test]
-async fn a_streamed_call_carries_a_single_wire_identity() {
-    use crate::message::AssistantContent;
-    use crate::streaming::StreamEvent;
-
-    let (items, _stream) = drive_frames(&[
-        r#"{"event_type":"step.start","index":1,"step":{"arguments":{},"id":"fc_1","name":"add","type":"function_call"}}"#,
-        r#"{"delta":{"arguments":"{\"x\":1}","type":"arguments_delta"},"event_type":"step.delta","index":1}"#,
-        r#"{"event_type":"step.stop","index":1}"#,
-        r#"{"event_type":"interaction.completed","interaction":{"id":"int_1","status":"completed"}}"#,
-    ])
-    .await;
-
-    let tool_calls: Vec<_> = items
-        .iter()
-        .filter_map(|item| match item {
-            Ok(StreamEvent::BlockEnd {
-                block: Some(AssistantContent::ToolCall(tool_call)),
-                ..
-            }) => Some(tool_call),
-            _ => None,
-        })
-        .collect();
-    let provider = tool_calls
-        .first()
-        .expect("one call")
-        .provider
-        .as_ref()
-        .expect("the wire issued an id");
-    assert_eq!(provider.call_id, "fc_1");
-    assert_eq!(
-        provider.item_id, None,
-        "a single-identifier wire must not fabricate a dual identity"
-    );
-}
-
-/// A `step.stop` that never arrives must not lose the call: the wire
-/// announced it (`step.start`), streamed its full arguments
-/// (`arguments_delta`), and proved the turn finished
-/// (`interaction.completed`). Before this fix the assembly stayed open,
-/// `finish` never ran (terminal return), and the accumulator's
-/// end-of-stream clear dropped the whole call — the agent then treated
-/// a tool-calling turn as plain text.
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-#[tokio::test]
-async fn a_missing_step_stop_does_not_lose_the_announced_call() {
-    use crate::message::AssistantContent;
-    use crate::streaming::StreamEvent;
-
-    let (items, stream) = drive_frames(&[
-        r#"{"event_type":"step.start","index":1,"step":{"arguments":{},"id":"fc_1","name":"get_weather","type":"function_call"}}"#,
-        r#"{"delta":{"arguments":"{\"city\":\"Paris\"}","type":"arguments_delta"},"event_type":"step.delta","index":1}"#,
-        r#"{"event_type":"interaction.completed","interaction":{"id":"int_1","status":"completed"}}"#,
-    ])
-    .await;
-
-    let tool_calls: Vec<_> = items
-        .iter()
-        .filter_map(|item| match item {
-            Ok(StreamEvent::BlockEnd {
-                block: Some(AssistantContent::ToolCall(tool_call)),
-                ..
-            }) => Some(tool_call),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        tool_calls.len(),
-        1,
-        "the announced call must survive the missing step.stop, got {items:?}"
-    );
-    let tool_call = tool_calls.first().expect("one call");
-    assert_eq!(tool_call.function.name, "get_weather");
-    assert_eq!(
-        tool_call.function.arguments,
-        serde_json::json!({"city": "Paris"}),
-        "the streamed argument fragments finalize the call"
-    );
-    assert_eq!(tool_call.id.explicit(), Some("fc_1"));
-
-    // The turn completed normally: the terminal record survives too.
-    assert!(stream.response.is_some());
-    let aggregated_calls = stream
-        .snapshot()
-        .iter()
-        .filter(|content| matches!(content, crate::message::AssistantContent::ToolCall(_)))
-        .count();
-    assert_eq!(
-        aggregated_calls, 1,
-        "the call reaches the aggregated choice"
-    );
+        .collect()
 }
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 #[tokio::test]
 async fn provider_error_event_ends_the_stream_without_draining_later_frames() {
-    use crate::streaming::{Delta, StreamEvent};
-
-    // A provider `error` event, then more frames: well-formed content, an
-    // unknown frame, and a terminal `interaction.completed`. The error
-    // must be the LAST item — the driver stops reading (`is_finished`),
-    // so nothing after it is interpreted or passed through as `Unknown`.
-    let (items, stream) = drive_frames(&[
+    let (items, outcome) = drive_frames(&[
         r#"{"event_type":"step.delta","index":0,"delta":{"type":"text","text":"hi"}}"#,
         r#"{"event_type":"error","error":{"code":"internal","message":"boom"}}"#,
         r#"{"event_type":"step.delta","index":0,"delta":{"type":"text","text":"dead"}}"#,
@@ -378,156 +150,339 @@ async fn provider_error_event_ends_the_stream_without_draining_later_frames() {
         r#"{"event_type":"interaction.completed","interaction":{"id":"int_1","status":"completed"}}"#,
     ])
     .await;
-
     let error_position = items
         .iter()
-        .position(|item| item.is_err())
+        .position(Result::is_err)
         .expect("the provider error must reach the consumer");
-    assert_eq!(
-        error_position,
-        items.len() - 1,
-        "the in-band error must end the stream: no later text, Unknown passthrough, or terminal; got {items:?}"
-    );
-    assert!(
-        items.iter().any(|item| matches!(
-            item,
-            Ok(StreamEvent::BlockDelta { delta: Delta::Text { text }, .. }) if text == "hi"
-        )),
-        "content before the error must survive"
-    );
-    assert!(stream.response.is_none());
+    assert_eq!(error_position, items.len() - 1, "got {items:?}");
+    assert_eq!(texts_of(&items), ["hi"]);
+    assert!(outcome.is_err());
 }
 
+/// A stream yields a cursor naming its interaction after
+/// `interaction.created` and after each event the API marks with an
+/// `event_id`; a stream that resumes an interaction names it without that
+/// event, and joins the step that was open.
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 #[tokio::test]
-async fn thought_signature_completes_the_accumulated_reasoning_block() {
-    use crate::message::AssistantContent;
-    use crate::streaming::StreamEvent;
+async fn resume_points_yield_cursors() -> anyhow::Result<()> {
+    use futures::StreamExt;
 
-    // Text-then-signature: the signed block must restate the full
-    // accumulated thought text and carry the signature; the aggregated
-    // choice keeps it (superseding the deltas), alongside the later text.
-    let (items, stream) = drive_frames(&[
-        r#"{"event_type":"step.delta","index":0,"delta":{"type":"thought_summary","content":{"type":"text","text":"think1 "}}}"#,
-        r#"{"event_type":"step.delta","index":0,"delta":{"type":"thought_summary","content":{"type":"text","text":"think2"}}}"#,
-        r#"{"event_type":"step.delta","index":0,"delta":{"type":"thought_signature","signature":"sig-abc"}}"#,
-        r#"{"event_type":"step.delta","index":1,"delta":{"type":"text","text":"answer"}}"#,
+    let (items, outcome) = drive_frames(&[
+        r#"{"event_type":"interaction.created","interaction":{"id":"int_1","agent":"deep-research-preview-04-2026","status":"in_progress"}}"#,
+        r#"{"event_type":"step.start","index":0,"step":{"type":"model_output"}}"#,
+        r#"{"event_type":"step.delta","event_id":"e2","index":0,"delta":{"type":"text","text":"hi"}}"#,
+        r#"{"event_type":"step.stop","index":0}"#,
+        r#"{"event_type":"interaction.completed","interaction":{"id":"int_1","status":"completed"}}"#,
     ])
     .await;
-
-    let signed = items
+    let cursors: Vec<_> = items
         .iter()
-        .find_map(|item| match item {
-            Ok(StreamEvent::BlockEnd {
-                block: Some(AssistantContent::Reasoning(reasoning)),
-                ..
-            }) => Some(reasoning.clone()),
-            _ => None,
-        })
-        .expect("the signature must yield a completed Reasoning block");
-    assert_eq!(
-        signed.content,
-        vec![crate::completion::message::ReasoningContent::Text {
-            text: "think1 think2".to_string(),
-            signature: Some("sig-abc".to_string()),
-        }],
-        "the signed block must restate the accumulated text with the signature"
+        .filter_map(|item| item.as_ref().ok().and_then(StreamCursor::of))
+        .collect();
+    let cursor = |event_id: Option<&str>| StreamCursor {
+        interaction_id: Some("int_1".to_owned()),
+        event_id: event_id.map(str::to_owned),
+    };
+    anyhow::ensure!(cursors == [cursor(None), cursor(Some("e2"))], "{cursors:?}");
+    let other = Item::<StreamEvent>::Unknown(crate::streaming::UnknownPayload::new(
+        json!({"type": "other", "event_id": "e9"}),
+    ));
+    anyhow::ensure!(
+        StreamCursor::of(&other).is_none(),
+        "only a cursor reads as one"
     );
+    anyhow::ensure!(texts_of(&items) == ["hi"]);
+    anyhow::ensure!(outcome.is_ok(), "{outcome:?}");
 
-    // The aggregated choice keeps exactly one reasoning part carrying the
-    // signature — the signed restatement superseded the deltas.
-    let choice = stream.snapshot();
-    let aggregated: Vec<_> = choice
+    let resumed_frames = [
+        r#"{"event_type":"step.delta","event_id":"e5","index":1,"delta":{"type":"text","text":" again"}}"#,
+        r#"{"event_type":"step.stop","index":1}"#,
+        r#"{"event_type":"interaction.completed","interaction":{"id":"int_1","status":"completed"}}"#,
+    ];
+    let sse_bytes = bytes::Bytes::from(
+        resumed_frames
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect::<String>(),
+    );
+    let resumed = crate::driver::Model::new(
+        super::super::InteractionResume::new(
+            crate::providers::gemini::GeminiConfig::new("test-key"),
+            "int_1",
+        )
+        .after_event("e2"),
+        crate::test_utils::MockStreamingClient { sse_bytes },
+    );
+    let mut stream = resumed.stream(crate::completion::CompletionRequest::new("hello"))?;
+    let mut cursors = Vec::new();
+    while let Some(item) = stream.next().await {
+        cursors.extend(StreamCursor::of(&item?));
+    }
+    anyhow::ensure!(cursors == [cursor(Some("e5"))], "{cursors:?}");
+    let response = stream.finish().await?;
+    let text: String = response
+        .choice
         .iter()
         .filter_map(|content| match content {
-            crate::completion::AssistantContent::Reasoning(reasoning) => Some(reasoning),
+            AssistantContent::Text(text) => Some(text.text.as_str()),
             _ => None,
         })
         .collect();
-    assert_eq!(aggregated.len(), 1, "got {choice:?}");
-    assert_eq!(
-        aggregated.first().map(|r| r.content.clone()),
-        Some(signed.content)
-    );
+    anyhow::ensure!(text == " again", "the open step continues: {text:?}");
+    Ok(())
 }
 
+/// An in-band error carrying an HTTP status code gets the verdict the Gemini
+/// REST stream gives the same envelope: a 503 or 429 is retryable.
+///
+/// Not a cassette test: an overload or quota hit is a transient condition
+/// that cannot be recorded on demand, and the defect is the verdict the
+/// envelope gets, which a hand-written frame pins exactly.
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 #[tokio::test]
-async fn signature_only_thought_still_carries_the_signature() {
-    use crate::message::AssistantContent;
-    use crate::streaming::StreamEvent;
+async fn an_in_band_error_with_a_status_code_is_classified_like_the_rest_stream()
+-> anyhow::Result<()> {
+    use futures::StreamExt;
 
-    // Signature with no preceding thought-summary text: the signature is
-    // the provider's replay-validated payload and must still survive as a
-    // signed (empty-text) Reasoning block.
-    let (items, _stream) = drive_frames(&[
-        r#"{"event_type":"step.delta","index":0,"delta":{"type":"thought_signature","signature":"sig-only"}}"#,
-        r#"{"event_type":"step.delta","index":1,"delta":{"type":"text","text":"answer"}}"#,
-    ])
-    .await;
-
-    let signed = items
-        .iter()
-        .find_map(|item| match item {
-            Ok(StreamEvent::BlockEnd {
-                block: Some(AssistantContent::Reasoning(reasoning)),
-                ..
-            }) => Some(reasoning.clone()),
-            _ => None,
+    for code in [429_u16, 503] {
+        let frame = json!({
+            "event_type": "error",
+            "error": { "code": code, "message": "The model is overloaded.", "status": "UNAVAILABLE" }
         })
-        .expect("a signature-only block must still yield a signed Reasoning");
-    assert_eq!(
-        signed.content,
-        vec![crate::completion::message::ReasoningContent::Text {
-            text: String::new(),
-            signature: Some("sig-only".to_string()),
-        }]
+        .to_string();
+        let model = crate::driver::Model::new(
+            wire(),
+            crate::test_utils::MockStreamingClient {
+                sse_bytes: bytes::Bytes::from(format!("data: {frame}\n\n")),
+            },
+        );
+        let mut stream = model.stream(crate::completion::CompletionRequest::new("hello"))?;
+        let mut errors = Vec::new();
+        while let Some(item) = stream.next().await {
+            if let Err(error) = item {
+                errors.push(error);
+            }
+        }
+        anyhow::ensure!(errors.len() == 1, "one terminal failure: {errors:?}");
+        anyhow::ensure!(
+            errors[0].is_retryable(),
+            "code {code} must be retryable: {:?}",
+            errors[0]
+        );
+    }
+    Ok(())
+}
+
+/// A whole thought, a model output with annotated text, and a hosted
+/// search: the unary resource and its restatement as a stream fold into
+/// the same turn.
+#[test]
+fn a_whole_interaction_and_its_stream_agree() {
+    let thought = json!({"type": "thought", "signature": "sig", "summary": [{"type": "text", "text": "plan"}]});
+    let search = json!({"type": "google_search_call", "id": "call_1", "signature": "s", "arguments": {"queries": ["euro 2024"]}, "search_type": "web_search"});
+    let output = json!({"type": "model_output", "content": [{"type": "text", "text": "Spain won.", "annotations": [{"start_index": 0, "end_index": 5, "source": "https://example.com"}]}]});
+    assert_restated_agrees(
+        &wire(),
+        [whole(vec![thought, search.clone(), output])],
+        [
+            start(0, json!({"type": "thought"})),
+            delta(
+                0,
+                json!({"type": "thought_summary", "content": {"type": "text", "text": "plan"}}),
+            ),
+            delta(0, json!({"type": "thought_signature", "signature": "sig"})),
+            stop(0),
+            start(
+                1,
+                json!({"type": "google_search_call", "id": "call_1", "signature": ""}),
+            ),
+            delta(1, search),
+            stop(1),
+            start(2, json!({"type": "model_output"})),
+            delta(
+                2,
+                json!({"type": "text", "text": "Spain", "annotations": [{"start_index": 0, "end_index": 5, "source": "https://example.com"}]}),
+            ),
+            delta(2, json!({"type": "text", "text": " won."})),
+            stop(2),
+            completed(),
+        ],
     );
 }
 
+/// A thought `step.start` that already states its summary writes it, as a
+/// whole reply does.
 #[test]
-fn test_content_delta_function_call_event() {
-    let event_json = json!({
-        "event_type": "step.delta",
-        "index": 0,
-        "delta": {
-            "type": "function_call",
-            "name": "get_weather",
-            "arguments": {"location": "Paris"},
-            "id": "call-1"
+fn a_thought_start_with_its_summary_agrees_with_the_whole() {
+    let thought = json!({"type": "thought", "signature": "sig", "summary": [{"type": "text", "text": "plan"}]});
+    assert_restated_agrees(
+        &wire(),
+        [whole(vec![thought.clone()])],
+        [start(0, thought), stop(0), completed()],
+    );
+}
+
+/// Every model output content kind decodes to its block: text to text, an
+/// image with a source to an image, and audio, video, documents, a
+/// sourceless image and invented items to opaque blocks that replay.
+#[test]
+fn every_content_kind_decodes() {
+    #[deny(clippy::wildcard_enum_match_arm)]
+    fn variant_index(kind: ContentKind) -> usize {
+        match kind {
+            ContentKind::Text => 0,
+            ContentKind::Image => 1,
+            ContentKind::Other => 2,
         }
-    });
+    }
+    let samples = [
+        json!({"type": "text", "text": "hello"}),
+        json!({"type": "image", "uri": "https://example.com/a.png", "mime_type": "image/png"}),
+        json!({"type": "image", "mime_type": "image/png"}),
+        json!({"type": "audio", "data": "YQ==", "mime_type": "audio/wav"}),
+        json!({"type": "video", "uri": "https://example.com/a.mp4"}),
+        json!({"type": "document", "data": "YQ==", "mime_type": "application/pdf"}),
+        json!({"type": "x_rig_invented"}),
+    ];
+    assert_every_variant(&samples, |item| variant_index(content_kind(item)), 3);
+    for item in &samples {
+        let step = json!({"type": "model_output", "content": [item]});
+        let response =
+            decode(&wire(), Mode::Unary, [whole(vec![step.clone()])]).expect("the sample decodes");
+        let block = response.choice.first();
+        let expected = match (content_kind(item), item.get("uri").or(item.get("data"))) {
+            (ContentKind::Text, _) => matches!(block, Some(AssistantContent::Text(_))),
+            (ContentKind::Image, Some(_)) => matches!(block, Some(AssistantContent::Image(_))),
+            (ContentKind::Image, None) | (ContentKind::Other, _) => {
+                matches!(block, Some(AssistantContent::Opaque(opaque)) if opaque.replay && opaque.item == step)
+            }
+        };
+        assert!(expected, "{item} decoded to {block:?}");
+        assert_eq!(replayed(&response), [step]);
+    }
+}
 
-    let event: InteractionSseEvent = serde_json::from_value(event_json).unwrap();
-    let InteractionSseEvent::StepDelta { delta, .. } = event else {
-        panic!("expected step delta");
-    };
+/// A tagged frame is an event, never a whole interaction, even with a
+/// `status` key; a step event without its index fails the reply.
+#[test]
+fn a_tagged_frame_never_passes_for_a_whole_interaction() {
+    let event = classify_interactions_frame(r#"{"event_type":"step.stop","status":"completed"}"#);
+    assert!(matches!(event, WireEvent::Known(InteractionsEvent::Sse(_))));
+    let outcome = decode(
+        &wire(),
+        Mode::Streaming,
+        [frame(
+            json!({"event_type": "step.stop", "status": "completed"}),
+        )],
+    );
+    assert!(outcome.is_err(), "{outcome:?}");
+}
 
-    let parts = delta_content(delta)
-        .and_then(|content| content_to_parts(content, &mut streaming::SyntheticIds::tool()))
-        .expect("parts should exist");
-    assert_eq!(parts.text, None);
-    // A whole call is its start and its authoritative end.
-    let [
-        crate::streaming::StreamEvent::BlockStart {
-            id: start_id,
-            source_order: None,
-            kind: crate::streaming::BlockKind::ToolCall,
-        },
-        crate::streaming::StreamEvent::BlockEnd {
-            id: end_id,
-            end: crate::streaming::BlockClose::ToolCall(call),
-            block: None,
-        },
-    ] = parts.tool_events.as_slice()
-    else {
-        panic!("unexpected tool events: {:?}", parts.tool_events);
+/// A text item's annotations cite bytes of its text, past a multi-byte
+/// dash: a URL, a file page and a place. Annotations streamed after the
+/// text as `text_annotation_delta` join the text item, so the stream cites
+/// and replays what the whole interaction does. Other annotations cite
+/// nothing.
+#[test]
+fn annotations_cite_their_text_item_in_both_modes() {
+    let text = "Spain won 2\u{2013}1 in Berlin.";
+    let at = |part: &str| text.find(part).expect("the text holds it");
+    let span = |part: &str| json!({"start_index": at(part), "end_index": at(part) + part.len()});
+    let annotation = |part: &str, fields: serde_json::Value| {
+        let mut annotation = span(part);
+        if let (Some(annotation), serde_json::Value::Object(fields)) =
+            (annotation.as_object_mut(), fields)
+        {
+            annotation.extend(fields);
+        }
+        annotation
     };
-    assert_eq!(start_id, end_id);
-    assert_eq!(call.name.as_deref(), Some("get_weather"));
-    // Single-identifier wire: the id travels as `tool_id` only.
-    // Filling `call_id` too would take the dual-wire arm and
-    // fabricate an item id the wire never issued.
-    assert_eq!(call.tool_id.as_deref(), Some("call-1"));
-    assert_eq!(call.call_id, None);
+    let annotations = json!([
+        annotation(
+            "in Berlin.",
+            json!({"type": "url_citation", "url": "https://example.com", "title": "example.com"})
+        ),
+        annotation(
+            "Spain won",
+            json!({"type": "file_citation", "document_uri": "files/report", "file_name": "report.pdf", "page_number": 3})
+        ),
+        annotation(
+            "Berlin",
+            json!({"type": "place_citation", "place_id": "places/berlin", "name": "Berlin"})
+        ),
+        annotation("Spain", json!({"type": "word_info"})),
+    ]);
+    let output = json!({"type": "model_output", "content": [{"type": "text", "text": text, "annotations": annotations}]});
+    let streamed = [
+        start(0, json!({"type": "model_output"})),
+        delta(0, json!({"type": "text", "text": &text[..at("1 in")]})),
+        delta(0, json!({"type": "text", "text": &text[at("1 in")..]})),
+        delta(
+            0,
+            json!({"type": "text_annotation_delta", "annotations": annotations}),
+        ),
+        stop(0),
+        completed(),
+    ];
+    assert_restated_agrees(&wire(), [whole(vec![output.clone()])], streamed.clone());
+    let response = decode(&wire(), Mode::Streaming, streamed).expect("the stream decodes");
+    let [AssistantContent::Text(block)] = response.choice.as_slice() else {
+        panic!("one text block: {:?}", response.choice);
+    };
+    let cited: Vec<_> = block
+        .citations()
+        .iter()
+        .map(|citation| (block.cited(citation), citation.sources.clone()))
+        .collect();
+    let url = Source::new(SourceLocation::Url {
+        url: "https://example.com".to_owned(),
+    })
+    .title("example.com");
+    let file = Source::new(SourceLocation::Document {
+        index: None,
+        id: Some("files/report".to_owned()),
+        within: Some(DocumentRange::Pages(3..4)),
+    })
+    .title("report.pdf");
+    let place = Source::new(SourceLocation::Document {
+        index: None,
+        id: Some("places/berlin".to_owned()),
+        within: None,
+    })
+    .title("Berlin");
+    assert_eq!(
+        cited,
+        [
+            (Some("in Berlin."), vec![url]),
+            (Some("Spain won"), vec![file]),
+            (Some("Berlin"), vec![place]),
+        ]
+    );
+    assert_eq!(replayed(&response), [output]);
+}
+
+/// An arguments delta may carry the arguments as JSON rather than text, or
+/// none at all; the call reads them either way.
+#[test]
+fn a_call_reads_arguments_a_delta_sends_as_json_or_omits() {
+    let frames = [
+        start(
+            0,
+            json!({"type": "function_call", "id": "c1", "name": "add", "arguments": {}}),
+        ),
+        delta(0, json!({"type": "arguments_delta", "arguments": null})),
+        delta(
+            0,
+            json!({"type": "arguments_delta", "arguments": {"x": 17}}),
+        ),
+        stop(0),
+        completed(),
+    ];
+    let response = decode(&wire(), Mode::Streaming, frames).expect("the stream decodes");
+    let arguments: Vec<_> = response
+        .tool_calls()
+        .map(|call| serde_json::Value::Object(call.function.arguments.clone()))
+        .collect();
+    assert_eq!(arguments, [json!({"x": 17})]);
 }

@@ -8,10 +8,12 @@
         clippy::unwrap_used
     )
 )]
-//! The bundled native websocket backend and session constructors for Rig.
+//! The bundled native websocket backend for Rig: a
+//! [`rig_http::ws_client::WebSocketClientExt`] implementation over tokio-tungstenite. rig-core's `tungstenite` feature
+//! opens Responses WebSocket sessions over it with no backend named.
 //!
-//! Sockets use the current Tokio runtime or a lazy fallback runtime. Off-runtime
-//! callers communicate through channels without polling socket I/O themselves.
+//! The caller owns and polls every socket, in the current Tokio runtime's
+//! context or the lazy fallback's ([`rig_http::runtime`]), from any executor.
 //!
 //! ```
 //! let backend = rig_tungstenite::TungsteniteClient::new();
@@ -22,7 +24,7 @@
 #[cfg(target_family = "wasm")]
 compile_error!(
     "rig-tungstenite is a native websocket backend (tokio-tungstenite). On wasm, implement \
-     `rig_core::ws_client::WebSocketClientExt` over `web_sys::WebSocket` and open sessions with \
+     `rig_http::ws_client::WebSocketClientExt` over `web_sys::WebSocket` and open sessions with \
      `connect_with(..)`."
 );
 
@@ -31,31 +33,17 @@ pub use tokio_tungstenite;
 
 #[cfg(not(target_family = "wasm"))]
 mod connection;
-#[cfg(not(target_family = "wasm"))]
-mod runtime;
-#[cfg(not(target_family = "wasm"))]
-mod session;
 
 #[cfg(not(target_family = "wasm"))]
-pub use session::{DefaultWebSocketBuilder, DefaultWebSocketClient};
-
+use connection::Connection;
 #[cfg(not(target_family = "wasm"))]
-use connection::{DirectConnection, ForwardedConnection};
+use rig_http::http_client::{Error, NoBody, Request, Result};
 #[cfg(not(target_family = "wasm"))]
-use rig_core::http_client::{Error, NoBody, Request, Result};
-#[cfg(not(target_family = "wasm"))]
-use rig_core::ws_client::{BoxedWebSocketConnection, ConnectOptions, WebSocketClientExt};
+use rig_http::ws_client::{BoxedWebSocketConnection, ConnectOptions, WebSocketClientExt};
 #[cfg(not(target_family = "wasm"))]
 use std::time::Duration;
 #[cfg(not(target_family = "wasm"))]
 use tokio_tungstenite::tungstenite::{self, client::IntoClientRequest};
-
-/// Bring the default-backend traits into scope.
-#[cfg(not(target_family = "wasm"))]
-pub mod prelude {
-    pub use crate::session::{DefaultWebSocketBuilder, DefaultWebSocketClient};
-    pub use rig_core::providers::openai::responses_api::websocket::ResponsesWebSocketExt;
-}
 
 #[cfg(not(target_family = "wasm"))]
 /// A stateless websocket backend that takes handshake configuration from each
@@ -80,19 +68,9 @@ impl WebSocketClientExt for TungsteniteClient {
         options: ConnectOptions,
     ) -> Result<BoxedWebSocketConnection> {
         let request = client_request(request)?;
-
-        #[cfg(not(target_family = "wasm"))]
-        if !runtime::in_tokio() {
-            let timeout = options.timeout;
-            return runtime::run_off_runtime(async move {
-                let socket = handshake(request, timeout).await?;
-                ForwardedConnection::spawn(socket)
-            })
-            .await?;
-        }
-
-        let socket = handshake(request, options.timeout).await?;
-        Ok(Box::new(DirectConnection::new(socket)))
+        let socket =
+            rig_http::runtime::bind(Box::pin(handshake(request, options.timeout)))?.await?;
+        Ok(Box::new(Connection(socket)))
     }
 }
 
@@ -134,7 +112,7 @@ async fn handshake(
         return connect.await;
     };
 
-    match rig_core::wasm_compat::timeout(timeout, connect).await {
+    match rig_http::wasm_compat::timeout(timeout, connect).await {
         Ok(result) => result,
         Err(_) => Err(Error::instance(ConnectTimeout(timeout))),
     }

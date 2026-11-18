@@ -2,9 +2,10 @@
 name = "rig-reqwest"
 version.workspace = true
 edition = { workspace = true }
+rust-version = { workspace = true }
 license = "MIT"
 readme = "README.md"
-description = "The bundled reqwest HTTP transport for Rig, plus the default-transport conveniences the `rig` facade re-exports."
+description = "The bundled reqwest HTTP transport for Rig."
 repository = "https://github.com/0xPlaygrounds/rig"
 exclude = ["tests/middleware_features.rs", "tests/fixtures/middleware_features"]
 
@@ -16,7 +17,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 workspace = true
 
 [dependencies]
-rig-core = { path = "../rig-core", version = "0.42.0", default-features = false }
+rig-http = { path = "../rig-http", version = "0.46.0" }
 reqwest = { workspace = true, features = ["json", "stream", "multipart"] }
 reqwest-middleware = { workspace = true, optional = true, features = [
   "json",
@@ -31,13 +32,16 @@ thiserror = { workspace = true }
 url = { workspace = true }
 
 # The bundled transport needs a tokio reactor on native. When the caller has
-# none (Bevy task pools, smol, futures::executor), `runtime` lazily starts a
-# single-threaded fallback runtime and drives reqwest futures there.
+# none (Bevy task pools, smol, futures::executor), `rig_http::runtime` lazily
+# starts a fallback runtime and reqwest futures are polled in its context.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }
+rig-http = { path = "../rig-http", version = "0.46.0", features = ["tokio"] }
+# The roots the shared client trusts when the system has none (`rustls`),
+# and the warning that says so.
+tracing = { workspace = true, optional = true }
+webpki-root-certs = { workspace = true, optional = true }
 
 [dev-dependencies]
-rig-core = { path = "../rig-core", version = "0.42.0", default-features = false, features = ["test-utils"] }
 anyhow = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-test = { workspace = true }
@@ -63,11 +67,9 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 # forwards, so it stays.
 default = ["rustls"]
 socks = ["reqwest/socks"]
-# Provider-aware conveniences need the same feature surface as rig-core's
-# optional modalities.
-audio = ["rig-core/audio"]
-image = ["rig-core/image"]
 rustls = [
+  "dep:tracing",
+  "dep:webpki-root-certs",
   "reqwest/rustls",
   "reqwest/charset",
   "reqwest/http2",

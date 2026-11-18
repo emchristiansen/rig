@@ -3,11 +3,12 @@
 //! model-visible outputs retain their text, JSON, or multimodal representation.
 //!
 //! ```
-//! use rig_core::tool::{DynamicTool, ToolOutput};
+//! use rig_core::{message::ToolName, tool::{DynamicTool, ToolOutput}};
 //!
-//! let tool = DynamicTool::new_with_context("echo", "Echo JSON", serde_json::json!({}),
+//! let tool = DynamicTool::new_with_context(ToolName::new("echo")?, "Echo JSON", serde_json::json!({}),
 //!     |_context, args| Box::pin(async move { Ok(ToolOutput::json(args)) }));
 //! assert_eq!(tool.name(), "echo");
+//! # Ok::<(), rig_core::message::EmptyToolName>(())
 //! ```
 
 use std::{future::Future, sync::Arc};
@@ -15,15 +16,12 @@ use std::{future::Future, sync::Arc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    completion::ToolDefinition,
-    effect::{EffectKind, Outcome},
-    serve::{ErasedHandler, adapters::ToolCallback, adapters::ToolFn},
+    completion::{ToolAnnotations, ToolDefinition, message::ToolName},
+    serve::{ErasedHandler, adapters::ToolCallback},
     wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync},
 };
 
-use super::{
-    IntoToolOutput, PublishedContext, ToolContext, ToolExecutionError, ToolOutput, ToolResult,
-};
+use super::{IntoToolOutput, ToolContext, ToolExecutionError, ToolOutput, ToolResult, Touches};
 
 /// A typed LLM tool.
 ///
@@ -58,6 +56,23 @@ pub trait Tool: Sized + WasmCompatSend + WasmCompatSync {
     /// JSON Schema for arguments.
     fn parameters(&self) -> serde_json::Value;
 
+    /// What calling the tool does to the world, for the host's policies
+    /// (approval, plan mode, which calls run side by side). Nothing is
+    /// stated by default, which reads as the protocol's defaults
+    /// ([`ToolAnnotations`]).
+    fn annotations(&self) -> ToolAnnotations {
+        ToolAnnotations::default()
+    }
+
+    /// What a call with `args` may read and change, so a host runs the
+    /// calls of one reply that touch different things side by side. The
+    /// default reads it from the [annotations](Self::annotations): a
+    /// read-only tool reads anything, any other writes anything.
+    fn footprint(&self, args: &Self::Args) -> Touches {
+        let _ = args;
+        Touches::from_annotations(&self.annotations())
+    }
+
     /// Normalize a typed author-facing error for runtime policy and telemetry.
     ///
     /// The default preserves concrete sources for operators and exposes safe
@@ -73,36 +88,6 @@ pub trait Tool: Sized + WasmCompatSend + WasmCompatSync {
         context: &mut ToolContext,
         args: Self::Args,
     ) -> impl Future<Output = Result<Self::Output, Self::Error>> + WasmCompatSend;
-}
-
-impl<T> Tool for T
-where
-    T: super::PortableTool,
-{
-    const NAME: &'static str = <T as super::PortableTool>::NAME;
-    type Args = <T as super::PortableTool>::Args;
-    type Output = <T as super::PortableTool>::Output;
-    type Error = <T as super::PortableTool>::Error;
-
-    fn description(&self) -> String {
-        super::PortableTool::description(self)
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        super::PortableTool::parameters(self)
-    }
-
-    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
-        super::PortableTool::map_error(self, error)
-    }
-
-    async fn call(
-        &self,
-        _context: &mut ToolContext,
-        args: Self::Args,
-    ) -> Result<Self::Output, Self::Error> {
-        super::PortableTool::call(self, args).await
-    }
 }
 
 /// A tool that can be stored in a vector store and reconstructed for RAG.
@@ -122,28 +107,7 @@ pub trait ToolEmbedding: Tool {
     fn init(state: Self::State, context: Self::Context) -> Result<Self, Self::InitError>;
 }
 
-impl<T> ToolEmbedding for T
-where
-    T: super::PortableToolEmbedding,
-{
-    type InitError = <T as super::PortableToolEmbedding>::InitError;
-    type Context = <T as super::PortableToolEmbedding>::Context;
-    type State = <T as super::PortableToolEmbedding>::State;
-
-    fn embedding_docs(&self) -> Vec<String> {
-        super::PortableToolEmbedding::embedding_docs(self)
-    }
-
-    fn context(&self) -> Self::Context {
-        super::PortableToolEmbedding::context(self)
-    }
-
-    fn init(state: Self::State, context: Self::Context) -> Result<Self, Self::InitError> {
-        super::PortableToolEmbedding::init(state, context)
-    }
-}
-
-fn parse_tool_args<A>(args: &str) -> Result<A, ToolExecutionError>
+pub(crate) fn parse_tool_args<A>(args: &str) -> Result<A, ToolExecutionError>
 where
     A: serde::de::DeserializeOwned,
 {
@@ -160,86 +124,13 @@ where
     }
 }
 
-/// Parses JSON arguments and runs a contextual callback, returning parse,
-/// execution, or output-conversion failures as failed tool results.
-pub(crate) async fn execute_callback<F>(
-    callback: &F,
-    args: String,
-    context: &mut ToolContext,
-) -> ToolResult
-where
-    F: for<'a> Fn(
-        &'a mut ToolContext,
-        serde_json::Value,
-    ) -> WasmBoxedFuture<'a, Result<ToolOutput, ToolExecutionError>>,
-{
-    let args = match parse_tool_args::<serde_json::Value>(&args) {
-        Ok(args) => args,
-        Err(error) => return ToolResult::failed(error),
-    };
-    tool_result_from(callback(context, args).await)
-}
-
-fn tool_result_from<O>(outcome: Result<O, ToolExecutionError>) -> ToolResult
+pub(crate) fn tool_result_from<O>(outcome: Result<O, ToolExecutionError>) -> ToolResult
 where
     O: IntoToolOutput,
 {
     match outcome.and_then(IntoToolOutput::into_tool_output) {
         Ok(output) => ToolResult::success(output),
         Err(error) => ToolResult::failed(error),
-    }
-}
-
-/// The object-safe form of [`Tool`]: raw JSON arguments in, a
-/// [`ToolResult`] out. This is the impl-side contract the bus's
-/// `ToolAdapter` calls; nothing stores it behind a vtable.
-pub trait ErasedTool: WasmCompatSend + WasmCompatSync {
-    /// The tool's name.
-    fn name(&self) -> String;
-    /// The tool's description.
-    fn description(&self) -> String;
-    /// The JSON schema of the tool's arguments.
-    fn parameters(&self) -> serde_json::Value;
-    /// Run the tool on raw arguments, shaping the answer into a result.
-    fn execute<'a>(
-        &'a self,
-        args: String,
-        context: &'a mut ToolContext,
-    ) -> WasmBoxedFuture<'a, ToolResult>;
-}
-
-impl<T> ErasedTool for T
-where
-    T: Tool,
-{
-    fn name(&self) -> String {
-        T::NAME.to_string()
-    }
-
-    fn description(&self) -> String {
-        Tool::description(self)
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        Tool::parameters(self)
-    }
-
-    fn execute<'a>(
-        &'a self,
-        args: String,
-        context: &'a mut ToolContext,
-    ) -> WasmBoxedFuture<'a, ToolResult> {
-        Box::pin(async move {
-            let args = match parse_tool_args::<T::Args>(&args) {
-                Ok(args) => args,
-                Err(error) => return ToolResult::failed(error),
-            };
-            tool_result_from(
-                Tool::call(self, context, args)
-                    .await
-                    .map_err(|error| Tool::map_error(self, error)),
-            )
-        })
     }
 }
 
@@ -252,22 +143,21 @@ pub type LivenessFn = Arc<dyn Fn() -> bool + Send + Sync>;
 #[cfg(target_family = "wasm")]
 pub type LivenessFn = Arc<dyn Fn() -> bool>;
 
-/// A tool defined at runtime: a name, a schema and a callback. The callback
-/// is the handler ([`ToolFn`]); this struct is its definition plus the
-/// erased handler a registry stages until a bus takes it. The optional
-/// liveness probe supports registry retirement; inline execution does not
-/// consult it.
+/// A tool defined at runtime: its definition and a callback over JSON
+/// arguments. It is its own handler ([`Serve`](crate::serve::Serve)), keyed
+/// by its name. The optional liveness probe supports registry retirement;
+/// serving does not consult it.
 #[derive(Clone)]
 pub struct DynamicTool {
     definition: ToolDefinition,
-    handler: ErasedHandler,
+    callback: Arc<dyn ToolCallback>,
     liveness: Option<LivenessFn>,
 }
 
 impl DynamicTool {
     /// Define a tool from a context-free callback over owned arguments.
     pub fn new<F>(
-        name: impl Into<String>,
+        name: ToolName,
         description: impl Into<String>,
         parameters: serde_json::Value,
         callback: F,
@@ -290,7 +180,7 @@ impl DynamicTool {
 
     /// Define a tool from a callback over the dispatch-scoped context.
     pub fn new_with_context<F>(
-        name: impl Into<String>,
+        name: ToolName,
         description: impl Into<String>,
         parameters: serde_json::Value,
         callback: F,
@@ -298,23 +188,17 @@ impl DynamicTool {
     where
         F: ToolCallback + 'static,
     {
-        let name = name.into();
-        let description = description.into();
-        let handler = ErasedHandler::new(ToolFn::new(
-            name.clone(),
-            description.clone(),
-            parameters.clone(),
-            callback,
-        ));
         Self {
-            definition: ToolDefinition {
-                name,
-                description,
-                parameters,
-            },
-            handler,
+            definition: ToolDefinition::new(name, description, parameters),
+            callback: Arc::new(callback),
             liveness: None,
         }
+    }
+
+    /// The same tool, stating what calling it does to the world.
+    pub fn with_annotations(mut self, annotations: ToolAnnotations) -> Self {
+        self.definition.annotations = annotations;
+        self
     }
 
     /// Attach a liveness probe.
@@ -327,7 +211,7 @@ impl DynamicTool {
     }
 
     /// The tool's name.
-    pub fn name(&self) -> &str {
+    pub fn name(&self) -> &ToolName {
         &self.definition.name
     }
 
@@ -336,63 +220,118 @@ impl DynamicTool {
         self.definition.clone()
     }
 
-    /// The erased handler behind this definition.
-    pub fn handler(&self) -> &ErasedHandler {
-        &self.handler
+    /// Consumes the tool into its definition, its erased handler, and its
+    /// optional liveness probe.
+    pub fn into_parts(self) -> (ToolDefinition, ErasedHandler, Option<LivenessFn>) {
+        let Self {
+            definition,
+            callback,
+            liveness,
+        } = self;
+        let handler = ErasedHandler::new(Self {
+            definition: definition.clone(),
+            callback,
+            liveness: None,
+        });
+        (definition, handler, liveness)
     }
 
-    /// Consumes the tool into its definition, handler, and optional liveness probe.
-    pub fn into_parts(self) -> (ToolDefinition, ErasedHandler, Option<LivenessFn>) {
-        (self.definition, self.handler, self.liveness)
+    /// Runs the tool on JSON `args` with an empty [`ToolContext`], as
+    /// [`Self::run_with`] does.
+    ///
+    /// ```
+    /// use rig_core::{message::ToolName, tool::{DynamicTool, ToolExecutionError, ToolOutput}};
+    /// use serde_json::json;
+    ///
+    /// let add = DynamicTool::new(ToolName::new("add")?, "Adds a and b", json!({}), |args| {
+    ///     Box::pin(async move {
+    ///         let int = |key| args.get(key).and_then(serde_json::Value::as_i64);
+    ///         let sum = int("a").zip(int("b")).map(|(a, b)| a + b);
+    ///         sum.map(|sum| ToolOutput::json(json!(sum)))
+    ///             .ok_or_else(|| ToolExecutionError::invalid_args("a and b must be integers"))
+    ///     })
+    /// });
+    /// let output = futures::executor::block_on(add.run(json!({ "a": 2, "b": 3 })))?;
+    /// assert_eq!(output.as_json(), Some(&json!(5)));
+    /// assert!(futures::executor::block_on(add.run(json!({ "a": "two" }))).is_err());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub async fn run(&self, args: serde_json::Value) -> Result<ToolOutput, ToolExecutionError> {
+        self.run_with(&mut ToolContext::new(), args).await
+    }
+
+    /// Runs the tool on JSON `args` as a dispatch of its call runs it, and
+    /// returns its output or its error (invalid arguments included). The
+    /// tool sees `context`'s inbound values, and what it publishes with
+    /// `insert_result` lands in `context`. No registry or agent is involved.
+    ///
+    /// ```
+    /// use rig_core::{message::ToolName, tool::{ContextValue, DynamicTool, ToolContext, ToolOutput}};
+    /// use serde_json::json;
+    ///
+    /// #[derive(serde::Serialize, serde::Deserialize)]
+    /// struct User(String);
+    /// impl ContextValue for User { const KEY: &'static str = "user"; }
+    /// #[derive(serde::Serialize, serde::Deserialize)]
+    /// struct Greeted(bool);
+    /// impl ContextValue for Greeted { const KEY: &'static str = "greeted"; }
+    ///
+    /// let greet = DynamicTool::new_with_context(ToolName::new("greet")?, "Greets the user", json!({}),
+    ///     |context, _args| Box::pin(async move {
+    ///         let user = context.require::<User>()?;
+    ///         context.insert_result(Greeted(true))?;
+    ///         Ok(ToolOutput::text(format!("hello {}", user.0)))
+    ///     }));
+    /// let mut context = ToolContext::new();
+    /// context.insert(User("ada".into()))?;
+    /// let output = futures::executor::block_on(greet.run_with(&mut context, json!({})))?;
+    /// assert_eq!(output.as_text(), Some("hello ada"));
+    /// assert_eq!(context.result::<Greeted>()?.map(|greeted| greeted.0), Some(true));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub async fn run_with(
+        &self,
+        context: &mut ToolContext,
+        args: serde_json::Value,
+    ) -> Result<ToolOutput, ToolExecutionError> {
+        crate::serve::adapters::run_direct(context, args, async |context, args| {
+            (self.callback)(context, args).await
+        })
+        .await
     }
 
     /// Whether the tool's owner still serves it (`true` without a probe).
     pub fn is_live(&self) -> bool {
         self.liveness.as_ref().is_none_or(|probe| probe())
     }
+}
 
-    /// Run the tool inline with an empty context.
-    pub async fn execute(
-        &self,
-        arguments: serde_json::Value,
-    ) -> Result<ToolOutput, ToolExecutionError> {
-        let mut context = ToolContext::new();
-        self.execute_with(&mut context, arguments).await
+impl crate::serve::Serve for DynamicTool {
+    type Family = crate::effect::family::Tool;
+
+    fn descriptor(&self) -> crate::effect::HandlerDescriptor {
+        let ToolDefinition {
+            name,
+            description,
+            parameters,
+            ..
+        } = &self.definition;
+        crate::effect::HandlerDescriptor::tool(name, description, parameters.clone())
     }
 
-    /// Run the tool inline with isolated inbound values. A completed call
-    /// replaces only `context`'s result metadata, including when the tool
-    /// returns an error. Dropping the execution future leaves the caller's
-    /// context unchanged; it does not publish partial mutations.
-    pub async fn execute_with(
+    fn key(&self) -> crate::effect::HandlerKey {
+        crate::effect::tool_key(&self.definition.name)
+    }
+
+    async fn serve(
         &self,
-        context: &mut ToolContext,
-        arguments: serde_json::Value,
-    ) -> Result<ToolOutput, ToolExecutionError> {
-        let published = PublishedContext::new();
-        let outcome = crate::serve::serve_inline_with(
-            &self.handler,
-            EffectKind::ToolCall {
-                name: self.definition.name.clone(),
-                args: arguments.to_string(),
-            },
-            vec![
-                Arc::new(context.for_dispatch()),
-                published.clone() as Arc<dyn std::any::Any + Send + Sync>,
-            ],
-        )
-        .await;
-        match outcome {
-            Ok(Outcome::ToolResult { result }) => {
-                context.accept_dispatch_result(published.take().unwrap_or_default());
-                result.into_result()
-            }
-            Ok(other) => Err(ToolExecutionError::other(format!(
-                "tool handler answered with a {} outcome",
-                other.family()
-            ))),
-            Err(report) => Err(ToolExecutionError::other(report.message)),
-        }
+        kind: crate::effect::EffectKind,
+        dispatch: crate::serve::Dispatch,
+    ) -> crate::serve::Reply {
+        crate::serve::adapters::call_tool(kind, dispatch, None, async |context, args| {
+            (self.callback)(context, args).await
+        })
+        .await
     }
 }
 
@@ -404,14 +343,49 @@ impl std::fmt::Debug for DynamicTool {
     }
 }
 
-/// A tool's [`ToolDefinition`] from a typed tool.
-pub fn tool_definition<T: Tool>(tool: &T) -> ToolDefinition {
-    ToolDefinition {
-        name: T::NAME.to_string(),
-        description: tool.description(),
-        parameters: tool.parameters(),
-    }
+/// A typed tool's [`Tool::NAME`] as a [`ToolName`].
+///
+/// An empty `NAME` fails the build where this is instantiated.
+///
+/// ```
+/// use rig_core::{message::ToolChoice, tool::{Tool, ToolContext, tool_name}};
+///
+/// struct Ping;
+///
+/// impl Tool for Ping {
+///     const NAME: &'static str = "ping";
+///     type Args = serde_json::Value;
+///     type Output = String;
+///     type Error = std::convert::Infallible;
+///
+///     fn description(&self) -> String {
+///         "Replies with pong.".to_string()
+///     }
+///
+///     fn parameters(&self) -> serde_json::Value {
+///         serde_json::json!({ "type": "object" })
+///     }
+///
+///     async fn call(
+///         &self,
+///         _context: &mut ToolContext,
+///         _args: Self::Args,
+///     ) -> Result<String, Self::Error> {
+///         Ok("pong".to_string())
+///     }
+/// }
+///
+/// let choice = ToolChoice::Specific { function_names: vec![tool_name::<Ping>()] };
+/// assert_eq!(tool_name::<Ping>(), "ping");
+/// # let _ = choice;
+/// ```
+pub fn tool_name<T: Tool>() -> ToolName {
+    const { assert!(!T::NAME.is_empty(), "Tool::NAME cannot be empty") };
+    ToolName::new_unchecked(T::NAME)
 }
 
-#[cfg(test)]
-mod tests;
+/// A tool's [`ToolDefinition`] from a typed tool, with its annotations.
+pub fn tool_definition<T: Tool>(tool: &T) -> ToolDefinition {
+    ToolDefinition::new(tool_name::<T>(), tool.description(), tool.parameters())
+        .with_annotations(tool.annotations())
+}

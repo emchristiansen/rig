@@ -1,18 +1,17 @@
-//! Who owns the work this backend moves onto the fallback runtime.
+//! Off-runtime, the caller owns every socket it opens.
 //!
-//! Off-runtime, a connect and a connection are both tokio tasks the caller
-//! cannot see. Ownership means dropping the caller's handle releases the
-//! socket: an abandoned handshake must stop connecting, and a dropped
-//! connection must hand the transport back even when its actor is parked in a
-//! write the peer is not reading. Neither is observable from the client side —
+//! Ownership means dropping the caller's handle releases the socket: an
+//! abandoned handshake must stop connecting, and a dropped connection must
+//! hand the transport back even when it is parked in a write the peer is not
+//! reading. Neither is observable from the client side —
 //! the only witness is the server, so these drive real loopback sockets.
 
 #![cfg(not(target_family = "wasm"))]
 #![allow(clippy::expect_used, clippy::panic)]
 
 use bytes::Bytes;
-use rig_core::http_client::{NoBody, Request};
-use rig_core::ws_client::{
+use rig_http::http_client::{NoBody, Request};
+use rig_http::ws_client::{
     ConnectOptions, Frame, WebSocketClientExt as _, WebSocketConnection as _,
 };
 use rig_tungstenite::TungsteniteClient;
@@ -93,7 +92,7 @@ fn stall_the_handshake() -> (
 }
 
 /// Hold the peer open until the test explicitly permits draining. Peeking
-/// proves the actor started writing without releasing socket backpressure.
+/// proves the connection started writing without releasing socket backpressure.
 fn accept_then_stop_reading(
     observe_write: bool,
 ) -> (
@@ -170,7 +169,7 @@ fn an_abandoned_connect_releases_the_socket_it_opened() {
     assert_no_tokio_runtime();
 
     futures::executor::block_on(async {
-        rig_core::wasm_compat::timeout(CLOSE_DEADLINE, async {
+        rig_http::wasm_compat::timeout(CLOSE_DEADLINE, async {
             let client = TungsteniteClient::new();
             let connecting = client.connect(handshake_request(&url), ConnectOptions::new());
             futures::pin_mut!(connecting);
@@ -193,15 +192,14 @@ fn an_abandoned_connect_releases_the_socket_it_opened() {
     );
 }
 
-/// The connection owns its actor: dropping an idle one hands the transport
-/// back instead of keeping a task alive for the life of the process.
+/// Dropping an idle connection hands the transport back.
 #[test]
 fn a_dropped_idle_connection_releases_the_socket() {
     let (url, _arrival, drain, report) = accept_then_stop_reading(false);
     assert_no_tokio_runtime();
 
     futures::executor::block_on(async {
-        rig_core::wasm_compat::timeout(CLOSE_DEADLINE, async {
+        rig_http::wasm_compat::timeout(CLOSE_DEADLINE, async {
             let connection = TungsteniteClient::new()
                 .connect(handshake_request(&url), ConnectOptions::new())
                 .await
@@ -222,16 +220,15 @@ fn a_dropped_idle_connection_releases_the_socket() {
     );
 }
 
-/// The harder half: the actor is parked in a write to a peer that stopped
-/// reading, so it is not sitting on the command channel and cannot notice the
-/// connection go away. Dropping the connection must still end it.
+/// The harder half: the connection is parked in a write to a peer that
+/// stopped reading. Dropping it must still end the socket.
 #[test]
 fn a_dropped_stalled_connection_releases_the_socket() {
     let (url, arrival, drain, report) = accept_then_stop_reading(true);
     assert_no_tokio_runtime();
 
     futures::executor::block_on(async {
-        rig_core::wasm_compat::timeout(CLOSE_DEADLINE, async {
+        rig_http::wasm_compat::timeout(CLOSE_DEADLINE, async {
         let mut connection = TungsteniteClient::new()
             .connect(handshake_request(&url), ConnectOptions::new())
             .await
@@ -243,7 +240,7 @@ fn a_dropped_stalled_connection_releases_the_socket() {
             futures::future::Either::Right((arrival, _)) => arrival.expect("write reached peer"),
             futures::future::Either::Left(_) => panic!("write completed before stall observation"),
         }
-        let stalled = rig_core::wasm_compat::timeout(
+        let stalled = rig_http::wasm_compat::timeout(
             Duration::from_millis(200),
             sending.as_mut(),
         )

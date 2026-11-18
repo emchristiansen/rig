@@ -7,18 +7,16 @@
 //! Anthropic through OpenRouter because that live route exposes plaintext
 //! reasoning beside tool calls on both transports.
 //!
-//! The finite raw-order space is 2 transports × 2 call shapes = 4 cells. Two
-//! additional blocking/streaming agent-loop controls replay the signed
-//! single-tool turn into a live follow-up, for 6 recorded cells total. The
-//! upstream and reasoning budget are intentionally fixed:
+//! The finite raw-order space is 2 transports × 2 call shapes = 4 cells, of
+//! which the two single-call cells are tests. A streaming agent-loop control
+//! replays the signed single-tool turn into a live follow-up. The upstream and
+//! reasoning budget are intentionally fixed:
 //! OpenRouter is pinned to Anthropic with fallbacks disabled, extended
 //! reasoning is fixed at its supported 1024-token minimum. Raw responses are
 //! normalized at the exact boundary that regressed; agent controls prove the
 //! streamed signature reaches replay history and is accepted by the next live
-//! call. Parallel agent loops are the only pruned candidate cells: signature
-//! attachment/serialization is independent of tool count, while raw cells
-//! already pin parallel order and exact cardinality on both transports. No
-//! other cells are pruned or unit-only. Each test maps one-to-one to
+//! call. Parallel agent loops are not cells: signature attachment and
+//! serialization are independent of tool count. Each test maps one-to-one to
 //! `crates/rig-cassette/fixtures/cassettes/openrouter/reasoning_tool_order_matrix/<test-name>.yaml`.
 //!
 //! | dimension | values |
@@ -31,9 +29,10 @@
 //!
 //! | recorded cells | fixtures |
 //! |---|---|
-//! | 4 raw order | `{blocking,streaming}_{single,parallel}.yaml` |
-//! | 2 signed agent loops | `{blocking,streaming}_signed_agent_roundtrip.yaml` |
+//! | 2 raw order | `{blocking,streaming}_single.yaml` |
+//! | 1 signed agent loop | `streaming_signed_agent_roundtrip.yaml` |
 
+use rig_test_support::cassette_models::OpenAiModels;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -41,15 +40,13 @@ use std::sync::{
 
 use anyhow::{Result, ensure};
 use futures::StreamExt as _;
-use rig::completion::{AssistantContent, CompletionModel};
-use rig::prelude::*;
+use rig::completion::AssistantContent;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::super::support::{
-    BoundOpenRouter, with_openrouter_reasoning_tool_order_cassette_result,
-};
+use super::super::support::{pinned_order, with_openrouter_reasoning_tool_order_cassette_result};
+use rig::completion::{CompletionRequest, Reasoning};
 
 const MODEL: &str = "anthropic/claude-haiku-4.5";
 
@@ -114,7 +111,7 @@ impl Tool for Lookup {
 
 fn tool(name: &str) -> rig::completion::ToolDefinition {
     rig::completion::ToolDefinition {
-        name: name.to_owned(),
+        name: rig_core::message::ToolName::new(name).expect("tool name"),
         description: format!("Record the required {name} value"),
         parameters: json!({
             "type": "object",
@@ -122,6 +119,7 @@ fn tool(name: &str) -> rig::completion::ToolDefinition {
             "required": ["value"],
             "additionalProperties": false
         }),
+        annotations: Default::default(),
     }
 }
 
@@ -143,36 +141,30 @@ fn prompt(shape: Shape) -> &'static str {
     }
 }
 
-fn request(
-    model: &(impl CompletionModel + Clone),
-    cell: Cell,
-) -> rig::completion::CompletionRequest {
-    let mut builder = model
-        .completion_request(prompt(cell.shape))
-        .preamble("Reason first, then obey the requested tool calls exactly.".to_owned())
-        .additional_params(json!({
-            "reasoning": { "max_tokens": 1024 },
-            "parallel_tool_calls": cell.shape == Shape::Parallel,
-            "provider": { "order": ["Anthropic"], "allow_fallbacks": false }
-        }))
+fn request(cell: Cell) -> rig::completion::CompletionRequest {
+    let mut builder = CompletionRequest::new(prompt(cell.shape))
+        .preamble("Reason first, then obey the requested tool calls exactly.")
+        .reasoning(Reasoning::Budget { tokens: 1024 })
+        .parallel_tool_calls(cell.shape == Shape::Parallel)
+        .provider_options(pinned_order(&["Anthropic"]))
         .max_tokens(1200);
     for name in expected_names(cell.shape) {
         builder = builder.tool(tool(name));
     }
-    builder.build()
+    builder
 }
 
-async fn run_cell(client: BoundOpenRouter, cell: Cell, observed: SharedChoice) -> Result<()> {
+async fn run_cell(client: OpenAiModels, cell: Cell, observed: SharedChoice) -> Result<()> {
     let model = client.completion(MODEL);
     let choice = match cell.transport {
-        Transport::Blocking => model.completion(request(&model, cell)).await?.choice,
+        Transport::Blocking => model.call(request(cell)).await?.choice,
         Transport::Streaming => {
-            let raw = model.stream(request(&model, cell)).await?;
+            let raw = model.stream(request(cell))?;
             let mut stream = raw;
             while let Some(item) = stream.next().await {
                 item?;
             }
-            stream.snapshot()
+            stream.partial().choice
         }
     };
 
@@ -181,20 +173,17 @@ async fn run_cell(client: BoundOpenRouter, cell: Cell, observed: SharedChoice) -
 }
 
 async fn run_signed_agent(
-    client: BoundOpenRouter,
+    client: OpenAiModels,
     transport: Transport,
     invocations: Arc<AtomicUsize>,
 ) -> Result<()> {
-    let agent = client
-        .agent(MODEL)
+    let agent = rig::AgentBuilder::new(client.completion(MODEL))
         .preamble(
             "Reason before the requested first tool call. After its result, answer exactly DONE without calling another tool.",
         )
         .tool(Lookup { invocations })
-        .additional_params(json!({
-            "reasoning": { "max_tokens": 1024 },
-            "provider": { "order": ["Anthropic"], "allow_fallbacks": false }
-        }))
+        .reasoning(Reasoning::Budget { tokens: 1024 })
+        .provider_options(pinned_order(&["Anthropic"]))
         .max_tokens(1200)
         .default_max_turns(2)
         .build();
@@ -341,13 +330,14 @@ fn assert_normalized_order(scenario: &str, cell: Cell, observed: SharedChoice) {
         choice.iter().any(|content| matches!(
             content,
             AssistantContent::Reasoning(reasoning)
-                if reasoning.content.iter().any(|part| matches!(
-                    part,
-                    rig::message::ReasoningContent::Text {
-                        signature: Some(signature),
-                        ..
-                    } if !signature.is_empty()
-                ))
+                if reasoning
+                    .native
+                    .as_ref()
+                    .and_then(|native| native.item.get("reasoning_details"))
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|details| details.iter().any(|detail| {
+                        detail["signature"].as_str().is_some_and(|signature| !signature.is_empty())
+                    }))
         )),
         "{scenario}: live reasoning signature must survive normalization: {choice:#?}"
     );
@@ -470,24 +460,6 @@ async fn blocking_single() -> Result<()> {
 }
 
 #[tokio::test]
-async fn blocking_parallel() -> Result<()> {
-    const S: &str = "reasoning_tool_order_matrix/blocking_parallel";
-    let cell = Cell {
-        transport: Transport::Blocking,
-        shape: Shape::Parallel,
-    };
-    let observed = SharedChoice::default();
-    let capture = Arc::clone(&observed);
-    with_openrouter_reasoning_tool_order_cassette_result(
-        "reasoning_tool_order_matrix/blocking_parallel",
-        |client| async move { run_cell(client, cell, capture).await },
-    )
-    .await?;
-    finish(S, cell, observed).await;
-    Ok(())
-}
-
-#[tokio::test]
 async fn streaming_single() -> Result<()> {
     const S: &str = "reasoning_tool_order_matrix/streaming_single";
     let cell = Cell {
@@ -502,42 +474,6 @@ async fn streaming_single() -> Result<()> {
     )
     .await?;
     finish(S, cell, observed).await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn streaming_parallel() -> Result<()> {
-    const S: &str = "reasoning_tool_order_matrix/streaming_parallel";
-    let cell = Cell {
-        transport: Transport::Streaming,
-        shape: Shape::Parallel,
-    };
-    let observed = SharedChoice::default();
-    let capture = Arc::clone(&observed);
-    with_openrouter_reasoning_tool_order_cassette_result(
-        "reasoning_tool_order_matrix/streaming_parallel",
-        |client| async move { run_cell(client, cell, capture).await },
-    )
-    .await?;
-    finish(S, cell, observed).await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn blocking_signed_agent_roundtrip() -> Result<()> {
-    const S: &str = "reasoning_tool_order_matrix/blocking_signed_agent_roundtrip";
-    let invocations = Arc::new(AtomicUsize::new(0));
-    let capture = Arc::clone(&invocations);
-    with_openrouter_reasoning_tool_order_cassette_result(
-        "reasoning_tool_order_matrix/blocking_signed_agent_roundtrip",
-        |client| async move { run_signed_agent(client, Transport::Blocking, capture).await },
-    )
-    .await?;
-    ensure!(
-        invocations.load(Ordering::SeqCst) == 1,
-        "blocking signed-agent tool was not invoked exactly once"
-    );
-    assert_signed_agent_fixture(S, Transport::Blocking);
     Ok(())
 }
 

@@ -1,102 +1,44 @@
 use super::*;
 use crate::{
     error::ErrorKind,
-    message::Message,
-    streaming::{Delta, StreamEvent, StreamFinal},
+    operation::Finish,
+    streaming::{Item, StreamEvent},
 };
 use futures::StreamExt;
 
-fn request(prompt: &str) -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        chat_history: vec![Message::user(prompt)],
-        documents: Vec::new(),
-        tools: Vec::new(),
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    }
-}
-
 #[tokio::test]
 async fn completion_consumes_scripted_turns_and_records_requests() {
-    let model = MockCompletionModel::new([
-        MockTurn::text("first").with_message_id("msg_1"),
+    let model = MockCompletionModel::from_turns([
+        MockTurn::text("first"),
         MockTurn::tool_call("tool_1", "calculator", serde_json::json!({"x": 1}))
             .with_call_id("call_1"),
     ]);
 
     let first = model
-        .completion(request("hello"))
+        .call(CompletionRequest::new("hello"))
         .await
         .expect("first scripted turn should succeed");
-    assert_eq!(first.message_id.as_deref(), Some("msg_1"));
     assert!(matches!(
         first.choice.first(),
         Some(AssistantContent::Text(text)) if text.text == "first"
     ));
 
     let second = model
-        .completion(request("use a tool"))
+        .call(CompletionRequest::new("use a tool"))
         .await
         .expect("second scripted turn should succeed");
     assert!(matches!(
         second.choice.first(),
         Some(AssistantContent::ToolCall(tool_call))
-            if tool_call.id.explicit() == Some("tool_1")
-                && tool_call
-                    .provider
-                    .as_ref()
-                    .is_some_and(|provider| provider.call_id == "call_1")
+            if tool_call.id.provider().map(|provider| provider.as_str()) == Some("call_1")
     ));
 
     assert_eq!(model.request_count(), 2);
     assert_eq!(model.requests().len(), 2);
 }
 
-/// The mock behaves like a real seam: a scripted raw payload rides on the
-/// normalized response unconditionally, and a turn that scripted none
-/// carries the scripted turn itself serialized — the mock's own document,
-/// the same capture every real adapter performs.
-#[tokio::test]
-async fn completion_attaches_scripted_raw_and_its_own_turn_when_unscripted() {
-    let payload = serde_json::json!({"provider_only": "kept", "id": "resp_1"});
-    let unscripted_turn = MockTurn::text("second");
-    let expected_unscripted = unscripted_turn
-        .raw()
-        .expect("a scripted turn has a document");
-    let model = MockCompletionModel::new([
-        MockTurn::text("first").with_raw(payload.clone()),
-        unscripted_turn,
-    ]);
-
-    let scripted = model
-        .completion(request("hello"))
-        .await
-        .expect("first scripted turn should succeed");
-    assert_eq!(scripted.raw, payload);
-
-    let unscripted = model
-        .completion(request("hello"))
-        .await
-        .expect("second scripted turn should succeed");
-    assert_eq!(unscripted.raw, expected_unscripted);
-    assert_eq!(
-        unscripted.raw["choice"][0]["text"],
-        serde_json::json!("second"),
-        "the mock's document is the turn it was scripted with"
-    );
-
-    assert_eq!(model.requests().len(), 2);
-}
-
-/// The streaming half of the same contract: the mock's adapter maps the
-/// scripted terminal onto the `Final` record, so the terminal's `raw` is
-/// the scripted terminal record serialized (the mock's own terminal type is
-/// `StreamFinal`).
+/// The streaming half of the same contract: the mock's document is its
+/// scripted end, so the response's `raw` is that end serialized.
 #[tokio::test]
 async fn stream_terminal_raw_is_the_scripted_terminal_serialized() {
     let model = MockCompletionModel::from_stream_turns([vec![
@@ -110,33 +52,25 @@ async fn stream_terminal_raw_is_the_scripted_terminal_serialized() {
     ]]);
 
     let mut stream = model
-        .stream(request("hello"))
-        .await
+        .stream(CompletionRequest::new("hello"))
         .expect("stream should open");
     while stream.next().await.is_some() {}
-    let terminal = stream.response.expect("terminal record");
-    let raw = &terminal.raw;
-    let typed: StreamFinal = serde_json::from_value(raw.clone()).expect("terminal type");
-    assert_eq!(typed.usage.total_tokens, Some(3));
+    let response = stream.finish().await.expect("the reply ended");
+    let typed: Finish = serde_json::from_value(response.raw.clone()).expect("the end");
     assert_eq!(
         typed,
         super::super::streaming::mock_final(typed.usage),
-        "the capture is the scripted terminal, origin document included"
+        "the capture is the scripted end"
     );
-    assert_eq!(
-        serde_json::to_value(&typed).expect("re-serialize"),
-        *raw,
-        "the capture must be exactly what the scripted terminal serializes to"
-    );
-    assert_eq!(terminal.usage.total_tokens, Some(3));
+    assert_eq!(response.usage.total_tokens, Some(3));
 }
 
 #[tokio::test]
 async fn missing_completion_turn_returns_provider_error() {
-    let model = MockCompletionModel::default();
+    let model = MockCompletionModel::from_turns([]);
 
     let err = model
-        .completion(request("hello"))
+        .call(CompletionRequest::new("hello"))
         .await
         .expect_err("missing turn should error");
 
@@ -150,73 +84,41 @@ async fn missing_completion_turn_returns_provider_error() {
 #[tokio::test]
 async fn stream_yields_scripted_events_and_records_requests() {
     let model = MockCompletionModel::from_stream_turns([[
-        MockStreamEvent::message_id("msg_stream"),
         MockStreamEvent::text("hel"),
         MockStreamEvent::text("lo"),
-        MockStreamEvent::tool_call_name_delta("tool_1", "calculator"),
-        MockStreamEvent::tool_call_arguments_delta("tool_1", "{\"x\":1}"),
-        MockStreamEvent::tool_call("tool_1", "calculator", serde_json::json!({"x": 1}))
-            .with_call_id("call_1"),
+        MockStreamEvent::tool_call_name_delta("call_1", "calculator"),
+        MockStreamEvent::tool_call_arguments_delta("call_1", "{\"x\":1}"),
+        MockStreamEvent::tool_call_end("call_1"),
         MockStreamEvent::final_response_with_total_tokens(7),
     ]]);
 
     let mut stream = model
-        .stream(request("stream"))
-        .await
+        .stream(CompletionRequest::new("stream"))
         .expect("stream should be created");
 
     let mut text = String::new();
-    let mut saw_name_delta = false;
-    let mut saw_arguments_delta = false;
-    let mut saw_tool_call = false;
-    let mut saw_final = false;
-
+    let mut arguments = None;
+    let mut call = None;
     while let Some(item) = stream.next().await {
         match item.expect("stream event should succeed") {
-            StreamEvent::BlockDelta {
-                delta: Delta::Text { text: chunk },
+            Item::Event(StreamEvent::Text { text: chunk, .. }) => text.push_str(&chunk),
+            Item::Event(StreamEvent::Arguments { json, .. }) => arguments = Some(json),
+            Item::Event(StreamEvent::End {
+                content: AssistantContent::ToolCall(tool_call),
                 ..
-            } => text.push_str(&chunk),
-            StreamEvent::BlockDelta {
-                delta: Delta::ToolName { name },
-                ..
-            } => {
-                saw_name_delta = name == "calculator";
-            }
-            StreamEvent::BlockDelta {
-                delta: Delta::ToolArguments { arguments },
-                ..
-            } => {
-                saw_arguments_delta = arguments == "{\"x\":1}";
-            }
-            StreamEvent::BlockEnd {
-                block: Some(AssistantContent::ToolCall(tool_call)),
-                ..
-            } => {
-                saw_tool_call = tool_call
-                    .provider
-                    .as_ref()
-                    .is_some_and(|provider| provider.call_id == "call_1");
-            }
-            StreamEvent::Final(response) => {
-                saw_final = matches!(
-                    response.usage,
-                    Usage {
-                        total_tokens: Some(7),
-                        ..
-                    }
-                );
-            }
+            }) => call = Some(tool_call),
             _ => {}
         }
     }
 
     assert_eq!(text, "hello");
-    assert!(saw_name_delta);
-    assert!(saw_arguments_delta);
-    assert!(saw_tool_call);
-    assert!(saw_final);
-    assert_eq!(stream.message_id.as_deref(), Some("msg_stream"));
+    assert_eq!(arguments.as_deref(), Some("{\"x\":1}"));
+    let call = call.expect("the call ended");
+    assert_eq!(call.id.to_string(), "call_1");
+    assert_eq!(call.function.name, "calculator");
+    assert_eq!(call.function.arguments_value(), serde_json::json!({"x": 1}));
+    let response = stream.finish().await.expect("the reply ended");
+    assert_eq!(response.usage.total_tokens, Some(7));
     assert_eq!(model.request_count(), 1);
 }
 
@@ -224,8 +126,7 @@ async fn stream_yields_scripted_events_and_records_requests() {
 async fn stream_error_event_is_returned() {
     let model = MockCompletionModel::from_stream_turns([[MockStreamEvent::error("boom")]]);
     let mut stream = model
-        .stream(request("stream"))
-        .await
+        .stream(CompletionRequest::new("stream"))
         .expect("stream should be created");
 
     let err = stream
@@ -234,23 +135,8 @@ async fn stream_error_event_is_returned() {
         .expect("stream should yield one event")
         .expect_err("scripted event should error");
 
-    assert_eq!(err.kind, ErrorKind::Provider);
-    assert_eq!(err.message, "ProviderError: boom");
-}
-
-#[test]
-fn scripted_null_stays_distinct_from_an_unscripted_document_after_round_trip() {
-    let unscripted = MockTurn::text("hello");
-    let scripted = unscripted.clone().with_raw(serde_json::Value::Null);
-    for turn in [unscripted, scripted] {
-        let json = serde_json::to_string(&turn).expect("turn serializes");
-        let restored: MockTurn = serde_json::from_str(&json).expect("turn deserializes");
-        assert_eq!(
-            restored.raw().expect("a document"),
-            turn.raw().expect("a document")
-        );
-        assert_eq!(restored, turn);
-    }
+    assert_eq!(err.kind(), ErrorKind::Provider);
+    assert_eq!(err.to_string(), "ProviderError: boom");
 }
 
 #[test]
@@ -258,21 +144,14 @@ fn a_script_is_serde_in_and_serde_out() {
     let turns = vec![
         MockTurn::text("hello"),
         MockTurn::tool_call("tc1", "add", serde_json::json!({"x": 1})),
-        MockTurn::text("scripted").with_raw(serde_json::json!({"id": "resp_1"})),
         MockTurn::error("boom"),
     ];
     let json = serde_json::to_string(&turns).expect("turns serialize");
     let restored: Vec<MockTurn> = serde_json::from_str(&json).expect("turns deserialize");
     assert_eq!(restored, turns);
-    assert_eq!(
-        restored[2].raw().expect("a document"),
-        serde_json::json!({"id": "resp_1"}),
-        "a scripted document survives the round trip"
-    );
 
     let model = MockCompletionModel::from_turns(restored);
     assert_eq!(model.script(), turns);
-    assert_eq!(model.stream_script(), Vec::<Vec<MockStreamEvent>>::new());
 
     let stream_turns = vec![vec![
         MockStreamEvent::Text("hi".into()),
@@ -283,6 +162,48 @@ fn a_script_is_serde_in_and_serde_out() {
         serde_json::from_str(&json).expect("stream turns deserialize");
     assert_eq!(restored, stream_turns);
     let model = MockCompletionModel::from_stream_turns(restored);
-    assert_eq!(model.stream_script(), stream_turns);
     assert!(model.script().is_empty());
+}
+
+/// A scripted model priced as a catalog model prices its replies' usage at
+/// the spec's prices, streamed or not, as the provider's own wire does.
+#[tokio::test]
+async fn a_priced_script_prices_its_usage_like_a_real_wire() {
+    use crate::catalog::{ModelSpec, Pricing};
+    use crate::providers::registry::ProviderId;
+    use crate::test_utils::MockStreamEvent;
+
+    let vendor = ProviderId::catalog("deepseek").expect("a known vendor");
+    let spec = ModelSpec::new(vendor, "scripted").with_pricing(Pricing::new(1.0, 2.0));
+    let usage = Usage::new()
+        .input_tokens(1_000_000)
+        .output_tokens(1_000_000);
+    let unary = MockCompletionModel::from_turns([MockTurn::text("hi").with_usage(usage)])
+        .priced_as(spec.clone());
+    let reply = unary
+        .call(CompletionRequest::new("hello"))
+        .await
+        .expect("a scripted reply");
+    assert_eq!(reply.usage.cost.map(|cost| cost.total), Some(3.0));
+    assert_eq!(reply.origin.provider.as_str(), "deepseek");
+
+    let streamed = MockCompletionModel::from_stream_turns([vec![
+        MockStreamEvent::text("hi"),
+        MockStreamEvent::final_response(usage),
+    ]])
+    .priced_as(spec);
+    let reply = streamed
+        .stream(CompletionRequest::new("hello"))
+        .expect("a scripted stream")
+        .finish()
+        .await
+        .expect("a streamed reply");
+    assert_eq!(reply.usage.cost.map(|cost| cost.total), Some(3.0));
+    // Unpriced, the same script states no cost.
+    let plain = MockCompletionModel::from_turns([MockTurn::text("hi").with_usage(usage)]);
+    let reply = plain
+        .call(CompletionRequest::new("hello"))
+        .await
+        .expect("a reply");
+    assert_eq!(reply.usage.cost, None);
 }

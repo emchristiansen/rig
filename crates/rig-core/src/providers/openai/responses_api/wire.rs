@@ -5,34 +5,28 @@
 //! let wire = OpenAI::new("key").responses("gpt-5.2");
 //! ```
 
+use crate::catalog::ModelFacts;
 use crate::completion::{self, ProviderCapabilities};
 use crate::error::EncodeError;
+use crate::json_utils::Lenient;
 use crate::observe::ObservedError;
 use crate::operation::Completion;
-use crate::providers::openai::wire::{OpenAI, ResponsesContract};
+use crate::providers::openai::wire::OpenAIConfig;
+pub(crate) use crate::providers::openai::wire::ResponsesContract;
 use crate::wire::{
-    AdapterEvent, AdapterUsage, AdapterVerdict, Body, Encoded, Framing, Mode, ObservationSink, Wire,
+    AdapterVerdict, Capabilities, Descriptor, Encoded, Framing, Mode, ObservationSink, Wire,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
-use super::request_compression::RequestCompression;
-use super::request_headers::RequestHeaders;
-use super::responses_lite::{CodexRequestShape, ResponsesLiteError};
-use super::streaming::{IncompleteTerminal, ResponsesDecoder, ResponsesStreamOptions};
-use super::{
-    CompletionRequest, InputRequirement, ResponsesRequestParams, ResponsesRequestTool,
-    ResponsesToolDefinition, SystemInstructionsPlacement,
-};
-
-/// The per-request session header the ChatGPT dialect sends when no Codex
-/// identity names the conversation.
-const SESSION_ID_PER_REQUEST_HEADER: &str = "session_id";
+use super::streaming::ResponsesDecoder;
+use super::{ResponsesToolDefinition, SystemInstructionsPlacement};
 
 /// The Responses wire: `POST /responses`, SSE when streamed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Responses {
     /// The provider this wire speaks to.
-    pub provider: OpenAI,
+    pub provider: OpenAIConfig,
     /// The model to address.
     pub model: String,
     /// Tools added to every request from this wire.
@@ -42,240 +36,30 @@ pub struct Responses {
     /// Where this wire puts Rig's system instructions. Defaults to the
     /// dialect's placement.
     pub system_instructions: SystemInstructionsPlacement,
-    /// How a streamed (SSE) reply's terminal `response.incomplete` is taken:
-    /// refused by default, accepted with its truthful finish reason when the
-    /// caller opts in. A unary reply always accepts it. This is decoder
-    /// policy, never a request parameter, so it does not reach the wire.
-    #[serde(default)]
-    pub streamed_incomplete: IncompleteTerminal,
-    /// The Codex conversation identity every HTTP request from this wire
-    /// carries, when set (see [`Self::with_codex_identity`]). `None` sends a
-    /// fresh `session_id` per request, as the dialect asks.
-    ///
-    /// An identity names ONE conversation: every HTTP request, and every
-    /// websocket session built from this wire value, shares its cache
-    /// affinity. A caller running several conversations gives each its own
-    /// wire value with its own identity ([`CodexIdentity::from_ids`] or
-    /// [`CodexIdentity::generate`]).
-    ///
-    /// [`CodexIdentity::from_ids`]: super::codex_identity::CodexIdentity::from_ids
-    /// [`CodexIdentity::generate`]: super::codex_identity::CodexIdentity::generate
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub codex_identity: Option<super::codex_identity::CodexIdentity>,
-    /// Whether this wire emits the ordinary Responses envelope or the Codex
-    /// Responses Lite developer prefix. Standard is the serialized default.
-    #[serde(default, skip_serializing_if = "CodexRequestShape::is_standard")]
-    pub codex_request_shape: CodexRequestShape,
-    /// Caller-supplied headers added to every HTTP request and every
-    /// websocket handshake this wire sends (see [`Self::with_request_headers`]).
-    /// Empty by default.
-    #[serde(default, skip_serializing_if = "RequestHeaders::is_empty")]
-    pub request_headers: RequestHeaders,
-    /// How this wire encodes its HTTP request bodies (see
-    /// [`Self::with_request_compression`]). Sent as they are by default.
-    #[serde(default, skip_serializing_if = "RequestCompression::is_none")]
-    pub request_compression: RequestCompression,
+    /// The model facts the encoder reads and replies are priced by.
+    #[serde(skip)]
+    pub facts: ModelFacts,
 }
 
 impl Responses {
-    pub(crate) fn encode_with_headers(
-        &self,
-        request: completion::CompletionRequest,
-        mode: Mode,
-        headers: impl FnOnce(
-            &OpenAI,
-            &completion::CompletionRequest,
-            http::request::Builder,
-        ) -> Result<http::request::Builder, EncodeError>,
-    ) -> Result<Encoded, EncodeError> {
-        let quirks = &self.provider.dialect.quirks.responses;
-        // The codex gateway only ever answers with an event stream, and
-        // names no content type on it. It is asked for one whatever the
-        // caller wanted: the reply is framed the same way either way, and
-        // the driver folds it.
-        let codex = quirks.contract == ResponsesContract::Codex;
-        let streaming = matches!(mode, Mode::Streaming) || codex;
-        let mut builder = self.request_headers.stamp(headers(
-            &self.provider,
-            &request,
-            http::Request::post(self.provider.uri(quirks.path, None)),
-        )?);
-        let request = self.responses_request(
-            request,
-            streaming,
-            self.codex_identity.as_ref(),
-            InputRequirement::NonEmpty,
-        )?;
-        if self.codex_request_shape.is_lite() {
-            builder = builder.header(super::responses_lite::HTTP_HEADER, "true");
-        }
-        crate::providers::internal::trace_json(
-            crate::providers::internal::LogTarget::Completions,
-            "Responses completion request",
-            &request,
-        );
-        let body = match &self.codex_identity {
-            // The conversation's identity replaces the per-request session id:
-            // the same dashed headers and body fields its websocket frames
-            // carry, so both transports name one conversation alike.
-            Some(identity) => {
-                // An identity can reach a wire by field assignment or serde as
-                // well as through `with_codex_identity`; it is refused here
-                // all the same, before anything is stamped.
-                super::codex_identity::require_codex(self).map_err(EncodeError::request)?;
-                if let Some(headers) = builder.headers_mut() {
-                    headers.remove(SESSION_ID_PER_REQUEST_HEADER);
-                }
-                builder = identity.stamp_headers(builder);
-                let mut body = match serde_json::to_value(&request)? {
-                    serde_json::Value::Object(body) => body,
-                    other => {
-                        return Err(EncodeError::request(format!(
-                            "a Responses request must serialize to a JSON object, got {other}"
-                        )));
-                    }
-                };
-                identity.stamp(&mut body)?;
-                serde_json::to_vec(&body)?
-            }
-            None => serde_json::to_vec(&request)?,
-        };
-        let (builder, body) = self.request_compression.apply(builder, body)?;
-
-        let request = builder
-            .header(http::header::CONTENT_TYPE, "application/json")
-            .body(Body::Bytes(body))?;
-
-        let framing = if streaming {
-            Framing::Sse
-        } else {
-            Framing::Whole
-        };
-        let encoded = Encoded::new(request, framing)
-            .with_request_id_header(self.provider.dialect.request_id_header)
-            .with_captured_response_headers(self.provider.dialect.response_header_prefix);
-        Ok(if codex {
-            encoded.with_relaxed_content_type()
-        } else {
-            encoded
-        })
-    }
-
-    /// Name the Codex conversation every HTTP request from this wire belongs
-    /// to. Each request then carries `identity`'s dashed `session-id` and
-    /// `thread-id` headers, `x-client-request-id`, and its `prompt_cache_key`
-    /// and `client_metadata` body fields, exactly as a Codex websocket session
-    /// with the same identity does, instead of a fresh `session_id` header.
-    /// A request's own `prompt_cache_key` or metadata keys are kept. Refuses a
-    /// wire whose dialect does not speak the Codex contract.
-    pub fn with_codex_identity(
-        mut self,
-        identity: super::codex_identity::CodexIdentity,
-    ) -> Result<Self, super::codex_identity::NotACodexWire> {
-        super::codex_identity::require_codex(&self)?;
-        self.codex_identity = Some(identity);
-        Ok(self)
-    }
-
     /// Create a wire with the provider's instruction placement and dialect's
     /// strict-tool default, without additional tools.
-    pub fn new(provider: OpenAI, model: impl Into<String>) -> Self {
+    pub fn new(provider: OpenAIConfig, model: impl Into<String>) -> Self {
         Self {
             system_instructions: provider.system_instructions_placement(),
             strict_tools: provider.dialect.quirks.responses.strict_tools_by_default,
             provider,
             model: model.into(),
             tools: Vec::new(),
-            streamed_incomplete: IncompleteTerminal::default(),
-            codex_identity: None,
-            codex_request_shape: CodexRequestShape::default(),
-            request_headers: RequestHeaders::new(),
-            request_compression: RequestCompression::default(),
+            facts: ModelFacts::default(),
         }
     }
 
-    /// Encode every HTTP request body this wire sends as `compression` says;
-    /// see [`RequestCompression`]. Websocket frames are unaffected.
-    #[must_use]
-    pub fn with_request_compression(mut self, compression: RequestCompression) -> Self {
-        self.request_compression = compression;
+    /// The same wire, encoding with `facts` and pricing its replies by
+    /// them.
+    pub fn with_facts(mut self, facts: ModelFacts) -> Self {
+        self.facts = facts;
         self
-    }
-
-    /// Add `headers` to every HTTP request and every websocket handshake this
-    /// wire sends, exactly as given, beside the headers Rig sends itself,
-    /// replacing any set given before. For headers a gateway asks for that
-    /// Rig does not model, such as the Codex backend's `x-codex-*` request
-    /// headers; [`RequestHeaders`] refuses the ones Rig sends from another
-    /// source, so the position of a caller header carries no meaning.
-    ///
-    /// A wire is a cheap value: a header whose value changes per request
-    /// (a turn's metadata, say) is a per-request wire. The same set goes on
-    /// HTTP requests and on handshakes alike, so a header only one transport
-    /// should carry needs a wire of its own for that transport: the Codex
-    /// backend's `x-codex-turn-state`, for one, travels as an HTTP header but
-    /// never on a handshake.
-    #[must_use]
-    pub fn with_request_headers(mut self, headers: RequestHeaders) -> Self {
-        self.request_headers = headers;
-        self
-    }
-
-    /// Emit the Codex Responses Lite request shape.
-    ///
-    /// The wire still needs a stable [`CodexIdentity`](super::codex_identity::CodexIdentity)
-    /// before HTTP encoding. A Codex WebSocket builder supplies its selected
-    /// session identity when it prepares each frame. Returns
-    /// [`ResponsesLiteError::ResponsesLiteRequiresCodex`] for another dialect.
-    pub fn with_responses_lite(mut self) -> Result<Self, ResponsesLiteError> {
-        super::responses_lite::validate_codex(
-            self.provider.dialect.quirks.responses.contract,
-            self.provider.dialect.name,
-        )?;
-        self.codex_request_shape = CodexRequestShape::ResponsesLite;
-        Ok(self)
-    }
-
-    /// Select how a streamed reply's terminal `response.incomplete` is taken.
-    ///
-    /// [`IncompleteTerminal::Refuse`] (the default) ends the stream with an
-    /// error carrying the provider's terminal event;
-    /// [`IncompleteTerminal::Accept`] opts this wire's requests into partial
-    /// success: the partial output and usage are kept and the turn ends with
-    /// the finish reason the provider's `incomplete_details` states. A wire
-    /// is a cheap value, so a per-request choice is a per-request wire.
-    pub fn with_streamed_incomplete(mut self, incomplete: IncompleteTerminal) -> Self {
-        self.streamed_incomplete = incomplete;
-        self
-    }
-
-    /// The decoder for one reply, taking a terminal
-    /// `response.incomplete` as `incomplete` says rather than as this wire's
-    /// transport default.
-    ///
-    /// For a transport whose contract differs from HTTP's, such as a
-    /// websocket session, which accepts an incomplete terminal.
-    pub fn decoder_with_incomplete(&self, incomplete: IncompleteTerminal) -> ResponsesDecoder {
-        let quirks = &self.provider.dialect.quirks.responses;
-        let options = if quirks.contract == ResponsesContract::Xai {
-            // xAI answers a 200 with its error envelope, and the same
-            // gateway publishes a finished call at its `output_item.done`.
-            ResponsesStreamOptions::strict_with_immediate_tool_calls()
-        } else {
-            ResponsesStreamOptions::strict()
-        }
-        .with_incomplete(incomplete);
-        let mut decoder = ResponsesDecoder::new(self.provider.dialect.name, options);
-        if quirks.contract == ResponsesContract::Codex {
-            // The codex gateway's replayed frames may omit their envelope
-            // bookkeeping; elsewhere an envelope-less frame is a defect
-            // worth surfacing rather than salvaging.
-            decoder = decoder.with_envelope_repair();
-        }
-        if self.provider.dialect.quirks.upstream_reasoning_issuer {
-            decoder = decoder.with_upstream_reasoning_issuer();
-        }
-        decoder
     }
 
     /// Sanitize function schemas for strict mode and send `strict: true`.
@@ -315,217 +99,27 @@ impl Responses {
     pub fn with_system_instructions_as_messages(self) -> Self {
         self.with_system_instructions_placement(SystemInstructionsPlacement::InputSystemMessages)
     }
-
-    /// The Responses request this wire sends, before serialization.
-    /// Refuse, by name, a provider item this wire cannot replay: one another
-    /// issuer produced. Items it issued, and items of unknown provenance, go
-    /// back verbatim; nothing is dropped here.
-    fn refuse_unreplayable_provider_items(
-        &self,
-        history: &[crate::message::Message],
-    ) -> Result<(), EncodeError> {
-        let issuers = <Self as crate::wire::Wire>::replay_issuers(self, Some(&self.model));
-        for message in history {
-            let crate::message::Message::Assistant { content, .. } = message else {
-                continue;
-            };
-            for part in content.iter() {
-                if let crate::message::AssistantContent::ProviderItem(item) = part
-                    && !issuers.iter().any(|issuer| item.replayable_to(issuer))
-                {
-                    return Err(crate::message::UnreplayableProviderItem::new(
-                        self.provider.dialect.name,
-                        item,
-                    )
-                    .into());
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn responses_request(
-        &self,
-        request: completion::CompletionRequest,
-        streaming: bool,
-        identity: Option<&super::codex_identity::CodexIdentity>,
-        input_requirement: InputRequirement,
-    ) -> Result<CompletionRequest, EncodeError> {
-        let issuers = self.replay_issuers(request.model.as_deref().or(Some(&self.model)));
-        for message in &request.chat_history {
-            if let crate::message::Message::Assistant { content, .. } = message {
-                for part in content {
-                    if let crate::message::AssistantContent::Reasoning(reasoning) = part
-                        && reasoning.has_opaque_parts()
-                        && !issuers.iter().any(|issuer| reasoning.replayable_to(issuer))
-                    {
-                        return Err(EncodeError::request(
-                            crate::message::UnrepresentableOpaqueContent::new(
-                                "OpenAI Responses with incompatible reasoning provenance",
-                            ),
-                        ));
-                    }
-                }
-            }
-        }
-        let quirks = &self.provider.dialect.quirks.responses;
-        self.refuse_unreplayable_provider_items(&request.chat_history)?;
-        let lite_identity = super::responses_lite::validate_activation(
-            self.codex_request_shape,
-            quirks.contract,
-            self.provider.dialect.name,
-            self.system_instructions,
-            identity,
-        )
-        .map_err(EncodeError::request)?;
-        let mut request = CompletionRequest::convert(
-            ResponsesRequestParams {
-                model: self.model.clone(),
-                request,
-                system_instructions_placement: self.system_instructions,
-            },
-            input_requirement,
-        )?;
-        // Typed request tools, then declared tools, then this wire's defaults.
-        request.tools.extend(
-            self.tools
-                .iter()
-                .cloned()
-                .map(ResponsesRequestTool::Defined),
-        );
-        if self.strict_tools {
-            // Strict mode rewrites a declared tool only by its own
-            // transformation; see `ResponsesRequestTool::with_strict`.
-            request.tools = request
-                .tools
-                .into_iter()
-                .map(ResponsesRequestTool::normalize)
-                .collect();
-        }
-        if let Some(instructions) = &self.provider.instructions {
-            request.instructions = Some(merge_instructions(
-                instructions,
-                request.instructions.as_deref(),
-            ));
-        }
-        if quirks.contract == ResponsesContract::Codex {
-            shape_codex_request(&mut request).map_err(EncodeError::request)?;
-        }
-        if let Some(identity) = lite_identity {
-            super::responses_lite::shape_request(&mut request, identity)
-                .map_err(EncodeError::request)?;
-            // Lite may have created `reasoning`; the shared include rule
-            // follows it.
-            request.additional_parameters.request_reasoning_ciphertext();
-        }
-        request.stream = streaming.then_some(true);
-        Ok(request)
-    }
-}
-
-/// A caller-set request control this adapter refuses on the Codex Responses
-/// contract.
-///
-/// Refused by name at encode rather than cleared: a control the caller set and
-/// the wire silently dropped would make the request that left differ from the
-/// one the caller built, with nothing to say so. Only a value the caller set is
-/// refused; an unset control emits no field and raises nothing. Every control
-/// not named here is sent as the caller set it. The refusal is this adapter's
-/// policy for the Codex contract; it is not a statement about what the Codex
-/// backend itself accepts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum UnsupportedCodexControl {
-    /// A caller-set output-token cap (`max_output_tokens`).
-    #[error(
-        "this adapter refuses a caller-set `max_output_tokens` on the Codex Responses \
-         contract; leave the output-token cap unset for this dialect"
-    )]
-    MaxOutputTokens,
-    /// A caller-set `store: true`; `store: false` is what this adapter states
-    /// for the Codex contract.
-    #[error(
-        "this adapter refuses a caller-set `store: true` on the Codex Responses contract; \
-         leave `store` unset or send `false`"
-    )]
-    Store,
-    /// A caller-set nucleus-sampling value (`top_p`).
-    #[error(
-        "this adapter refuses a caller-set `top_p` on the Codex Responses contract; \
-         leave `top_p` unset for this dialect"
-    )]
-    TopP,
-    /// A caller-set sampling temperature (`temperature`).
-    #[error(
-        "this adapter refuses a caller-set `temperature` on the Codex Responses contract; \
-         leave `temperature` unset for this dialect"
-    )]
-    Temperature,
-}
-
-/// Shape a request for the Codex contract: state `store: false` when the
-/// caller left it unset, and refuse by name each caller-set control this
-/// adapter does not send on the contract ([`UnsupportedCodexControl`]).
-///
-/// Nothing else is rewritten. Cache identity (`prompt_cache_key`,
-/// `client_metadata`), metadata, service tier, text format, parallel tool
-/// calls and user reach the wire as set, and the encrypted-reasoning include
-/// follows the rule every dialect shares (requested alongside `reasoning`)
-/// rather than being forced on. An unset refused control emits no field, so a
-/// request that sets none of them is sent as built.
-fn shape_codex_request(request: &mut CompletionRequest) -> Result<(), UnsupportedCodexControl> {
-    if request.max_output_tokens.is_some() {
-        return Err(UnsupportedCodexControl::MaxOutputTokens);
-    }
-    if request.temperature.is_some() {
-        return Err(UnsupportedCodexControl::Temperature);
-    }
-    if request.additional_parameters.top_p.is_some() {
-        return Err(UnsupportedCodexControl::TopP);
-    }
-    match request.additional_parameters.store {
-        Some(true) => return Err(UnsupportedCodexControl::Store),
-        Some(false) => {}
-        // `store: false` is the one value the gateway wants stated.
-        None => request.additional_parameters.store = Some(false),
-    }
-    Ok(())
-}
-
-/// Merge a gateway's own instructions ahead of the caller's preamble,
-/// without repeating them when the preamble already carries them.
-fn merge_instructions(instructions: &str, existing: Option<&str>) -> String {
-    match existing.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(existing) if existing.contains(instructions) => existing.to_owned(),
-        Some(existing) => format!("{instructions}\n\n{existing}"),
-        None => instructions.to_owned(),
-    }
 }
 
 impl Wire for Responses {
     type Op = Completion;
-    type Decoder = ResponsesDecoder;
+    type Payload = crate::wire::Encoded;
+    type Frame = crate::wire::WireFrame;
+    type Event = super::streaming::ResponsesEvent;
+    type Decoder<'id> = ResponsesDecoder;
+    type Reassembler = super::streaming::document::Response;
 
-    fn credential_stamp(&self) -> Option<crate::wire::CredentialStamp> {
-        self.provider.credential_stamp()
-    }
-
-    fn name(&self) -> &str {
-        self.provider.dialect.name
-    }
-
-    fn model(&self) -> Option<&str> {
-        Some(&self.model)
-    }
-
-    fn replay_issuers(&self, model: Option<&str>) -> Vec<String> {
-        crate::providers::openai::wire::replay_issuers(
-            &self.provider.dialect,
-            model.unwrap_or(&self.model),
-        )
-    }
-
-    fn route(&self) -> Option<&str> {
-        Some(self.provider.dialect.quirks.responses.path)
+    /// The xAI contract does not compose native structured output with tools.
+    fn describe(&self) -> Descriptor<'_> {
+        Descriptor::new(self.provider.dialect.name)
+            .model(self.model.as_str())
+            .facts(&self.facts)
+            .capabilities(Capabilities::completion(
+                ProviderCapabilities::default().with_native_output_tool_composition(
+                    self.provider.dialect.quirks.responses.contract != ResponsesContract::Xai,
+                ),
+            ))
+            .replay(self)
     }
 
     fn encode(
@@ -533,174 +127,254 @@ impl Wire for Responses {
         request: completion::CompletionRequest,
         mode: Mode,
     ) -> Result<Encoded, EncodeError> {
-        self.encode_with_headers(request, mode, OpenAI::completion_headers)
-    }
-
-    fn decoder(&self, mode: Mode) -> ResponsesDecoder {
-        // The contract is per transport: a unary reply (including a gateway
-        // that answers a unary call with an event stream) accepts an
-        // incomplete terminal; a streamed one takes the wire's policy.
-        let incomplete = match mode {
-            Mode::Unary => IncompleteTerminal::Accept,
-            Mode::Streaming => self.streamed_incomplete,
+        let quirks = &self.provider.dialect.quirks.responses;
+        // The codex gateway only ever answers with an event stream, and
+        // names no content type on it. It is asked for one whatever the
+        // caller wanted: the reply is framed the same way either way, and
+        // the driver folds it.
+        let codex = quirks.contract == ResponsesContract::Codex;
+        let streaming = matches!(mode, Mode::Streaming) || codex;
+        let builder = self.provider.completion_headers(
+            &request,
+            http::Request::post(self.provider.uri(quirks.path, None)),
+        );
+        let mode = if streaming {
+            Mode::Streaming
+        } else {
+            Mode::Unary
         };
-        self.decoder_with_incomplete(incomplete)
+        let body = self.responses_request(&request, super::Delivery::Http(mode))?;
+        crate::providers::internal::trace_json(
+            crate::providers::internal::LogTarget::Completions,
+            "Responses completion request",
+            &body,
+        );
+        let request = builder
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(body.into_body())?;
+
+        let framing = if streaming {
+            Framing::Sse
+        } else {
+            Framing::Whole
+        };
+        let encoded = Encoded::new(request, framing)
+            .with_request_id_header(self.provider.dialect.request_id_header)
+            .with_route(Some(self.provider.dialect.quirks.responses.path))
+            .with_projection(project_payload);
+        Ok(if codex {
+            encoded.with_relaxed_content_type()
+        } else {
+            encoded
+        })
     }
 
-    fn capabilities(&self) -> ProviderCapabilities {
-        // The xAI contract does not compose native structured output with tools.
-        ProviderCapabilities::default().with_native_output_tool_composition(
-            self.provider.dialect.quirks.responses.contract != ResponsesContract::Xai,
-        )
+    fn decoder<'id>(&self) -> Self::Decoder<'id> {
+        ResponsesDecoder::new()
     }
 }
 
-/// Normalize a whole Responses body through the decoder and completion fold.
-/// Return serialization, decoder, or fold errors without performing I/O.
-#[cfg(any(test, feature = "websocket"))]
-pub(crate) fn fold_body(
-    provider: &str,
-    response: super::CompletionResponse,
-) -> Result<completion::CompletionResponse, crate::error::ProviderError> {
-    use super::streaming::ResponsesEvent;
-    use crate::operation::AdapterOutput;
-    use crate::wire::{Decoder, Fold, Operation, Reply, Sink};
-
-    let reply = Reply {
-        provider: provider.to_owned(),
-        raw: serde_json::to_value(&response)?,
-        provider_request_id: response.provider_request_id.clone(),
-        // A body already in hand: no reply headers came with it.
-        response_headers: crate::completion::ProviderResponseHeaders::new(),
-    };
-    // A whole body is a unary reply, whose contract accepts an incomplete
-    // terminal.
-    let mut decoder = ResponsesDecoder::new(
-        provider,
-        ResponsesStreamOptions::strict().with_incomplete(IncompleteTerminal::Accept),
-    );
-    let mut out = AdapterOutput::new();
-    decoder.interpret(ResponsesEvent::Whole(Box::new(response)), &mut out);
-
-    let mut fold = <Completion as Operation>::Fold::default();
-    for item in Sink::<Completion>::drain(&mut out) {
-        fold.absorb(item?)?;
+impl crate::completion::ReplayTarget for Responses {
+    /// Whether the catalog prices this dialect's replies
+    /// ([`Quirks::catalog_priced`](crate::providers::openai::wire::Quirks::catalog_priced)).
+    fn catalog_priced(&self) -> bool {
+        self.provider.dialect.quirks.catalog_priced
     }
-    fold.finish(reply)
+
+    /// Section 6.3 of the typed-options design, by dialect.
+    fn map_options(
+        &self,
+        request: &crate::completion::CompletionRequest,
+        fields: crate::completion::options::OptionFields<'_>,
+    ) -> crate::completion::options::OptionMap {
+        crate::providers::openai::options::responses_options(self, request, fields)
+    }
+
+    fn facts(&self) -> Option<&ModelFacts> {
+        Some(&self.facts)
+    }
+
+    fn api(&self) -> crate::message::Api {
+        crate::message::Api::from_static("openai.responses")
+    }
+
+    fn provider(&self) -> &str {
+        self.provider.dialect.name
+    }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// The wire's own tools are declared beside the request's.
+    fn declares_tools(&self, request: &completion::CompletionRequest) -> bool {
+        !self.tools.is_empty() || crate::completion::history::declares_tools(request)
+    }
+
+    /// A call item names its id in `call_id`.
+    fn call_id_slot(&self) -> Option<&'static str> {
+        Some("/call_id")
+    }
+
+    fn blob_slots(&self) -> &'static [&'static str] {
+        &["/encrypted_content"]
+    }
+
+    /// An edited block keeps its item's `id` and `type`, a message its
+    /// `phase`, and reasoning its ciphertext, so the items after it stay
+    /// paired.
+    fn identity(&self, item: &Value) -> Map<String, Value> {
+        let keys: &[&str] = match item.str("type") {
+            Some("message") => &["type", "id", "phase"],
+            Some("reasoning") => &["type", "id", "encrypted_content"],
+            Some("function_call" | "custom_tool_call") => &["type", "id"],
+            _ => &[],
+        };
+        keys.iter()
+            .filter_map(|key| Some(((*key).to_owned(), item.get(*key)?.clone())))
+            .collect()
+    }
+
+    /// A reasoning item goes only with the item it preceded.
+    fn needs_next(&self, item: &Value) -> bool {
+        item.str("type") == Some("reasoning")
+    }
+
+    /// Responses reads images in user input and in function outputs, never
+    /// in assistant messages, and only on a model with vision input. Every
+    /// documented model calls tools except `o1-mini` and `o1-preview`.
+    fn accepts(&self, model: &str) -> crate::completion::Accepts {
+        let images = reads_images(
+            &self.facts,
+            self.provider.dialect.quirks.responses.contract,
+            model,
+        );
+        let model = model.to_ascii_lowercase();
+        crate::completion::Accepts {
+            user_images: images,
+            assistant_images: false,
+            tool_result_images: images,
+            tools: !(model.starts_with("o1-mini") || model.starts_with("o1-preview")),
+            // A reasoning item replays only as the provider made it.
+            foreign_reasoning: false,
+        }
+    }
+
+    /// Responses carries user and tool-result images as data URLs, URLs or
+    /// file ids, documents as files or text, and no audio, video or
+    /// assistant image. File ids need a dialect that resolves them, and
+    /// xAI's `input_image` takes none.
+    fn encodes(&self, _model: &str, media: crate::completion::Media<'_>) -> bool {
+        use crate::completion::{Media, Place};
+        use crate::message::{DocumentData, DocumentSourceKind as Source};
+        let quirks = &self.provider.dialect.quirks;
+        let file_ids = quirks.accepts_file_ids;
+        match media {
+            Media::Image(_, Place::Assistant) | Media::Audio(_) | Media::Video(_) => false,
+            Media::Image(image, _) => {
+                super::image_part(image).is_some()
+                    && (!matches!(image.data, Source::FileId(_))
+                        || file_ids && quirks.responses.contract != ResponsesContract::Xai)
+            }
+            Media::Document(document) => {
+                super::document_part(document).is_some()
+                    && (file_ids || !matches!(document.data, DocumentData::File(Source::FileId(_))))
+            }
+        }
+    }
+
+    /// A request naming `previous_response_id` or a `conversation`
+    /// continues state the provider stores, and one with caller-built
+    /// `input` items state the caller holds. Either holds the calls its
+    /// first results answer.
+    fn continues_stored(&self, request: &completion::CompletionRequest) -> bool {
+        ["previous_response_id", "conversation", "input"]
+            .iter()
+            .any(|key| {
+                crate::completion::options::param(self, request, key)
+                    .is_some_and(|value| !value.is_null())
+            })
+    }
+
+    /// Characters outside `[a-zA-Z0-9_-]` become `_`, and the id is cut to
+    /// 64 characters and loses its trailing `_`.
+    fn normalize_tool_call_id(
+        &self,
+        id: &str,
+        _model: &str,
+        _source: Option<&crate::message::Origin>,
+    ) -> String {
+        use crate::providers::internal::wire_ids::{legal_call_id, short_hash};
+        let legal = legal_call_id(id, 64);
+        match legal.trim_end_matches('_') {
+            // An id with nothing legal in it still names its call.
+            "" => short_hash(id),
+            trimmed => trimmed.to_owned(),
+        }
+    }
 }
 
-#[derive(Default, Deserialize)]
-struct TokenDetails {
-    #[serde(default, deserialize_with = "crate::observe::lenient_count")]
-    cached_tokens: Option<u64>,
-    #[serde(default, deserialize_with = "crate::observe::lenient_count")]
-    reasoning_tokens: Option<u64>,
-}
-
-#[derive(Deserialize)]
-struct Usage {
-    #[serde(default, deserialize_with = "crate::observe::lenient_count")]
-    input_tokens: Option<u64>,
-    #[serde(default, deserialize_with = "crate::observe::lenient_count")]
-    output_tokens: Option<u64>,
-    #[serde(default, deserialize_with = "crate::observe::lenient_count")]
-    total_tokens: Option<u64>,
-    #[serde(default)]
-    input_tokens_details: Option<TokenDetails>,
-    #[serde(default)]
-    output_tokens_details: Option<TokenDetails>,
-}
-
-#[derive(Deserialize)]
-struct IncompleteDetails {
-    reason: Option<String>,
-}
-
-/// The response object, whether it arrived nested under a stream event's
-/// `response` or as the unary reply itself. Every field is optional: this is
-/// the observation parse, and a payload that carries none of them projects
-/// nothing rather than failing.
-#[derive(Default, Deserialize)]
-struct ResponseObject {
-    id: Option<String>,
-    model: Option<String>,
-    status: Option<String>,
-    incomplete_details: Option<IncompleteDetails>,
-    usage: Option<Usage>,
-    error: Option<ObservedError>,
-}
-
-#[derive(Deserialize)]
-struct Payload {
-    #[serde(rename = "type")]
-    kind: Option<String>,
-    response: Option<ResponseObject>,
-    /// The unary reply *is* the response object, so the same fields are
-    /// read at the top level rather than declared a second time.
-    #[serde(flatten)]
-    unwrapped: ResponseObject,
-    // The stream `error` event's own fields.
-    code: Option<serde_json::Value>,
-    message: Option<String>,
+/// Whether `model` reads images, past a `vendor/` prefix: its catalog
+/// entry's input, or for a model the catalog does not list its vendor's
+/// documented text-only models. An unknown model reads them.
+fn reads_images(facts: &ModelFacts, contract: ResponsesContract, model: &str) -> bool {
+    let model = model.rsplit('/').next().unwrap_or_default();
+    match contract {
+        ResponsesContract::Xai => facts.reads_images_or(
+            crate::providers::xai::DIALECT.name,
+            model,
+            crate::providers::xai::reads_images,
+        ),
+        ResponsesContract::OpenAi | ResponsesContract::Codex => facts.reads_images_or(
+            crate::providers::openai::wire::OPENAI.name,
+            model,
+            crate::providers::openai::reads_images,
+        ),
+    }
 }
 
 /// The facts a Responses payload carries before normalization discards
-/// them: the verdict, the model, the response id, the usage and any error
-/// envelope.
+/// them: the verdict, the model, the response id and any error envelope.
 ///
 /// The unary reply is the response object itself; a stream event wraps that
 /// object under `response` (`response.created`, `.completed`, `.failed`,
 /// `.incomplete`) or, for `error`, carries the envelope's fields itself.
-pub(crate) fn project_payload(payload: &[u8], sink: &mut dyn ObservationSink) {
-    let Ok(payload) = serde_json::from_slice::<Payload>(payload) else {
+pub(crate) fn project_payload(payload: &[u8], sink: &mut ObservationSink<'_>) {
+    let Ok(payload) = serde_json::from_slice::<Value>(payload) else {
         return;
     };
-    if payload.kind.as_deref() == Some("error") {
-        // The event carries its envelope either nested under `error` or as
-        // its own top-level fields; the nested form names the error type.
-        payload
-            .unwrapped
-            .error
-            .unwrap_or(ObservedError {
-                code: payload.code,
-                kind: None,
-                message: payload.message,
-            })
-            .emit(sink);
-        return;
+    // An error event carries its envelope and nothing else.
+    if payload.str("type") != Some("error") {
+        project_verdict(&payload, sink);
     }
-    let object = payload.response.unwrap_or(payload.unwrapped);
-    if let Some(usage) = object.usage {
-        sink.emit(AdapterEvent::Usage {
-            usage: AdapterUsage {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                total_tokens: usage.total_tokens,
-                cached_input_tokens: usage.input_tokens_details.and_then(|d| d.cached_tokens),
-                reasoning_tokens: usage.output_tokens_details.and_then(|d| d.reasoning_tokens),
-                tool_input_tokens: None,
-            },
-        });
-    }
-    // `status` is the provider's verdict; `in_progress` on a stream's
-    // opening event is not one yet, so it is left out of the projection.
-    let finish_reason = object
-        .status
-        .filter(|status| status != "in_progress" && status != "queued");
-    let verdict = AdapterVerdict {
-        finish_reason: finish_reason.map(|value| sink.scrub(&value)),
-        block_reason: None,
-        detail: object
-            .incomplete_details
-            .and_then(|details| details.reason)
-            .map(|value| sink.scrub(&value)),
-        model: object.model.map(|value| sink.scrub(&value)),
-    };
-    let response_id = object.id.map(|value| sink.scrub(&value));
-    sink.provider(verdict, response_id);
-    if let Some(error) = object.error {
+    if let Some(error) = ObservedError::of(&payload) {
         error.emit(sink);
     }
+}
+
+/// The verdict and response id a response object, or the stream event
+/// wrapping one, reports.
+fn project_verdict(payload: &Value, sink: &mut ObservationSink<'_>) {
+    let object = payload
+        .get("response")
+        .filter(|response| response.is_object())
+        .unwrap_or(payload);
+    // `status` is the provider's verdict; `in_progress` on a stream's
+    // opening event is not one yet, so it is left out of the projection.
+    let verdict = AdapterVerdict {
+        finish_reason: object
+            .str("status")
+            .filter(|status| *status != "in_progress" && *status != "queued")
+            .map(|value| sink.scrub(value)),
+        block_reason: None,
+        detail: object
+            .at("/incomplete_details/reason")
+            .and_then(Value::as_str)
+            .map(|value| sink.scrub(value)),
+        model: object.str("model").map(|value| sink.scrub(value)),
+    };
+    let response_id = object.str("id").map(|value| sink.scrub(value));
+    sink.provider(verdict, response_id);
 }
 
 #[cfg(test)]

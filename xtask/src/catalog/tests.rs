@@ -1,0 +1,426 @@
+use serde_json::json;
+
+use super::{generate, is_rfc3339_utc, pin, read_rows, render, rfc3339};
+
+/// A row's `rig` facts without the keys it pins.
+fn facts(row: &serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
+    let mut facts = row.get("rig").cloned().unwrap_or_default();
+    if let Some(facts) = facts.as_object_mut() {
+        facts.retain(|candidate, _| candidate != "pinned");
+    }
+    facts
+}
+
+fn models_dev() -> serde_json::Value {
+    json!({
+        "anthropic": {"name": "Anthropic", "models": {
+            "claude-x-1": {
+                "id": "claude-x-1", "name": "Claude X 1", "family": "claude",
+                "reasoning": true,
+                "reasoning_options": [{"type": "effort", "values": ["low", "high"], "extra": 1}],
+                "modalities": {"input": ["text", "image"], "output": ["text"]},
+                "limit": {"context": 200000, "input": 180000, "output": 64000},
+                "cost": {
+                    "input": 3, "output": 15,
+                    "tiers": [{"input": 6, "output": 22.5, "tier": {"type": "context", "size": 200000}}]
+                },
+                "release_date": "2026-01-01",
+                "experimental": {"modes": {"fast": {"cost": {"input": 6, "output": 30, "future_rate": 1}}}},
+                "future_field": {"a": 1}
+            }
+        }},
+        "amazon-bedrock": {"models": {
+            "us.anthropic.claude-x-1-v1:0": {
+                "name": "Claude X 1", "reasoning": true,
+                "canonical_model_id": "anthropic/claude-x-1-20260101"
+            },
+            "anthropic.claude-x-1-v2": {"name": "Claude X 1 v2", "reasoning": true},
+            "amazon.nova-pro-v1:0": {"name": "Nova Pro", "canonical_model_id": "amazon/nova-pro"}
+        }},
+        "openrouter": {"models": {
+            "anthropic/claude-x.1": {
+                "name": "Claude X 1", "reasoning": true,
+                "reasoning_options": [{"type": "toggle"}],
+                "canonical_model_id": "anthropic/claude-x-1"
+            },
+            "openai/gpt-x": {
+                "name": "GPT X", "reasoning": true,
+                "reasoning_options": [{"type": "effort", "values": ["low", "high", "max"]}]
+            },
+            "vendor/thinker": {
+                "name": "Thinker", "reasoning": true,
+                "reasoning_options": [{"type": "budget_tokens", "min": 1024}]
+            },
+            "vendor/unknown": {"name": "Unknown", "reasoning": true},
+            "vendor/plain": {
+                "name": "Plain", "reasoning": false,
+                "reasoning_options": [{"type": "toggle"}]
+            }
+        }},
+        "google-vertex": {"models": {
+            "claude-x-1@default": {"name": "Claude X 1", "canonical_model_id": "anthropic/claude-x-1"}
+        }},
+        "github-copilot": {"models": {
+            "claude-x.1": {"name": "Claude X 1", "canonical_model_id": "anthropic/claude-x-1"},
+            "gpt-x": {"name": "GPT X", "canonical_model_id": "openai/gpt-x"}
+        }},
+        "azure": {"models": {
+            "gpt-x": {"name": "GPT X", "canonical_model_id": "openai/gpt-x", "rig": {"cache": ["short"]}}
+        }},
+        "somebody-else": {"models": {"m": {"name": "M"}}}
+    })
+}
+
+#[test]
+fn sync_keeps_rigs_providers_and_every_field_of_their_rows() {
+    let rows = generate(&models_dev(), &json!({})).expect("generates");
+    assert_eq!(
+        rows.keys().collect::<Vec<_>>(),
+        [
+            "anthropic",
+            "aws_bedrock",
+            "azure.openai",
+            "copilot",
+            "openrouter",
+            "vertexai"
+        ],
+        "models.dev keys are renamed, unknown providers dropped"
+    );
+    let mut row = models_dev()["anthropic"]["models"]["claude-x-1"].clone();
+    if let Some(row) = row.as_object_mut() {
+        row.retain(|candidate, _| candidate != "id");
+    }
+    let claude = serde_json::Value::Object(rows["anthropic"]["claude-x-1"].clone());
+    assert_eq!(
+        claude, row,
+        "every field but the id, which is the row's key"
+    );
+    assert_eq!(
+        super::unread_keys(&rows),
+        [
+            "experimental.modes.*.cost.future_rate",
+            "future_field",
+            "reasoning_options.*.extra"
+        ]
+    );
+}
+
+/// A gateway's row that models.dev reaches through Google's API is left
+/// out, since rig would send it to another API; its other rows stay.
+#[test]
+fn a_row_reached_through_an_api_rig_serves_elsewhere_is_left_out() {
+    let models_dev = json!({"opencode": {"models": {
+        "gemini-x": {"name": "Gemini X", "provider": {"npm": "@ai-sdk/google"}},
+        "claude-x": {"name": "Claude X", "provider": {"npm": "@ai-sdk/anthropic"}},
+        "glm-x": {"name": "GLM X"}
+    }}});
+    let rows = generate(&models_dev, &json!({})).expect("generates");
+    assert_eq!(
+        rows["opencode"].keys().collect::<Vec<_>>(),
+        ["claude-x", "glm-x"]
+    );
+}
+
+#[test]
+fn a_reviewed_row_merges_over_models_dev_and_drops_its_review_keys() {
+    let review = json!({
+        "anthropic": {"models": {
+            "claude-x-1": {
+                "source": "https://example.com/models",
+                "limit": {"output": 128000},
+                "rig": {"adaptive_thinking": true}
+            },
+            "claude-x-0": {"from": "anthropic/claude-x-1", "name": "Claude X 0"}
+        }}
+    });
+    let rows = generate(&models_dev(), &review).expect("generates");
+    let claude = &rows["anthropic"]["claude-x-1"];
+    assert_eq!(
+        claude["limit"],
+        json!({"context": 200000, "input": 180000, "output": 128000})
+    );
+    assert_eq!(claude.get("source"), None);
+    let copy = &rows["anthropic"]["claude-x-0"];
+    assert_eq!(copy["name"], "Claude X 0");
+    assert_eq!(
+        copy["limit"], claude["limit"],
+        "`from` starts from the named row"
+    );
+}
+
+#[test]
+fn rows_whose_canonical_id_is_an_anthropic_model_take_its_facts() {
+    let review = json!({
+        "anthropic": {"models": {"claude-x-1": {"rig": {"binds_context": true}}}},
+        "vertexai": {"models": {"claude-x-1@default": {"rig": {"binds_context": false}}}}
+    });
+    let rows = generate(&models_dev(), &review).expect("generates");
+    let claude = &rows["anthropic"]["claude-x-1"];
+
+    let bedrock = &rows["aws_bedrock"]["us.anthropic.claude-x-1-v1:0"];
+    assert_eq!(
+        bedrock["canonical_model_id"], "anthropic/claude-x-1-20260101",
+        "the canonical id is kept"
+    );
+    assert_eq!(
+        bedrock["reasoning_options"], claude["reasoning_options"],
+        "a dated canonical id finds its model"
+    );
+    assert_eq!(facts(bedrock), facts(claude));
+
+    let openrouter = &rows["openrouter"]["anthropic/claude-x.1"];
+    assert_eq!(facts(openrouter), facts(claude));
+    assert_eq!(
+        openrouter["reasoning_options"],
+        json!([
+            {"type": "effort", "values": ["minimal", "low", "medium", "high", "xhigh"]},
+            {"type": "budget_tokens"},
+            {"type": "toggle"}
+        ]),
+        "OpenRouter keeps its own reasoning options, as it translates them"
+    );
+
+    let vertex = &rows["vertexai"]["claude-x-1@default"];
+    assert_eq!(vertex["reasoning_options"], claude["reasoning_options"]);
+    assert_eq!(
+        facts(vertex),
+        json!({"binds_context": false}),
+        "a reviewed fact wins over the Anthropic one"
+    );
+
+    for (vendor, id) in [
+        ("aws_bedrock", "anthropic.claude-x-1-v2"),
+        ("aws_bedrock", "amazon.nova-pro-v1:0"),
+        ("copilot", "claude-x.1"),
+    ] {
+        assert_eq!(rows[vendor][id].get("rig"), None, "{vendor}/{id}");
+    }
+}
+
+#[test]
+fn a_reviewed_key_the_catalog_does_not_read_is_an_error() {
+    for review in [
+        json!({"anthropic": {"models": {"claude-x-1": {"limits": {}}}}}),
+        json!({"anthropic": {"models": {"claude-x-1": {"rig": {"adaptive": true}}}}}),
+    ] {
+        let error = generate(&models_dev(), &review).expect_err("refused");
+        assert!(error.contains("claude-x-1"), "{error}");
+    }
+}
+
+#[test]
+fn the_rendered_catalog_reads_back_to_itself() {
+    let rows = generate(&models_dev(), &json!({})).expect("generates");
+    let rendered = render(&rows);
+    let read = read_rows(&serde_json::from_str(&rendered).expect("valid JSON")).expect("rows");
+    assert_eq!(render(&read), rendered);
+    assert_eq!(
+        rendered.lines().count(),
+        27,
+        "one line per model:\n{rendered}"
+    );
+}
+
+#[test]
+fn a_reviewed_reasoning_control_reaches_the_row() {
+    let review = json!({
+        "anthropic": {"models": {"claude-x-1": {
+            "reasoning_options": [],
+            "rig": {"reasoning_control": "none"}
+        }}}
+    });
+    let rows = generate(&models_dev(), &review).expect("generates");
+    let claude = &rows["anthropic"]["claude-x-1"];
+    assert_eq!(claude["reasoning_options"], json!([]));
+    assert_eq!(facts(claude), json!({"reasoning_control": "none"}));
+}
+
+#[test]
+fn a_reviewed_format_reaches_the_row() {
+    let review = json!({
+        "anthropic": {"models": {"claude-x-1": {"rig": {"format": "anthropic"}}}}
+    });
+    let rows = generate(&models_dev(), &review).expect("generates");
+    assert_eq!(
+        rows["anthropic"]["claude-x-1"]["rig"],
+        json!({"format": "anthropic"})
+    );
+}
+
+#[test]
+fn a_gateway_that_translates_reasoning_takes_every_effort_and_a_budget() {
+    let rows = generate(&models_dev(), &json!({})).expect("generates");
+    let openrouter = &rows["openrouter"];
+    assert_eq!(
+        openrouter["openai/gpt-x"]["reasoning_options"],
+        json!([{"type": "effort", "values": ["minimal", "low", "medium", "high", "xhigh", "max"]}]),
+        "an OpenAI upstream takes no budget, and keeps the efforts it lists"
+    );
+    assert_eq!(
+        openrouter["vendor/thinker"]["reasoning_options"],
+        json!([
+            {"type": "effort", "values": ["minimal", "low", "medium", "high", "xhigh"]},
+            {"type": "budget_tokens", "min": 1024}
+        ]),
+        "a listed budget is kept, and reasoning still cannot be turned off"
+    );
+    assert_eq!(
+        openrouter["vendor/unknown"].get("reasoning_options"),
+        None,
+        "a row that lists nothing stays unknown"
+    );
+    assert_eq!(
+        openrouter["vendor/plain"]["reasoning_options"],
+        json!([{"type": "toggle"}]),
+        "a model that does not reason is left alone"
+    );
+}
+
+#[test]
+fn rows_whose_canonical_id_is_an_openai_model_take_its_sampling_rule() {
+    let review = json!({
+        "openai": {"models": {"gpt-x": {
+            "name": "GPT X",
+            "rig": {"sampling": "reasoning_off", "reasoning_default": "medium", "cache": ["long"]}
+        }}}
+    });
+    let rows = generate(&models_dev(), &review).expect("generates");
+    assert_eq!(
+        rows["copilot"]["gpt-x"]["rig"],
+        json!({"sampling": "reasoning_off", "reasoning_default": "medium"})
+    );
+    assert_eq!(
+        rows["azure.openai"]["gpt-x"]["rig"],
+        json!({"cache": ["short"], "sampling": "reasoning_off", "reasoning_default": "medium"}),
+        "the row's own facts stay, and only the sampling rule joins them"
+    );
+}
+
+/// A mirror vendor lists every reviewed row of its origin, with the
+/// mirror's own review laid on top.
+#[test]
+fn a_mirror_vendor_lists_every_reviewed_row_of_its_origin() {
+    let models_dev = json!({"google": {"models": {
+        "gemini-x": {"name": "Gemini X", "cost": {"input": 1, "output": 2}}
+    }}});
+    let review = json!({
+        "gcp.gemini": {"models": {"gemini-x": {"rig": {"reasoning_default": "high"}}}},
+        "gemini-grpc": {"models": {"gemini-x": {"limit": {"output": 64}}}}
+    });
+    let rows = generate(&models_dev, &review).expect("generates");
+    let mirrored = &rows["gemini-grpc"]["gemini-x"];
+    assert_eq!(mirrored["cost"], json!({"input": 1, "output": 2}));
+    assert_eq!(facts(mirrored), json!({"reasoning_default": "high"}));
+    assert_eq!(
+        mirrored["limit"],
+        json!({"output": 64}),
+        "its own review lays over"
+    );
+}
+
+/// Every key the review or a join sets is pinned, so a refresh from
+/// models.dev keeps it, and nothing else is; `limit` and `cost` pin by part.
+/// Pinning again changes nothing, which is what `catalog check` relies on.
+#[test]
+fn the_keys_the_review_and_joins_set_are_pinned() {
+    let review = json!({
+        "anthropic": {"models": {
+            "claude-x-1": {
+                "source": "https://example.com/models",
+                "reasoning_options": [{"type": "toggle"}],
+                "limit": {"output": 128000},
+                "rig": {"adaptive_thinking": true}
+            },
+            "claude-x-0": {"from": "anthropic/claude-x-1", "name": "Claude X 0"}
+        }}
+    });
+    let rows = generate(&models_dev(), &review).expect("generates");
+    let pinned = |vendor: &str, id: &str| {
+        rows[vendor][id]
+            .get("rig")
+            .and_then(|facts| facts.get("pinned"))
+            .cloned()
+    };
+    assert_eq!(
+        pinned("anthropic", "claude-x-1"),
+        Some(json!(["reasoning_options", "limit.output"])),
+        "the reviewed keys, and not `source` or `rig`"
+    );
+    assert_eq!(
+        pinned("anthropic", "claude-x-0"),
+        Some(json!([
+            "name",
+            "family",
+            "reasoning",
+            "reasoning_options",
+            "modalities",
+            "limit.context",
+            "limit.input",
+            "limit.output",
+            "cost.input",
+            "cost.output",
+            "cost.tiers",
+            "release_date",
+            "experimental"
+        ])),
+        "a copy pins every key it holds"
+    );
+    assert_eq!(
+        pinned("aws_bedrock", "us.anthropic.claude-x-1-v1:0"),
+        Some(json!(["reasoning_options"])),
+        "a served row pins what it takes from its origin"
+    );
+    assert_eq!(
+        pinned("openrouter", "vendor/thinker"),
+        Some(json!(["reasoning_options"])),
+        "a gateway pins the controls it translates"
+    );
+    for (vendor, id) in [
+        ("openrouter", "vendor/unknown"),
+        ("openrouter", "vendor/plain"),
+        ("copilot", "gpt-x"),
+        ("aws_bedrock", "amazon.nova-pro-v1:0"),
+    ] {
+        assert_eq!(pinned(vendor, id), None, "{vendor}/{id}");
+    }
+    assert_eq!(rows["copilot"]["claude-x.1"].get("rig"), None);
+
+    let mut again = rows.clone();
+    pin(&mut again, &read_rows(&review).expect("rows"));
+    assert_eq!(again, rows);
+}
+
+/// Sync writes when its data was read in the one form rig-core reads, and
+/// `catalog check` accepts that form only.
+#[test]
+fn the_generation_time_is_written_as_an_rfc_3339_utc_time() {
+    use std::time::{Duration, UNIX_EPOCH};
+    for (seconds, written) in [
+        (0, "1970-01-01T00:00:00Z"),
+        (951_868_800, "2000-03-01T00:00:00Z"),
+        (1_709_208_000, "2024-02-29T12:00:00Z"),
+        (1_791_355_811, "2026-10-07T06:50:11Z"),
+    ] {
+        let time = UNIX_EPOCH + Duration::from_secs(seconds);
+        assert_eq!(rfc3339(time).as_deref(), Ok(written));
+        assert!(is_rfc3339_utc(written), "{written}");
+    }
+    for not_a_time in [
+        "",
+        "2026-10-07",
+        "2026-10-07T06:50:11+00:00",
+        "2026-1O-07T06:50:11Z",
+    ] {
+        assert!(!is_rfc3339_utc(not_a_time), "{not_a_time}");
+    }
+}
+
+#[test]
+fn a_review_of_a_model_models_dev_dropped_needs_its_facts() {
+    let review = json!({"anthropic": {"models": {"claude-gone": {"rig": {"cache": ["long"]}}}}});
+    let error = generate(&models_dev(), &review).expect_err("refused");
+    assert!(error.contains("claude-gone"), "{error}");
+    let review = json!({"anthropic": {"models": {"claude-gone": {"name": "Claude Gone"}}}});
+    let rows = generate(&models_dev(), &review).expect("generates");
+    assert_eq!(rows["anthropic"]["claude-gone"]["name"], "Claude Gone");
+}

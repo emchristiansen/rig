@@ -1,8 +1,6 @@
 use futures::FutureExt;
-use rig::driver::Bound;
-use rig::http_client::BoxedHttpClient;
-use rig::prelude::*;
-use rig::providers::gemini::Gemini;
+use rig::providers::gemini::GeminiConfig;
+use rig_test_support::cassette_models::GeminiModels;
 use serde::Deserialize;
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, resume_unwind};
@@ -221,80 +219,7 @@ pub(super) fn assert_recorded_response_excludes(scenario: &str, needles: &[&str]
     }
 }
 
-/// The `usageMetadata.totalTokenCount` on the **last** recorded SSE frame of
-/// `scenario` that carries one.
-///
-/// Gemini's streaming usage is cumulative per chunk, so this is the turn's
-/// real total — and the number a terminal built at an *intermediate*
-/// `finishReason` gets wrong. Read from the fixture rather than hardcoded, so
-/// a re-record cannot leave the expectation behind.
-pub(super) fn last_frame_total_tokens(scenario: &str) -> u64 {
-    recorded_response_bodies(scenario)
-        .iter()
-        .flat_map(|body| {
-            body.lines()
-                .filter_map(|line| line.strip_prefix("data: "))
-                .filter_map(|frame| serde_json::from_str::<serde_json::Value>(frame).ok())
-                .filter_map(|frame| frame.get("usageMetadata")?.get("totalTokenCount")?.as_u64())
-                .collect::<Vec<_>>()
-        })
-        .next_back()
-        .unwrap_or_else(|| panic!("{scenario}: no recorded frame carries a totalTokenCount"))
-}
-
-/// Whether any recorded `streamGenerateContent` body in `scenario` carries a
-/// `finishReason` frame that is **not** its last frame.
-///
-/// That is the wire shape the stream-terminal matrix exists for: Gemini emits
-/// an intermediate `finishReason` when a built-in tool runs a round and then
-/// keeps streaming.
-fn recorded_stream_finishes_early(scenario: &str) -> bool {
-    recorded_response_bodies(scenario).iter().any(|body| {
-        let frames: Vec<serde_json::Value> = body
-            .lines()
-            .filter_map(|line| line.strip_prefix("data: "))
-            .filter_map(|frame| serde_json::from_str(frame).ok())
-            .collect();
-        let first_finish = frames.iter().position(|frame| {
-            frame
-                .get("candidates")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|candidates| {
-                    candidates
-                        .iter()
-                        .any(|candidate| candidate.get("finishReason").is_some())
-                })
-        });
-
-        first_finish.is_some_and(|first| first + 1 < frames.len())
-    })
-}
-
-/// Assert whether `scenario`'s recorded stream carries the intermediate
-/// `finishReason` shape.
-///
-/// Asserted in both directions: the model only sometimes takes two tool
-/// rounds, so a repro cell whose fixture stopped carrying the shape would
-/// otherwise keep passing while covering nothing — and a control cell that
-/// started carrying it is no longer a control.
-pub(super) fn assert_recorded_stream_finishes_early(scenario: &str, expected: bool) {
-    assert_eq!(
-        recorded_stream_finishes_early(scenario),
-        expected,
-        "{scenario}: recorded stream should {}carry a finishReason before its last frame; \
-         re-record the cell",
-        if expected { "" } else { "not " }
-    );
-}
-
-/// The Gemini config bound to the bundled transport — what a cassette test
-/// builds its models from, now that a model is a bound wire. One config
-/// serves both Gemini surfaces: `bound.completion(m)` is GenerateContent and
-/// `bound.map_wire(|gemini| gemini.interactions(m))` is the Interactions API,
-/// which is why the interactions wrapper hands out the same type.
-pub(super) type BoundGemini = Bound<Gemini, BoxedHttpClient>;
-
-async fn gemini_cassette(spec: impl Into<CassetteSpec>) -> (ProviderCassette, BoundGemini) {
+async fn gemini_cassette(spec: impl Into<CassetteSpec>) -> (ProviderCassette, GeminiConfig) {
     let cassette = ProviderCassette::start(
         &crate::cassettes::cassette_root(),
         "gemini",
@@ -302,44 +227,43 @@ async fn gemini_cassette(spec: impl Into<CassetteSpec>) -> (ProviderCassette, Bo
         "https://generativelanguage.googleapis.com",
     )
     .await;
-    let gemini = Gemini::new(cassette.api_key("GEMINI_API_KEY"))
-        .with_base_url(cassette.base_url())
-        .bound()
-        .expect("transport should build");
+    let gemini =
+        GeminiConfig::new(cassette.api_key("GEMINI_API_KEY")).with_base_url(cassette.base_url());
 
     (cassette, gemini)
 }
 
-/// Cassette wrapper for the run-lifecycle matrix (PR #2407): the client sends
-/// through a [`rig::http_client::BoxedHttpClient`] carrying the supplied
-/// [`rig::http_client::HttpMiddleware`], so the same recorded exchange
-/// exercises the transport middleware seam and the run lifecycle hooks
-/// together (see `crates/rig-cassette/fixtures/cassettes/gemini/lifecycle_matrix/`).
-pub(super) async fn with_gemini_lifecycle_cassette<M, F, Fut>(
+/// Automatic-caching long runs
+/// (`crates/rig-cassette/fixtures/cassettes/gemini/auto_caching/`). The body
+/// gets the client and the session's recorded clock, which the cache book
+/// reads so its time-dependent decisions replay; it returns whatever the
+/// test wants to assert on after the session is finished.
+pub(super) async fn with_gemini_auto_caching_cassette<F, Fut, R>(
     spec: impl Into<CassetteSpec>,
-    middleware: M,
     test_body: F,
-) where
-    M: rig::http_client::HttpMiddleware + 'static,
-    F: FnOnce(BoundGemini) -> Fut,
-    Fut: Future<Output = ()>,
+) -> R
+where
+    F: FnOnce(rig::providers::gemini::Gemini, crate::cassettes::CassetteClock) -> Fut,
+    Fut: Future<Output = R>,
 {
-    let cassette = ProviderCassette::start(
-        &crate::cassettes::cassette_root(),
-        "gemini",
-        spec,
-        "https://generativelanguage.googleapis.com",
-    )
-    .await;
-    let client = Gemini::new(cassette.api_key("GEMINI_API_KEY"))
-        .with_base_url(cassette.base_url())
-        .bind(
-            rig::http_client::ReqwestClient::default()
-                .boxed()
-                .with_middleware(middleware),
-        );
-    let result = AssertUnwindSafe(test_body(client)).catch_unwind().await;
-    cassette.finish_after_test(result).await;
+    let spec = spec.into();
+    let (cassette, config) = gemini_cassette(spec).await;
+    let client = config.connect(rig_test_support::cassettes::local_http());
+    let clock = cassette.clock();
+    let result = AssertUnwindSafe(test_body(client, clock))
+        .catch_unwind()
+        .await;
+    crate::cassettes::checkpoint_attempt(&cassette, "gemini", spec.scenario()).await;
+    match result {
+        Ok(value) => {
+            cassette.finish_after_test(Ok(())).await;
+            value
+        }
+        Err(payload) => {
+            cassette.finish_after_test(Err(payload)).await;
+            unreachable!("finishing a failed session resumes its panic")
+        }
+    }
 }
 
 /// The effect corpus's provider-breadth matrix (Matrix N):
@@ -348,7 +272,7 @@ pub(super) async fn with_gemini_corpus_breadth_cassette<F, Fut>(
     spec: impl Into<CassetteSpec>,
     test_body: F,
 ) where
-    F: FnOnce(BoundGemini) -> Fut,
+    F: FnOnce(GeminiModels) -> Fut,
     Fut: Future<Output = ()>,
 {
     with_gemini_cassette(spec, test_body).await;
@@ -360,7 +284,7 @@ pub(super) async fn with_gemini_corpus_delta_cassette<F, Fut>(
     spec: impl Into<CassetteSpec>,
     test_body: F,
 ) where
-    F: FnOnce(BoundGemini) -> Fut,
+    F: FnOnce(GeminiModels) -> Fut,
     Fut: Future<Output = ()>,
 {
     with_gemini_cassette(spec, test_body).await;
@@ -372,7 +296,7 @@ pub(super) async fn with_gemini_corpus_retrieval_cassette<F, Fut>(
     spec: impl Into<CassetteSpec>,
     test_body: F,
 ) where
-    F: FnOnce(BoundGemini) -> Fut,
+    F: FnOnce(GeminiModels) -> Fut,
     Fut: Future<Output = ()>,
 {
     with_gemini_cassette(spec, test_body).await;
@@ -380,37 +304,57 @@ pub(super) async fn with_gemini_corpus_retrieval_cassette<F, Fut>(
 
 pub(super) async fn with_gemini_cassette<F, Fut>(spec: impl Into<CassetteSpec>, test_body: F)
 where
-    F: FnOnce(BoundGemini) -> Fut,
+    F: FnOnce(GeminiModels) -> Fut,
     Fut: Future<Output = ()>,
 {
     let spec = spec.into();
     let (cassette, client) = gemini_cassette(spec).await;
-    let result = AssertUnwindSafe(test_body(client)).catch_unwind().await;
+    let result = AssertUnwindSafe(test_body(GeminiModels::new(
+        client,
+        rig_test_support::cassettes::local_http(),
+    )))
+    .catch_unwind()
+    .await;
     crate::cassettes::checkpoint_attempt(&cassette, "gemini", spec.scenario()).await;
     cassette.finish_after_test(result).await;
 }
 
-/// Per-bug wrapper for the model-turn termination-metadata matrix
-/// (`crates/rig-cassette/fixtures/cassettes/gemini/turn_termination_matrix/`), rig#2184.
-pub(super) async fn with_gemini_turn_metadata_cassette<F, Fut>(
+/// [`with_gemini_cassette`], with `check` run on what the session
+/// recorded before the recording is written (`cassettes::finish_checked`).
+pub(super) async fn with_gemini_checked_cassette<F, Fut>(
     spec: impl Into<CassetteSpec>,
     test_body: F,
+    check: impl FnOnce(&std::path::Path, &str),
 ) where
-    F: FnOnce(BoundGemini) -> Fut,
+    F: FnOnce(GeminiModels) -> Fut,
     Fut: Future<Output = ()>,
 {
-    with_gemini_cassette(spec, test_body).await;
+    let spec = spec.into();
+    let (cassette, bound) = gemini_cassette(spec).await;
+    let result = AssertUnwindSafe(test_body(GeminiModels::new(
+        bound,
+        rig_test_support::cassettes::local_http(),
+    )))
+    .catch_unwind()
+    .await;
+    crate::cassettes::checkpoint_attempt(&cassette, "gemini", spec.scenario()).await;
+    crate::cassettes::finish_checked(cassette, "gemini", spec.scenario(), result, check).await;
 }
 
 pub(super) async fn with_gemini_interactions_cassette<F, Fut>(
     spec: impl Into<CassetteSpec>,
     test_body: F,
 ) where
-    F: FnOnce(BoundGemini) -> Fut,
+    F: FnOnce(GeminiModels) -> Fut,
     Fut: Future<Output = ()>,
 {
     let (cassette, client) = gemini_cassette(spec).await;
-    let result = AssertUnwindSafe(test_body(client)).catch_unwind().await;
+    let result = AssertUnwindSafe(test_body(GeminiModels::new(
+        client,
+        rig_test_support::cassettes::local_http(),
+    )))
+    .catch_unwind()
+    .await;
     cassette.finish_after_test(result).await;
 }
 
@@ -423,18 +367,7 @@ pub(super) async fn with_gemini_code_execution_cassette<F, Fut>(
     spec: impl Into<CassetteSpec>,
     test_body: F,
 ) where
-    F: FnOnce(BoundGemini) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    with_gemini_cassette(spec, test_body).await;
-}
-
-/// Stream-terminal edge matrix (`crates/rig-cassette/fixtures/cassettes/gemini/stream_terminal_matrix/`).
-pub(super) async fn with_gemini_stream_terminal_cassette<F, Fut>(
-    spec: impl Into<CassetteSpec>,
-    test_body: F,
-) where
-    F: FnOnce(BoundGemini) -> Fut,
+    F: FnOnce(GeminiModels) -> Fut,
     Fut: Future<Output = ()>,
 {
     with_gemini_cassette(spec, test_body).await;
@@ -448,7 +381,7 @@ pub(super) async fn with_gemini_thought_text_cassette<F, Fut>(
     spec: impl Into<CassetteSpec>,
     test_body: F,
 ) where
-    F: FnOnce(BoundGemini) -> Fut,
+    F: FnOnce(GeminiModels) -> Fut,
     Fut: Future<Output = ()>,
 {
     with_gemini_cassette(spec, test_body).await;
@@ -459,7 +392,7 @@ pub(super) async fn with_gemini_cassette_bogus_key<F, Fut>(
     spec: impl Into<CassetteSpec>,
     test_body: F,
 ) where
-    F: FnOnce(BoundGemini) -> Fut,
+    F: FnOnce(GeminiModels) -> Fut,
     Fut: Future<Output = ()>,
 {
     let cassette = ProviderCassette::start(
@@ -471,11 +404,13 @@ pub(super) async fn with_gemini_cassette_bogus_key<F, Fut>(
     .await;
     // The rejected credential is this wrapper's subject.
     cassette.expect_account_failure(crate::cassettes::AccountFailure::Auth);
-    let client = Gemini::new(cassette.bogus_api_key())
-        .with_base_url(cassette.base_url())
-        .bound()
-        .expect("transport should build");
-    let result = AssertUnwindSafe(test_body(client)).catch_unwind().await;
+    let client = GeminiConfig::new(cassette.bogus_api_key()).with_base_url(cassette.base_url());
+    let result = AssertUnwindSafe(test_body(GeminiModels::new(
+        client,
+        rig_test_support::cassettes::local_http(),
+    )))
+    .catch_unwind()
+    .await;
     cassette.finish_after_test(result).await;
 }
 
@@ -490,7 +425,7 @@ pub(super) async fn with_gemini_prompt_caching_cassette<F, Fut>(
     spec: impl Into<CassetteSpec>,
     test_body: F,
 ) where
-    F: FnOnce(BoundGemini) -> Fut,
+    F: FnOnce(GeminiModels) -> Fut,
     Fut: Future<Output = ()>,
 {
     with_gemini_cassette(spec, test_body).await;
@@ -521,7 +456,7 @@ pub(super) async fn with_gemini_prompt_caching_cassette<F, Fut>(
 /// Every handle is attempted regardless of the ones before it failing, so a
 /// cell holding three caches cannot leak two because the first delete 500'd.
 pub(super) async fn always_deleting_cached_contents<Fut>(
-    client: &BoundGemini,
+    client: &GeminiModels,
     handles: &[String],
     body: Fut,
 ) where
@@ -544,7 +479,7 @@ pub(super) async fn always_deleting_cached_contents<Fut>(
 /// whole block could be deleted with all four cells still green, and the one
 /// path that names a still-billing handle would be gone silently.
 async fn always_deleting_cached_contents_reporting<Fut, R>(
-    client: &BoundGemini,
+    client: &GeminiModels,
     handles: &[String],
     body: Fut,
     report: R,
@@ -595,7 +530,7 @@ mod always_deleting_cached_contents_tests {
     async fn stub_cached_contents(
         seen: Arc<Mutex<Vec<String>>>,
         status: StatusCode,
-    ) -> (BoundGemini, tokio::task::JoinHandle<()>) {
+    ) -> (GeminiModels, tokio::task::JoinHandle<()>) {
         let app = axum::Router::new().fallback(axum::routing::any(
             move |method: axum::http::Method, uri: axum::http::Uri| {
                 let seen = Arc::clone(&seen);
@@ -614,10 +549,10 @@ mod always_deleting_cached_contents_tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.expect("stub should serve");
         });
-        let client = Gemini::new("stub-key")
-            .with_base_url(format!("http://{addr}"))
-            .bound()
-            .expect("transport should build");
+        let client = GeminiModels::new(
+            GeminiConfig::new("stub-key").with_base_url(format!("http://{addr}")),
+            rig_test_support::cassettes::local_http(),
+        );
 
         (client, server)
     }

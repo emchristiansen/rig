@@ -1,10 +1,9 @@
 use rig_core::{
     Embed,
     embeddings::EmbeddingsBuilder,
-    providers::openai::{self, wire::OpenAI},
+    providers::openai::{self, OpenAI},
     vector_store::{InsertDocuments, VectorStoreIndex, request::VectorSearchRequest},
 };
-use rig_reqwest::prelude::*;
 use rig_scylladb::{ScyllaDbVectorStore, create_session};
 use serde::{Deserialize, Serialize};
 
@@ -24,9 +23,11 @@ async fn main() -> Result<(), anyhow::Error> {
     // In production, you would use your ScyllaDB cluster endpoints
     let session = create_session("127.0.0.1:9042").await?;
 
-    // Bind the OpenAI embeddings endpoint and select an embedding model
-    let openai_client = OpenAI::from_env()?.bound()?;
-    let model = openai_client.embedding(openai::TEXT_EMBEDDING_ADA_002, None);
+    // The OpenAI client, from `OPENAI_API_KEY`.
+    let openai_client = OpenAI::from_env()?;
+    let model = openai_client
+        .embedding(openai::TEXT_EMBEDDING_ADA_002, None)
+        .erase();
 
     // Create ScyllaDB vector store
     let vector_store = ScyllaDbVectorStore::new(
@@ -65,7 +66,7 @@ async fn main() -> Result<(), anyhow::Error> {
     ];
 
     // Generate embeddings for the documents
-    let embeddings = EmbeddingsBuilder::new(model.clone())
+    let embeddings = EmbeddingsBuilder::new(model)
         .documents(words.clone())?
         .build()
         .await?;
@@ -98,13 +99,13 @@ async fn main() -> Result<(), anyhow::Error> {
     let results = vector_store.top_n::<Word>(req.clone()).await?;
 
     tracing::info!("Top 3 similar definitions:");
-    for (i, (score, id, word)) in results.iter().enumerate() {
+    for (i, result) in results.iter().enumerate() {
         tracing::info!(
             "{}. Score: {:.4}, ID: {}, Definition: {}",
             i + 1,
-            score,
-            id,
-            word.definition
+            result.score,
+            result.id,
+            result.document.definition
         );
     }
 
@@ -113,8 +114,8 @@ async fn main() -> Result<(), anyhow::Error> {
     let id_results = vector_store.top_n_ids(req).await?;
 
     tracing::info!("Top 2 similar document IDs:");
-    for (i, (score, id)) in id_results.iter().enumerate() {
-        tracing::info!("{}. Score: {:.4}, ID: {}", i + 1, score, id);
+    for (i, result) in id_results.iter().enumerate() {
+        tracing::info!("{}. Score: {:.4}, ID: {}", i + 1, result.score, result.id);
     }
 
     // Test with different query
@@ -128,13 +129,13 @@ async fn main() -> Result<(), anyhow::Error> {
     let db_results = vector_store.top_n::<Word>(req).await?;
 
     tracing::info!("Top 2 similar definitions:");
-    for (i, (score, id, word)) in db_results.iter().enumerate() {
+    for (i, result) in db_results.iter().enumerate() {
         tracing::info!(
             "{}. Score: {:.4}, ID: {}, Definition: {}",
             i + 1,
-            score,
-            id,
-            word.definition
+            result.score,
+            result.id,
+            result.document.definition
         );
     }
 

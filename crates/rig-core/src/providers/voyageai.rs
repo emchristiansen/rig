@@ -6,20 +6,20 @@
 //! # fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let provider = voyageai::VoyageAi::from_env()?;
 //!
-//! let embeddings = provider.embeddings(voyageai::VOYAGE_3_5, None);
+//! let embeddings = provider.embedding(voyageai::VOYAGE_3_5, None);
 //! let reranker = provider.rerank(voyageai::RERANK_2_5);
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! Bind a configured wire to a transport to obtain a [`crate::driver::Bound`]
-//! implementing the corresponding model trait.
+//! Pair a configured wire with a transport in a [`crate::Model`] to send it.
 
 use serde::{Deserialize, Serialize};
 
 pub mod wire;
 
-pub use wire::{Embeddings, Rerank, VoyageAi};
+pub use crate::client::voyageai::VoyageAi;
+pub use wire::{Embeddings, Rerank, VoyageAiConfig};
 
 /// Voyage AI's API root.
 const VOYAGEAI_API_BASE_URL: &str = "https://api.voyageai.com/v1";
@@ -48,9 +48,9 @@ pub fn model_dimensions_from_identifier(model_identifier: &str) -> Option<usize>
     }
 }
 
+/// One `/embeddings` reply, as far as rig reads it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingResponse {
-    pub object: String,
     pub data: Vec<EmbeddingData>,
     pub model: String,
     pub usage: Usage,
@@ -63,9 +63,7 @@ pub struct Usage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingData {
-    pub object: String,
     pub embedding: Vec<f64>,
-    pub index: usize,
 }
 
 /// `rerank-2.5` reranker model (Voyage AI)
@@ -88,14 +86,6 @@ pub struct RerankApiResponse {
     pub usage: RerankApiUsage,
 }
 
-/// Error envelope accepted in a successful HTTP rerank response. The driver
-/// reports the original body rather than constructing a ranking from it.
-#[derive(Debug, Deserialize)]
-pub struct RerankErrorEnvelope {
-    #[allow(dead_code)]
-    message: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RerankApiUsage {
     pub total_tokens: usize,
@@ -108,6 +98,3 @@ pub struct RerankApiData {
     #[serde(default)]
     pub document: Option<String>,
 }
-
-#[cfg(test)]
-mod tests;

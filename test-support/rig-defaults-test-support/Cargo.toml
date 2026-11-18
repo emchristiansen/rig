@@ -1,0 +1,36 @@
+[package]
+name = "rig-defaults-test-support"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+description = "The rig agent's default plugins for tests: adding them all, checking that a plugin's stage systems are ordered against them, and the test that every one can be left out."
+
+[lints]
+workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+# `Plugins`, what `assert_stages_ordered` adds.
+bevy_app = { workspace = true }
+# The agent loop's build warnings, which `tests/removal.rs` reads.
+bevy_ecs = { workspace = true }
+rig-harness = { path = "../../crates/rig-harness" }
+# The default plugins of `plugins.toml`.
+rig-basics = { path = "../../plugins/rig-basics" }
+rig-tui = { path = "../../plugins/rig-tui" }
+rig-traffic = { path = "../../plugins/rig-traffic" }
+
+[dev-dependencies]
+rig-core = { workspace = true, features = ["test-utils"] }
+rig-ecs = { path = "../../crates/rig-ecs" }
+rig-harness-test-support = { path = "../rig-harness-test-support" }
+# The optional plugins added on top of the defaults in `tests/removal.rs`.
+rig-inspect = { path = "../../plugins/rig-inspect" }
+rig-claude-cloak = { path = "../../plugins/rig-claude-cloak" }
+rig-mcp-client = { path = "../../plugins/rig-mcp-client" }
+rig-acp = { path = "../../plugins/rig-acp" }
+serde_json = { workspace = true }
+# Named by the derives of the plugin `rig plugin new` writes.
+bevy_reflect = { workspace = true }

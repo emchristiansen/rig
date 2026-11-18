@@ -4,6 +4,8 @@
 //!
 //! In production, this is very unlikely to be a problem as many of the tools used may include MCP servers and other long-running
 //! operations, which may cause issues.
+//!
+//! With `--stream` the answer is streamed to stdout, then its usage printed.
 use std::time::Duration;
 
 use anyhow::Result;
@@ -11,6 +13,7 @@ use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::trace::SdkTracerProvider;
+use rig::agent::stream_to_stdout;
 use rig::prelude::*;
 use rig::providers::openai::OpenAI;
 use rig::{providers, tool::Tool};
@@ -144,12 +147,11 @@ async fn main() -> Result<(), anyhow::Error> {
         .with(otel_layer)
         .init();
 
-    // Create the OpenAI Responses provider, bound to the bundled transport
-    let openai_client = OpenAI::from_env()?.bound()?;
+    // The OpenAI client, from `OPENAI_API_KEY`.
+    let openai_client = OpenAI::from_env()?;
 
     // Create agent with a single context prompt and two tools
-    let calculator_agent = openai_client
-        .agent(providers::openai::GPT_4O)
+    let calculator_agent = AgentBuilder::new(openai_client.completion(providers::openai::GPT_4O))
         .preamble("You are a calculator here to help the user perform arithmetic operations. Use the tools provided to answer the user's question.")
         .max_tokens(1024)
         .default_max_turns(2)
@@ -159,11 +161,16 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // Prompt the agent and print the response
     println!("Calculate 2 - 5");
-
-    println!(
-        "OpenAI Calculator Agent: {}",
-        calculator_agent.prompt("Calculate 2 - 5").await?.output
-    );
+    if std::env::args().any(|arg| arg == "--stream") {
+        let mut stream = calculator_agent.prompt("Calculate 2 - 5").stream();
+        let res = stream_to_stdout(&mut stream).await?;
+        println!("Token usage response: {usage:?}", usage = res.usage());
+    } else {
+        println!(
+            "OpenAI Calculator Agent: {}",
+            calculator_agent.prompt("Calculate 2 - 5").await?.output()
+        );
+    }
 
     let _ = provider.shutdown();
 

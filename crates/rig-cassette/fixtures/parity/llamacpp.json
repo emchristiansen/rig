@@ -1,0 +1,1462 @@
+{
+  "content_matrix/empty_answer_with_stop.yaml#0": {
+    "mode": "unary",
+    "choice": [],
+    "usage": {
+      "input_tokens": 18,
+      "output_tokens": 1,
+      "total_tokens": 19,
+      "cached_input_tokens": 0
+    },
+    "response_id": "chatcmpl-1ymtIOythZktwrZYkUnZgPPMnN04U0OI",
+    "finish_reason": "stop",
+    "model": "/REDACTED_PATH/Qwen3-1.7B-Q4_K_M.gguf",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-1ymtIOythZktwrZYkUnZgPPMnN04U0OI",
+      "model": "/REDACTED_PATH/Qwen3-1.7B-Q4_K_M.gguf",
+      "object": "chat.completion",
+      "system_fingerprint": "b10964-b29c606e2",
+      "timings": {
+        "cache_n": 0,
+        "predicted_ms": 0.001,
+        "predicted_n": 1,
+        "predicted_per_second": 0.0,
+        "predicted_per_token_ms": 0.0,
+        "prompt_ms": 24.985,
+        "prompt_n": 18,
+        "prompt_per_second": 720.4322593556134,
+        "prompt_per_token_ms": 1.3880555555555556
+      },
+      "usage": {
+        "completion_tokens": 1,
+        "prompt_tokens": 18,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 19
+      }
+    }
+  },
+  "model_family_matrix/llama_blocking_tool_call.yaml#0": {
+    "mode": "unary",
+    "choice": [
+      {
+        "tool_call": {
+          "id": "Ak3p8eDKCL6eKttzUExBpjobwvcIAP4b",
+          "name": "subtract",
+          "arguments": {
+            "x": 2,
+            "y": 5
+          },
+          "native": {
+            "item": {
+              "function": {
+                "arguments": "{\"x\": 2, \"y\": 5}",
+                "name": "subtract"
+              },
+              "id": "Ak3p8eDKCL6eKttzUExBpjobwvcIAP4b",
+              "type": "function"
+            },
+            "fingerprint": "e1f16cd8f79c826a"
+          }
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 227,
+      "output_tokens": 22,
+      "total_tokens": 249,
+      "cached_input_tokens": 0
+    },
+    "response_id": "chatcmpl-L38XNU9LHAPrYFViuhLmeFUTpXRtmRUB",
+    "finish_reason": "tool_calls",
+    "model": "/REDACTED_PATH/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "tool_calls",
+          "index": 0,
+          "message": {
+            "content": "",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"x\": 2, \"y\": 5}",
+                  "name": "subtract"
+                },
+                "id": "Ak3p8eDKCL6eKttzUExBpjobwvcIAP4b",
+                "type": "function"
+              }
+            ]
+          }
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-L38XNU9LHAPrYFViuhLmeFUTpXRtmRUB",
+      "model": "/REDACTED_PATH/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+      "object": "chat.completion",
+      "system_fingerprint": "b10964-b29c606e2",
+      "timings": {
+        "cache_n": 0,
+        "predicted_ms": 225.647,
+        "predicted_n": 22,
+        "predicted_per_second": 93.06571769179294,
+        "predicted_per_token_ms": 10.745095238095237,
+        "prompt_ms": 478.693,
+        "prompt_n": 227,
+        "prompt_per_second": 474.20789524810266,
+        "prompt_per_token_ms": 2.1087797356828193
+      },
+      "usage": {
+        "completion_tokens": 22,
+        "prompt_tokens": 227,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 249
+      }
+    }
+  },
+  "permission_control/permission_control_prompt_example.yaml#1": {
+    "mode": "unary",
+    "choice": [
+      {
+        "reasoning": {
+          "text": "Okay, the user asked to read test.txt using the available tools. I tried calling both read_file_head and read_file_tail, but the first one was unavailable. Then I used the second one, and got \"hello world\" as the response. So the content of the file is just that line. I need to report that the file's content is \"hello world\".\n",
+          "redacted": false,
+          "native": {
+            "item": {
+              "reasoning_content": "Okay, the user asked to read test.txt using the available tools. I tried calling both read_file_head and read_file_tail, but the first one was unavailable. Then I used the second one, and got \"hello world\" as the response. So the content of the file is just that line. I need to report that the file's content is \"hello world\".\n"
+            },
+            "fingerprint": "86b028386c957c0e"
+          }
+        }
+      },
+      {
+        "text": "The content of test.txt is:  \nhello world",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 302,
+      "output_tokens": 90,
+      "total_tokens": 392,
+      "cached_input_tokens": 226
+    },
+    "response_id": "chatcmpl-c30V0KY4DuEZo6KxT3q4xmf1lAS3u59S",
+    "finish_reason": "stop",
+    "model": "models/Qwen3-1.7B-Q4_K_M.gguf",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "The content of test.txt is:  \nhello world",
+            "reasoning_content": "Okay, the user asked to read test.txt using the available tools. I tried calling both read_file_head and read_file_tail, but the first one was unavailable. Then I used the second one, and got \"hello world\" as the response. So the content of the file is just that line. I need to report that the file's content is \"hello world\".\n",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-c30V0KY4DuEZo6KxT3q4xmf1lAS3u59S",
+      "model": "models/Qwen3-1.7B-Q4_K_M.gguf",
+      "object": "chat.completion",
+      "system_fingerprint": "b10964-b29c606e2",
+      "timings": {
+        "cache_n": 226,
+        "predicted_ms": 494.105,
+        "predicted_n": 90,
+        "predicted_per_second": 180.12365792695883,
+        "predicted_per_token_ms": 5.551741573033708,
+        "prompt_ms": 43.802,
+        "prompt_n": 76,
+        "prompt_per_second": 1735.0805899274008,
+        "prompt_per_token_ms": 0.5763421052631579
+      },
+      "usage": {
+        "completion_tokens": 90,
+        "prompt_tokens": 302,
+        "prompt_tokens_details": {
+          "cached_tokens": 226
+        },
+        "total_tokens": 392
+      }
+    }
+  },
+  "prompt_caching/streaming_probe.yaml#1": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "text": "cache probe ready",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 2825,
+      "output_tokens": 8,
+      "total_tokens": 2833,
+      "cached_input_tokens": 2824
+    },
+    "response_id": "chatcmpl-rHft0iMmnqsVLvgp1yLzwrGfCSgEbZw9",
+    "finish_reason": "stop",
+    "model": "models/Qwen3-1.7B-Q4_K_M.gguf",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": "cache probe ready",
+            "role": "assistant"
+          },
+          "finish_reason": "stop",
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-rHft0iMmnqsVLvgp1yLzwrGfCSgEbZw9",
+      "model": "models/Qwen3-1.7B-Q4_K_M.gguf",
+      "object": "chat.completion",
+      "system_fingerprint": "b10964-b29c606e2",
+      "timings": {
+        "cache_n": 2824,
+        "predicted_ms": 49.782,
+        "predicted_n": 8,
+        "predicted_per_second": 140.6130729982725,
+        "predicted_per_token_ms": 7.111714285714285,
+        "prompt_ms": 12.883,
+        "prompt_n": 1,
+        "prompt_per_second": 77.62167197081426,
+        "prompt_per_token_ms": 12.883
+      },
+      "usage": {
+        "completion_tokens": 8,
+        "prompt_tokens": 2825,
+        "prompt_tokens_details": {
+          "cached_tokens": 2824
+        },
+        "total_tokens": 2833
+      }
+    }
+  },
+  "prompt_caching/streaming_probe.yaml#2": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "reasoning": {
+          "text": "Okay, the user wants me to reply with \"probe still ready\"",
+          "redacted": false,
+          "native": {
+            "item": {
+              "reasoning_content": "Okay, the user wants me to reply with \"probe still ready\""
+            },
+            "fingerprint": "fd7c8c438cc8efb8"
+          }
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 2854,
+      "output_tokens": 16,
+      "total_tokens": 2870,
+      "cached_input_tokens": 2825
+    },
+    "response_id": "chatcmpl-Re9gUrqq8OES0XQyd2cskl5mO7CnJjOw",
+    "finish_reason": "length",
+    "model": "models/Qwen3-1.7B-Q4_K_M.gguf",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": null,
+            "role": "assistant",
+            "reasoning_content": "Okay, the user wants me to reply with \"probe still ready\""
+          },
+          "finish_reason": "length",
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-Re9gUrqq8OES0XQyd2cskl5mO7CnJjOw",
+      "model": "models/Qwen3-1.7B-Q4_K_M.gguf",
+      "object": "chat.completion",
+      "system_fingerprint": "b10964-b29c606e2",
+      "timings": {
+        "cache_n": 2825,
+        "predicted_ms": 99.874,
+        "predicted_n": 16,
+        "predicted_per_second": 150.18923844043496,
+        "predicted_per_token_ms": 6.658266666666666,
+        "prompt_ms": 37.97,
+        "prompt_n": 29,
+        "prompt_per_second": 763.7608638398735,
+        "prompt_per_token_ms": 1.3093103448275862
+      },
+      "usage": {
+        "completion_tokens": 16,
+        "prompt_tokens": 2854,
+        "prompt_tokens_details": {
+          "cached_tokens": 2825
+        },
+        "total_tokens": 2870
+      }
+    }
+  },
+  "response_shape_matrix/logprobs.yaml#0": {
+    "mode": "unary",
+    "choice": [
+      {
+        "text": "Okay, I'm ready. What would you like me to",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 14,
+      "output_tokens": 16,
+      "total_tokens": 30,
+      "cached_input_tokens": 6
+    },
+    "response_id": "chatcmpl-of9mVH2RgFatWJxxmi1HKaFhEB6CZJEE",
+    "finish_reason": "length",
+    "model": "/REDACTED_PATH/Qwen3-1.7B-Q4_K_M.gguf",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "length",
+          "index": 0,
+          "logprobs": {
+            "content": [
+              {
+                "bytes": [
+                  60,
+                  116,
+                  104,
+                  105,
+                  110,
+                  107,
+                  62
+                ],
+                "id": 151667,
+                "logprob": -0.00008452295878669247,
+                "token": "<think>",
+                "top_logprobs": [
+                  {
+                    "bytes": [
+                      60,
+                      116,
+                      104,
+                      105,
+                      110,
+                      107,
+                      62
+                    ],
+                    "id": 151667,
+                    "logprob": -0.00008452295878669247,
+                    "token": "<think>"
+                  },
+                  {
+                    "bytes": [
+                      60,
+                      47,
+                      116,
+                      104,
+                      105,
+                      110,
+                      107,
+                      62
+                    ],
+                    "id": 151668,
+                    "logprob": -10.400259971618652,
+                    "token": "</think>"
+                  }
+                ]
+              },
+              {
+                "bytes": [
+                  10,
+                  10
+                ],
+                "id": 271,
+                "logprob": -0.000014543638826580718,
+                "token": "\n\n",
+                "top_logprobs": [
+                  {
+                    "bytes": [
+                      10,
+                      10
+                    ],
+                    "id": 271,
+                    "logprob": -0.000014543638826580718,
+                    "token": "\n\n"
+                  },
+                  {
+                    "bytes": [
+                      10,
+                      10,
+                      10
+                    ],
+                    "id": 1406,
+                    "logprob": -11.165053367614746,
+                    "token": "\n\n\n"
+                  }
+                ]
+              },
+              {
+                "bytes": [
+                  60,
+                  47,
+                  116,
+                  104,
+                  105,
+                  110,
+                  107,
+                  62
+                ],
+                "id": 151668,
+                "logprob": -0.00018198954057879746,
+                "token": "</think>",
+                "top_logprobs": [
+                  {
+                    "bytes": [
+                      60,
+                      47,
+                      116,
+                      104,
+                      105,
+                      110,
+                      107,
+                      62
+                    ],
+                    "id": 151668,
+                    "logprob": -0.00018198954057879746,
+                    "token": "</think>"
+                  },
+                  {
+                    "bytes": [
+                      60,
+                      116,
+                      104,
+                      105,
+                      110,
+                      107,
+                      62
+                    ],
+                    "id": 151667,
+                    "logprob": -9.183148384094238,
+                    "token": "<think>"
+                  }
+                ]
+              },
+              {
+                "bytes": [
+                  10,
+                  10
+                ],
+                "id": 271,
+                "logprob": -1.1920928955078125e-7,
+                "token": "\n\n",
+                "top_logprobs": [
+                  {
+                    "bytes": [
+                      10,
+                      10
+                    ],
+                    "id": 271,
+                    "logprob": -1.1920928955078125e-7,
+                    "token": "\n\n"
+                  },
+                  {
+                    "bytes": [
+                      10,
+                      10,
+                      10
+                    ],
+                    "id": 1406,
+                    "logprob": -16.12427520751953,
+                    "token": "\n\n\n"
+                  }
+                ]
+              },
+              {
+                "bytes": [
+                  79,
+                  107,
+                  97,
+                  121
+                ],
+                "id": 32313,
+                "logprob": -0.3447474539279938,
+                "token": "Okay",
+                "top_logprobs": [
+                  {
+                    "bytes": [
+                      79,
+                      107,
+                      97,
+                      121
+                    ],
+                    "id": 32313,
+                    "logprob": -0.3447474539279938,
+                    "token": "Okay"
+                  },
+                  {
+                    "bytes": [
+                      79,
+                      75
+                    ],
+                    "id": 3925,
+                    "logprob": -1.8464107513427734,
+                    "token": "OK"
+                  }
+                ]
+              },
+              {
+                "bytes": [
+                  44
+                ],
+                "id": 11,
+                "logprob": -0.011136864311993122,
+                "token": ",",
+                "top_logprobs": [
+                  {
+                    "bytes": [
+                      44
+                    ],
+                    "id": 11,
+                    "logprob": -0.011136864311993122,
+                    "token": ","
+                  },
+                  {
+                    "bytes": [
+                      46
+                    ],
+                    "id": 13,
+                    "logprob": -4.5039215087890625,
+                    "token": "."
+                  }
+                ]
+              },
+              {
+                "bytes": [
+                  32,
+                  73
+                ],
+                "id": 358,
+                "logprob": -0.0006585501250810921,
+                "token": " I",
+                "top_logprobs": [
+                  {
+                    "bytes": [
+                      32,
+                      73
+                    ],
+                    "id": 358,
+                    "logprob": -0.0006585501250810921,
+                    "token": " I"
+                  },
+                  {
+                    "bytes": [
+                      32,
+                      108,
+                      101,
+                      116
+                    ],
+                    "id": 1077,
+                    "logprob": -7.579672336578369,
+                    "token": " let"
+                  }
+                ]
+              },
+              {
+                "bytes": [
+                  39,
+                  109
+                ],
+                "id": 2776,
+                "logprob": -0.0018825955921784043,
+                "token": "'m",
+                "top_logprobs": [
+                  {
+                    "bytes": [
+                      39,
+                      109
+                    ],
+                    "id": 2776,
+                    "logprob": -0.0018825955921784043,
+                    "token": "'m"
+                  },
+                  {
+                    "bytes": [
+                      39,
+                      108,
+                      108
+                    ],
+                    "id": 3278,
+                    "logprob": -6.602716445922852,
+                    "token": "'ll"
+                  }
+                ]
+              },
+              {
+                "bytes": [
+                  32,
+                  114,
+                  101,
+                  97,
+                  100,
+                  121
+                ],
+                "id": 5527,
+                "logprob": -8.702316335984506e-6,
+                "token": " ready",
+                "top_logprobs": [
+                  {
+                    "bytes": [
+                      32,
+                      114,
+                      101,
+                      97,
+                      100,
+                      121
+                    ],
+                    "id": 5527,
+                    "logprob": -8.702316335984506e-6,
+                    "token": " ready"
+                  },
+                  {
+                    "bytes": [
+                      95,
+                      114,
+                      101,
+                      97,
+                      100,
+                      121
+                    ],
+                    "id": 35456,
+                    "logprob": -11.927926063537598,
+                    "token": "_ready"
+                  }
+                ]
+              },
+              {
+                "bytes": [
+                  46
+                ],
+                "id": 13,
+                "logprob": -0.03583408147096634,
+                "token": ".",
+                "top_logprobs": [
+                  {
+                    "bytes": [
+                      46
+                    ],
+                    "id": 13,
+                    "logprob": -0.03583408147096634,
+                    "token": "."
+                  },
+                  {
+                    "bytes": [
+                      33
+                    ],
+                    "id": 0,
+                    "logprob": -3.371676206588745,
+                    "token": "!"
+                  }
+                ]
+              },
+              {
+                "bytes": [
+                  32,
+                  87,
+                  104,
+                  97,
+                  116
+                ],
+                "id": 3555,
+                "logprob": -0.26344963908195496,
+                "token": " What",
+                "top_logprobs": [
+                  {
+                    "bytes": [
+                      32,
+                      87,
+                      104,
+                      97,
+                      116
+                    ],
+                    "id": 3555,
+                    "logprob": -0.26344963908195496,
+                    "token": " What"
+                  },
+                  {
+                    "bytes": [
+                      32,
+                      76,
+                      101,
+                      116
+                    ],
+                    "id": 6771,
+                    "logprob": -1.4887971878051758,
+                    "token": " Let"
+                  }
+                ]
+              },
+              {
+                "bytes": [
+                  32,
+                  119,
+                  111,
+                  117,
+                  108,
+                  100
+                ],
+                "id": 1035,
+                "logprob": -0.20968981087207794,
+                "token": " would",
+                "top_logprobs": [
+                  {
+                    "bytes": [
+                      32,
+                      119,
+                      111,
+                      117,
+                      108,
+                      100
+                    ],
+                    "id": 1035,
+                    "logprob": -0.20968981087207794,
+                    "token": " would"
+                  },
+                  {
+                    "bytes": [
+                      32,
+                      99,
+                      97,
+                      110
+                    ],
+                    "id": 646,
+                    "logprob": -1.6892774105072021,
+                    "token": " can"
+                  }
+                ]
+              },
+              {
+                "bytes": [
+                  32,
+                  121,
+                  111,
+                  117
+                ],
+                "id": 498,
+                "logprob": -1.1920928955078125e-7,
+                "token": " you",
+                "top_logprobs": [
+                  {
+                    "bytes": [
+                      32,
+                      121,
+                      111,
+                      117
+                    ],
+                    "id": 498,
+                    "logprob": -1.1920928955078125e-7,
+                    "token": " you"
+                  },
+                  {
+                    "bytes": [
+                      228,
+                      189,
+                      160
+                    ],
+                    "id": 56568,
+                    "logprob": -15.666351318359375,
+                    "token": "你"
+                  }
+                ]
+              },
+              {
+                "bytes": [
+                  32,
+                  108,
+                  105,
+                  107,
+                  101
+                ],
+                "id": 1075,
+                "logprob": -0.000011444157280493528,
+                "token": " like",
+                "top_logprobs": [
+                  {
+                    "bytes": [
+                      32,
+                      108,
+                      105,
+                      107,
+                      101
+                    ],
+                    "id": 1075,
+                    "logprob": -0.000011444157280493528,
+                    "token": " like"
+                  },
+                  {
+                    "bytes": [
+                      108,
+                      105,
+                      107,
+                      101
+                    ],
+                    "id": 4803,
+                    "logprob": -11.458992004394531,
+                    "token": "like"
+                  }
+                ]
+              },
+              {
+                "bytes": [
+                  32,
+                  109,
+                  101
+                ],
+                "id": 752,
+                "logprob": -0.005835299845784903,
+                "token": " me",
+                "top_logprobs": [
+                  {
+                    "bytes": [
+                      32,
+                      109,
+                      101
+                    ],
+                    "id": 752,
+                    "logprob": -0.005835299845784903,
+                    "token": " me"
+                  },
+                  {
+                    "bytes": [
+                      32,
+                      116,
+                      111
+                    ],
+                    "id": 311,
+                    "logprob": -5.1501336097717285,
+                    "token": " to"
+                  }
+                ]
+              },
+              {
+                "bytes": [
+                  32,
+                  116,
+                  111
+                ],
+                "id": 311,
+                "logprob": 0.0,
+                "token": " to",
+                "top_logprobs": [
+                  {
+                    "bytes": [
+                      32,
+                      116,
+                      111
+                    ],
+                    "id": 311,
+                    "logprob": 0.0,
+                    "token": " to"
+                  },
+                  {
+                    "bytes": [
+                      95,
+                      116,
+                      111
+                    ],
+                    "id": 2346,
+                    "logprob": -25.19300079345703,
+                    "token": "_to"
+                  }
+                ]
+              }
+            ]
+          },
+          "message": {
+            "content": "Okay, I'm ready. What would you like me to",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-of9mVH2RgFatWJxxmi1HKaFhEB6CZJEE",
+      "model": "/REDACTED_PATH/Qwen3-1.7B-Q4_K_M.gguf",
+      "object": "chat.completion",
+      "system_fingerprint": "b10964-b29c606e2",
+      "timings": {
+        "cache_n": 6,
+        "predicted_ms": 99.993,
+        "predicted_n": 16,
+        "predicted_per_second": 150.01050073505147,
+        "predicted_per_token_ms": 6.6662,
+        "prompt_ms": 22.526,
+        "prompt_n": 8,
+        "prompt_per_second": 355.14516558643345,
+        "prompt_per_token_ms": 2.81575
+      },
+      "usage": {
+        "completion_tokens": 16,
+        "prompt_tokens": 14,
+        "prompt_tokens_details": {
+          "cached_tokens": 6
+        },
+        "total_tokens": 30
+      }
+    }
+  },
+  "streaming_tools/example_streaming_with_tools.yaml#0": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "reasoning": {
+          "text": "Okay, the user wants to calculate 2 minus 5. Let me check the available tools. There's a subtract function that takes x and y. Here, x should be 2 and y should be 5. So the function call would be subtract with x=2 and y=5. That should give the correct result.\n",
+          "redacted": false,
+          "native": {
+            "item": {
+              "reasoning_content": "Okay, the user wants to calculate 2 minus 5. Let me check the available tools. There's a subtract function that takes x and y. Here, x should be 2 and y should be 5. So the function call would be subtract with x=2 and y=5. That should give the correct result.\n"
+            },
+            "fingerprint": "1438edc501df43be"
+          }
+        }
+      },
+      {
+        "tool_call": {
+          "id": "Xak4BdT2BzzP0Ym0Xgvd8mCm6Pl7jcsc",
+          "name": "subtract",
+          "arguments": {
+            "x": 2,
+            "y": 5
+          },
+          "native": {
+            "item": {
+              "function": {
+                "arguments": "{\"x\": 2, \"y\": 5}",
+                "name": "subtract"
+              },
+              "id": "Xak4BdT2BzzP0Ym0Xgvd8mCm6Pl7jcsc",
+              "type": "function"
+            },
+            "fingerprint": "8aae346bd4020907"
+          }
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 306,
+      "output_tokens": 97,
+      "total_tokens": 403,
+      "cached_input_tokens": 0
+    },
+    "response_id": "chatcmpl-4LOJAjQP8ZNin8PMKl7pfCrpUqIMxOe3",
+    "finish_reason": "tool_calls",
+    "model": "models/Qwen3-1.7B-Q4_K_M.gguf",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": null,
+            "role": "assistant",
+            "reasoning_content": "Okay, the user wants to calculate 2 minus 5. Let me check the available tools. There's a subtract function that takes x and y. Here, x should be 2 and y should be 5. So the function call would be subtract with x=2 and y=5. That should give the correct result.\n",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"x\": 2, \"y\": 5}",
+                  "name": "subtract"
+                },
+                "id": "Xak4BdT2BzzP0Ym0Xgvd8mCm6Pl7jcsc",
+                "type": "function"
+              }
+            ]
+          },
+          "finish_reason": "tool_calls",
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-4LOJAjQP8ZNin8PMKl7pfCrpUqIMxOe3",
+      "model": "models/Qwen3-1.7B-Q4_K_M.gguf",
+      "object": "chat.completion",
+      "system_fingerprint": "b10964-b29c606e2",
+      "timings": {
+        "cache_n": 0,
+        "predicted_ms": 571.209,
+        "predicted_n": 97,
+        "predicted_per_second": 168.06457881440946,
+        "predicted_per_token_ms": 5.95009375,
+        "prompt_ms": 131.388,
+        "prompt_n": 306,
+        "prompt_per_second": 2328.9798155082653,
+        "prompt_per_token_ms": 0.42937254901960786
+      },
+      "usage": {
+        "completion_tokens": 97,
+        "prompt_tokens": 306,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 403
+      }
+    }
+  },
+  "streaming_tools/example_streaming_with_tools.yaml#1": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "reasoning": {
+          "text": "Okay, the user asked to calculate 2 minus 5. I used the subtract function with x=2 and y=5. The result was -3. I need to present the answer clearly. Let me check if there's any further action needed. The user didn't ask for anything else, so I'll just state the result.\n",
+          "redacted": false,
+          "native": {
+            "item": {
+              "reasoning_content": "Okay, the user asked to calculate 2 minus 5. I used the subtract function with x=2 and y=5. The result was -3. I need to present the answer clearly. Let me check if there's any further action needed. The user didn't ask for anything else, so I'll just state the result.\n"
+            },
+            "fingerprint": "8e9b4b0fa5b1e4cf"
+          }
+        }
+      },
+      {
+        "text": "The result of 2 minus 5 is -3.",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 418,
+      "output_tokens": 86,
+      "total_tokens": 504,
+      "cached_input_tokens": 402
+    },
+    "response_id": "chatcmpl-lu0sOBxcVx9e5BsgqaePkqABDZvIgcjf",
+    "finish_reason": "stop",
+    "model": "models/Qwen3-1.7B-Q4_K_M.gguf",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": "The result of 2 minus 5 is -3.",
+            "role": "assistant",
+            "reasoning_content": "Okay, the user asked to calculate 2 minus 5. I used the subtract function with x=2 and y=5. The result was -3. I need to present the answer clearly. Let me check if there's any further action needed. The user didn't ask for anything else, so I'll just state the result.\n"
+          },
+          "finish_reason": "stop",
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-lu0sOBxcVx9e5BsgqaePkqABDZvIgcjf",
+      "model": "models/Qwen3-1.7B-Q4_K_M.gguf",
+      "object": "chat.completion",
+      "system_fingerprint": "b10964-b29c606e2",
+      "timings": {
+        "cache_n": 402,
+        "predicted_ms": 655.928,
+        "predicted_n": 86,
+        "predicted_per_second": 129.58739373833714,
+        "predicted_per_token_ms": 7.7168,
+        "prompt_ms": 25.672,
+        "prompt_n": 16,
+        "prompt_per_second": 623.2471174820816,
+        "prompt_per_token_ms": 1.6045
+      },
+      "usage": {
+        "completion_tokens": 86,
+        "prompt_tokens": 418,
+        "prompt_tokens_details": {
+          "cached_tokens": 402
+        },
+        "total_tokens": 504
+      }
+    }
+  },
+  "streaming_tools/raw_followup_uses_tool_result_without_new_tool_calls.yaml#0": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "tool_call": {
+          "id": "QwndgKRyDKyKfShNnUVUDWmagoYsyflu",
+          "name": "lookup_harbor_label",
+          "arguments": {},
+          "native": {
+            "item": {
+              "function": {
+                "arguments": "{}",
+                "name": "lookup_harbor_label"
+              },
+              "id": "QwndgKRyDKyKfShNnUVUDWmagoYsyflu",
+              "type": "function"
+            },
+            "fingerprint": "37560b077d538acb"
+          }
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 208,
+      "output_tokens": 23,
+      "total_tokens": 231,
+      "cached_input_tokens": 0
+    },
+    "response_id": "chatcmpl-hLKTTWVjOcENnxYsRVJsbypYy6vVa2JV",
+    "finish_reason": "tool_calls",
+    "model": "Qwen3-1.7B-Q4_K_M.gguf",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": null,
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{}",
+                  "name": "lookup_harbor_label"
+                },
+                "id": "QwndgKRyDKyKfShNnUVUDWmagoYsyflu",
+                "type": "function"
+              }
+            ]
+          },
+          "finish_reason": "tool_calls",
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-hLKTTWVjOcENnxYsRVJsbypYy6vVa2JV",
+      "model": "Qwen3-1.7B-Q4_K_M.gguf",
+      "object": "chat.completion",
+      "system_fingerprint": "b10964-b29c606e2",
+      "timings": {
+        "cache_n": 0,
+        "predicted_ms": 122.903,
+        "predicted_n": 23,
+        "predicted_per_second": 179.00295354873356,
+        "predicted_per_token_ms": 5.5865,
+        "prompt_ms": 93.295,
+        "prompt_n": 208,
+        "prompt_per_second": 2229.4871107776407,
+        "prompt_per_token_ms": 0.44853365384615385
+      },
+      "usage": {
+        "completion_tokens": 23,
+        "prompt_tokens": 208,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 231
+      }
+    }
+  },
+  "truncation_matrix/streaming_tool_call_cut_mid_arguments.yaml#0": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "tool_call": {
+          "id": "V4qB8yCqUhYSSntX6H2qqe5Ak1rfrQgE",
+          "name": "record",
+          "arguments": {
+            "note": "The"
+          },
+          "native": null
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 165,
+      "output_tokens": 20,
+      "total_tokens": 185,
+      "cached_input_tokens": 164
+    },
+    "response_id": "chatcmpl-16YXiKe3zNgt7YOsOvGsZIRTiYqd1fAZ",
+    "finish_reason": "length",
+    "model": "/REDACTED_PATH/Qwen3-8B-Q4_K_M.gguf",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": null,
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"note\": \"The",
+                  "name": "record"
+                },
+                "id": "V4qB8yCqUhYSSntX6H2qqe5Ak1rfrQgE",
+                "type": "function"
+              }
+            ]
+          },
+          "finish_reason": "length",
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-16YXiKe3zNgt7YOsOvGsZIRTiYqd1fAZ",
+      "model": "/REDACTED_PATH/Qwen3-8B-Q4_K_M.gguf",
+      "object": "chat.completion",
+      "system_fingerprint": "b10964-b29c606e2",
+      "timings": {
+        "cache_n": 164,
+        "predicted_ms": 475.278,
+        "predicted_n": 20,
+        "predicted_per_second": 39.97660316698858,
+        "predicted_per_token_ms": 25.01463157894737,
+        "prompt_ms": 29.027,
+        "prompt_n": 1,
+        "prompt_per_second": 34.45068384607434,
+        "prompt_per_token_ms": 29.027
+      },
+      "usage": {
+        "completion_tokens": 20,
+        "prompt_tokens": 165,
+        "prompt_tokens_details": {
+          "cached_tokens": 164
+        },
+        "total_tokens": 185
+      }
+    }
+  },
+  "truncation_matrix/tool_call_cut_mid_arguments.yaml#0": {
+    "mode": "unary",
+    "choice": [
+      {
+        "tool_call": {
+          "id": "P8cAuvqvhak0DtJC6YtnuIc1ZqLNx0fe",
+          "name": "record",
+          "arguments": {
+            "note": "The"
+          },
+          "native": null
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 165,
+      "output_tokens": 20,
+      "total_tokens": 185,
+      "cached_input_tokens": 164
+    },
+    "response_id": "chatcmpl-xnf49xsRwDyRLNSoBAtqKAMBVN2QNGjq",
+    "finish_reason": "length",
+    "model": "/REDACTED_PATH/Qwen3-8B-Q4_K_M.gguf",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "length",
+          "index": 0,
+          "message": {
+            "content": "",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"note\": \"The",
+                  "name": "record"
+                },
+                "id": "P8cAuvqvhak0DtJC6YtnuIc1ZqLNx0fe",
+                "type": "function"
+              }
+            ]
+          }
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-xnf49xsRwDyRLNSoBAtqKAMBVN2QNGjq",
+      "model": "/REDACTED_PATH/Qwen3-8B-Q4_K_M.gguf",
+      "object": "chat.completion",
+      "system_fingerprint": "b10964-b29c606e2",
+      "timings": {
+        "cache_n": 164,
+        "predicted_ms": 462.072,
+        "predicted_n": 20,
+        "predicted_per_second": 41.11913294897765,
+        "predicted_per_token_ms": 24.31957894736842,
+        "prompt_ms": 21.619,
+        "prompt_n": 1,
+        "prompt_per_second": 46.25560849252972,
+        "prompt_per_token_ms": 21.619
+      },
+      "usage": {
+        "completion_tokens": 20,
+        "prompt_tokens": 165,
+        "prompt_tokens_details": {
+          "cached_tokens": 164
+        },
+        "total_tokens": 185
+      }
+    }
+  },
+  "turn_termination_matrix/streaming_truncated_turn.yaml#0": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "text": "Maple trees are known for their vibrant fall foliage, displaying shades of red, orange, and yellow",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 35,
+      "output_tokens": 24,
+      "total_tokens": 59,
+      "cached_input_tokens": 34
+    },
+    "response_id": "chatcmpl-MwP38YZD42vYV8XzTwqGVnPtig0ansNs",
+    "finish_reason": "length",
+    "model": "/REDACTED_PATH/Qwen3-8B-Q4_K_M.gguf",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": "Maple trees are known for their vibrant fall foliage, displaying shades of red, orange, and yellow",
+            "role": "assistant"
+          },
+          "finish_reason": "length",
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-MwP38YZD42vYV8XzTwqGVnPtig0ansNs",
+      "model": "/REDACTED_PATH/Qwen3-8B-Q4_K_M.gguf",
+      "object": "chat.completion",
+      "system_fingerprint": "b10964-b29c606e2",
+      "timings": {
+        "cache_n": 34,
+        "predicted_ms": 623.437,
+        "predicted_n": 24,
+        "predicted_per_second": 36.892260164218676,
+        "predicted_per_token_ms": 27.10595652173913,
+        "prompt_ms": 18.749,
+        "prompt_n": 1,
+        "prompt_per_second": 53.33617792948958,
+        "prompt_per_token_ms": 18.749
+      },
+      "usage": {
+        "completion_tokens": 24,
+        "prompt_tokens": 35,
+        "prompt_tokens_details": {
+          "cached_tokens": 34
+        },
+        "total_tokens": 59
+      }
+    }
+  },
+  "typed_prompt_tools/prompt_typed_with_tool_call_roundtrip.yaml#0": {
+    "mode": "unary",
+    "choice": [
+      {
+        "reasoning": {
+          "text": "<tool_call>\n{\"name\": \"weather\", \"arguments\": {\"city\": \"London\"}}\n</tool_call>\n",
+          "redacted": false,
+          "native": {
+            "item": {
+              "reasoning_content": "<tool_call>\n{\"name\": \"weather\", \"arguments\": {\"city\": \"London\"}}\n</tool_call>\n"
+            },
+            "fingerprint": "5bb6014398c1a1b0"
+          }
+        }
+      },
+      {
+        "tool_call": {
+          "id": "ehb5yLHZx8th9vddPLuuIjPOZjQRGrlR",
+          "name": "weather",
+          "arguments": {
+            "city": "London"
+          },
+          "native": {
+            "item": {
+              "function": {
+                "arguments": "{\"city\": \"London\"}",
+                "name": "weather"
+              },
+              "id": "ehb5yLHZx8th9vddPLuuIjPOZjQRGrlR",
+              "type": "function"
+            },
+            "fingerprint": "36bd225f95655b1a"
+          }
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 309,
+      "output_tokens": 42,
+      "total_tokens": 351,
+      "cached_input_tokens": 0
+    },
+    "response_id": "chatcmpl-g7CbcHAdfcFBhOcIOBGC0PiLZ3rd8qIw",
+    "finish_reason": "tool_calls",
+    "model": "models/Qwen3-1.7B-Q4_K_M.gguf",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "tool_calls",
+          "index": 0,
+          "message": {
+            "content": "",
+            "reasoning_content": "<tool_call>\n{\"name\": \"weather\", \"arguments\": {\"city\": \"London\"}}\n</tool_call>\n",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"city\": \"London\"}",
+                  "name": "weather"
+                },
+                "id": "ehb5yLHZx8th9vddPLuuIjPOZjQRGrlR",
+                "type": "function"
+              }
+            ]
+          }
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-g7CbcHAdfcFBhOcIOBGC0PiLZ3rd8qIw",
+      "model": "models/Qwen3-1.7B-Q4_K_M.gguf",
+      "object": "chat.completion",
+      "system_fingerprint": "b10964-b29c606e2",
+      "timings": {
+        "cache_n": 0,
+        "predicted_ms": 265.722,
+        "predicted_n": 42,
+        "predicted_per_second": 154.29659569023266,
+        "predicted_per_token_ms": 6.481024390243902,
+        "prompt_ms": 135.571,
+        "prompt_n": 309,
+        "prompt_per_second": 2279.2485118498794,
+        "prompt_per_token_ms": 0.43874110032362457
+      },
+      "usage": {
+        "completion_tokens": 42,
+        "prompt_tokens": 309,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 351
+      }
+    }
+  }
+}

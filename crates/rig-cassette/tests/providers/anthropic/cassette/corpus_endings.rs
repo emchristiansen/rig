@@ -1,22 +1,20 @@
 //! Matrix F of the effect corpus: hook-ended runs. Every `Stop` in the
 //! hook surface that fires after at least one dispatch, on the Anthropic
 //! wire (`CLAUDE_SONNET_4_6`, temperature 0), each ending the run in
-//! `PromptCancelled` with the hook's reason. The cells that stop before
+//! `Cancelled` with the hook's reason. The cells that stop before
 //! any dispatch are mock-scripted in `tests/core/golden_endings.rs` (no
 //! wire, no cassette). Producers of the goldens
 //! `crates/rig-cassette/tests/corpus_endings.rs` replays by both
 //! interpreters; the enumeration lives there.
 
 use futures::StreamExt;
-use rig::agent::{AgentHook, MultiTurnStreamItem, StreamingError};
+use rig::agent::{AgentHook, MultiTurnStreamItem};
 use rig::completion::PromptError;
-use rig::driver::Bound;
 use rig::effect::EffectFamily;
 use rig::error::ErrorKind;
-use rig::prelude::*;
 use rig::providers::anthropic::completion::CLAUDE_SONNET_4_6;
-use rig::providers::anthropic::wire::Anthropic;
 use rig_cassette::agent::AgentReplayExt;
+use rig_test_support::cassette_models::AnthropicModels;
 
 use super::super::support::{with_anthropic_cassette, with_anthropic_corpus_endings_cassette};
 use crate::goldens::{
@@ -41,7 +39,7 @@ pub(super) const NOTE_PROMPT: &str = "Save a note titled 'Rust' whose body is a 
 
 fn cancelled_reason(error: &PromptError) -> &str {
     match error {
-        PromptError::PromptCancelled { reason, .. } => reason,
+        PromptError::Cancelled { reason, .. } => reason,
         other => panic!("a cancelled run, not {other:?}"),
     }
 }
@@ -51,10 +49,9 @@ async fn streamed_cancel(stream: &mut rig::agent::StreamingResult) -> String {
     let mut reason = None;
     while let Some(item) = stream.next().await {
         match item {
-            Err(StreamingError::Prompt(error)) => {
+            Err(error) => {
                 reason = Some(cancelled_reason(&error).to_owned());
             }
-            Err(other) => panic!("a cancelled run, not {other:?}"),
             Ok(MultiTurnStreamItem::FinalResponse(_)) => panic!("the hook stops the run"),
             Ok(_) => {}
         }
@@ -74,7 +71,7 @@ fn assert_settled_error(settled: &RecordSettled) {
 /// A unary tool program under `hook`, expected to end cancelled with
 /// `reason`; the log's families are `shape`.
 async fn unary_tool_run(
-    client: Bound<Anthropic>,
+    client: AnthropicModels,
     hook: impl AgentHook + 'static,
     reason: &str,
     shape: &[EffectFamily],
@@ -82,8 +79,7 @@ async fn unary_tool_run(
 ) -> rig::cassette::effect_log::EffectLog {
     let settled = RecordSettled::default();
     let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
-    let mut builder = client
-        .agent(CLAUDE_SONNET_4_6)
+    let mut builder = rig::AgentBuilder::new(client.completion(CLAUDE_SONNET_4_6))
         .name("golden")
         .preamble(TOOLS_PREAMBLE)
         .tool(Adder)
@@ -128,14 +124,14 @@ enum Streamed {
 }
 
 async fn streamed_run(
-    client: Bound<Anthropic>,
+    client: AnthropicModels,
     hook: impl AgentHook + 'static,
     reason: &str,
     program: Streamed,
 ) -> rig::cassette::effect_log::EffectLog {
     let settled = RecordSettled::default();
     let recorder = rig_cassette::effect_log::EffectLogRecorder::keeping_stream_events();
-    let mut base = client.agent(CLAUDE_SONNET_4_6).name("golden");
+    let mut base = rig::AgentBuilder::new(client.completion(CLAUDE_SONNET_4_6)).name("golden");
     base = base.temperature(0.0);
     let agent = match program {
         Streamed::Tools => base
@@ -237,8 +233,7 @@ async fn answer_outcome_cancelled_effect_log_is_the_golden_fixture() {
         |client| async move {
             let settled = RecordSettled::default();
             let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
-            let agent = client
-                .agent(CLAUDE_SONNET_4_6)
+            let agent = rig::AgentBuilder::new(client.completion(CLAUDE_SONNET_4_6))
                 .name("golden")
                 .preamble(BASIC_PREAMBLE)
                 .temperature(0.0)

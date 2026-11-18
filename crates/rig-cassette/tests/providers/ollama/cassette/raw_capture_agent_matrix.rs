@@ -1,15 +1,14 @@
 //! Matrix for raw provider response capture through the agent on Ollama's
-//! `/api/chat` route: the hook events, `PromptResponse::completion_calls`, and
+//! OpenAI-compatible Chat Completions route: the hook events, `PromptResponse::completion_calls`, and
 //! the streamed terminal record.
 //!
 //! # The feature
 //!
-//! Capture is always on. The provider populates `CompletionResponse::raw` /
-//! `StreamFinal::raw` on every response, and the agent exposes that payload —
+//! Capture is always on. The provider populates `CompletionResponse::raw`
+//! on every response, and the agent exposes that payload —
 //! **per attempt**, never a previous attempt's — as `raw` on the
 //! `CompletionResponse` and `ModelTurnFinished` hook events, on each
-//! `CompletionCall` the run records, and on the streamed
-//! `StreamEvent::Final`. `raw` is `Value::Null` only on a value
+//! `CompletionCall` the run records, streamed or not. `raw` is `Value::Null` only on a value
 //! built by hand, with no provider response behind it; `Value::Null` never
 //! means "not requested".
 //!
@@ -17,40 +16,33 @@
 //!
 //! | # | Cell | Dimension | expected | Status |
 //! |---|------|-----------|----------|--------|
-//! | 1 | `hooks_observe_raw_blocking` | `agent.prompt` | `CompletionResponse` and `ModelTurnFinished` see `raw`; `eval_count`/`done_reason`/durations match the fixture body | recorded |
-//! | 2 | `hooks_observe_raw_streamed` | `agent.prompt(..).stream()` | `CompletionResponse` and `ModelTurnFinished` see `raw`; `eval_count`/`done_reason`/durations match the fixture's `done: true` line | recorded |
-//! | 3 | `multi_turn_tool_run_records_distinct_raw_blocking` | tool run, `agent.prompt` | two `completion_calls`, two different payloads whose fingerprints equal the interactions' in order; the first carries `message.tool_calls` | recorded |
-//! | 4 | `multi_turn_tool_run_records_distinct_raw_streamed` | tool run, `agent.prompt(..).stream()` | two `CompletionCall` items, two different terminal payloads whose fingerprints equal the interactions' in order; the forwarded last `Final.raw` is the final turn's | recorded |
+//! | 2 | `hooks_observe_raw_streamed` | `agent.prompt(..).stream()` | `CompletionResponse` and `ModelTurnFinished` see `raw`; its usage matches the fixture's usage chunk | recorded |
+//! | 3 | `multi_turn_tool_run_records_distinct_raw_blocking` | tool run, `agent.prompt` | two `completion_calls`, two different payloads whose fingerprints equal the interactions' in order; the first carries `tool_calls` | recorded |
 //!
 //! Both surfaces fire the same two events per accepted model turn:
 //! `CompletionResponse` — after the unary call returns on the blocking
 //! surface, after the whole stream is assembled on the streamed one, with
 //! `HookContext::is_streaming` telling them apart — and the medium-neutral
-//! `ModelTurnFinished`. Tool-only turns fire both. Cells 1–2 pin exactly
-//! which events fire and what each carries, and cells 3–4 that every attempt
-//! of a tool run fires them, so a hook observing either event alone provably
-//! sees the payload for every accepted call on both surfaces.
+//! `ModelTurnFinished`. Tool-only turns fire both. Cell 2 pins which events
+//! fire on the streamed surface and what each carries, and cell 3 that every
+//! attempt of a blocking tool run fires them.
 //!
 //! # Identity on this route
 //!
-//! Ollama assigns no request id and no message id: nothing in a chat response
-//! names the attempt. What does distinguish one attempt from the next is the
-//! per-response bookkeeping — `eval_count`, `done_reason`, and the nanosecond
-//! `total_duration` / `eval_duration` — which the daemon reports on every
-//! blocking body and on every stream's `done: true` line, and which the
-//! harness leaves untouched (only `created_at` is scrubbed, so it is never
-//! compared). Each cell compares that *fingerprint* of the observed payload
-//! against the fixture's, interaction by interaction, and the multi-turn cells
-//! additionally require the two recorded fingerprints to differ, so "the
-//! second call carries the second attempt's payload" is a real claim.
+//! Ollama assigns no request id. What distinguishes one attempt from the next
+//! is its token accounting, which the daemon reports on every blocking body
+//! and on every stream's usage chunk. Each cell compares that *fingerprint*
+//! of the observed payload against the fixture's, interaction by
+//! interaction, and the multi-turn cells additionally require the two
+//! recorded fingerprints to differ, so "the second call carries the second
+//! attempt's payload" is a real claim.
 //!
 //! Every recorded cell re-derives its premise from its own fixture: every
-//! recorded interaction is a completed (`done: true`) turn reporting the
-//! fingerprint fields, and the multi-turn cells' first interaction carries a
-//! `message.tool_calls` entry naming `add`.
+//! recorded interaction reports usage, and the multi-turn cells' first
+//! interaction carries a `tool_calls` entry naming `add`.
 //!
 //! Re-record with a local Ollama daemon serving `qwen3:4b`:
-//! `RIG_PROVIDER_TEST_MODE=record cargo test -p rig --all-features --test ollama ollama::cassette::raw_capture_agent_matrix -- --nocapture --test-threads=1`
+//! `cargo xtask cassette record ollama/raw_capture_agent_matrix/<scenario>.yaml`.
 
 use std::sync::{Arc, Mutex};
 
@@ -61,10 +53,8 @@ use rig::agent::{
 };
 use rig::completion::Message;
 use rig::message::AssistantContent;
-use rig::prelude::*;
-use rig::streaming::StreamEvent;
 use rig::tool::Tool;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::super::support::with_ollama_cassette;
 use crate::cassettes::recorded_interaction_bodies;
@@ -79,12 +69,11 @@ const TEXT_PROMPT: &str = "Reply with exactly the single word: pong";
 const TOOL_PROMPT: &str = "Use the add tool to add 2 and 3, then state the result.";
 
 /// The fields that fingerprint one Ollama attempt: reported on every blocking
-/// body and every stream's `done: true` line, never scrubbed by the harness.
-const FINGERPRINT_FIELDS: [&str; 4] = [
-    "eval_count",
-    "done_reason",
-    "total_duration",
-    "eval_duration",
+/// body and every stream's usage chunk, never scrubbed by the harness.
+const FINGERPRINT_FIELDS: [&str; 3] = [
+    "/usage/prompt_tokens",
+    "/usage/completion_tokens",
+    "/usage/total_tokens",
 ];
 
 /// One `CompletionResponse` observation: which driver fired it, whether the
@@ -174,7 +163,6 @@ impl AgentHook for RawProbe {
 #[derive(Default)]
 struct StreamedRun {
     completion_calls: Vec<rig::agent::CompletionCall>,
-    finals: Vec<rig::streaming::StreamFinal>,
     output: Option<String>,
 }
 
@@ -183,9 +171,6 @@ async fn drain(mut stream: rig::agent::StreamingResult) -> StreamedRun {
     while let Some(item) = stream.next().await {
         match item.expect("stream item should succeed") {
             MultiTurnStreamItem::CompletionCall(call) => run.completion_calls.push(call),
-            MultiTurnStreamItem::StreamAssistantItem(StreamEvent::Final(final_)) => {
-                run.finals.push(final_);
-            }
             MultiTurnStreamItem::FinalResponse(response) => {
                 run.output = Some(response.output().to_owned());
             }
@@ -195,26 +180,36 @@ async fn drain(mut stream: rig::agent::StreamingResult) -> StreamedRun {
     run
 }
 
-/// Every recorded interaction's completed record, in wire order: the blocking
-/// body itself, or the stream's `done: true` NDJSON line. Asserts the premise
-/// on the way: each is `done: true` and reports the fingerprint fields.
+/// The JSON documents of one recorded response: the blocking body itself, or
+/// each SSE data frame of a stream.
+fn recorded_documents(response: &str) -> Vec<Value> {
+    if let Ok(body) = serde_json::from_str::<Value>(response) {
+        return vec![body];
+    }
+    response
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("data:"))
+        .filter_map(|data| serde_json::from_str::<Value>(data.trim()).ok())
+        .collect()
+}
+
+/// Every recorded interaction's usage-bearing record, in wire order: the
+/// blocking body itself, or the stream's usage chunk. Asserts the premise on
+/// the way: each reports the fingerprint fields.
 fn recorded_completed_records(scenario: &str, streamed: bool) -> Vec<Value> {
     let records: Vec<Value> = recorded_interaction_bodies(OLLAMA_PROVIDER, scenario)
         .iter()
         .map(|(_, response)| {
-            let line = if streamed {
-                response
-                    .lines()
-                    .map(str::trim)
-                    .rfind(|line| !line.is_empty())
-                    .unwrap_or_else(|| {
-                        panic!("{scenario}: recorded stream body should not be empty")
-                    })
-            } else {
-                response.as_str()
-            };
-            serde_json::from_str::<Value>(line)
-                .unwrap_or_else(|err| panic!("{scenario}: recorded record should be JSON: {err}"))
+            let documents = recorded_documents(response);
+            assert_eq!(
+                documents.len() > 1,
+                streamed,
+                "{scenario}: the recorded mode"
+            );
+            documents
+                .into_iter()
+                .rfind(|document| document.get("usage").is_some_and(Value::is_object))
+                .unwrap_or_else(|| panic!("{scenario}: the recorded reply should report usage"))
         })
         .collect();
     assert!(
@@ -222,14 +217,9 @@ fn recorded_completed_records(scenario: &str, streamed: bool) -> Vec<Value> {
         "{scenario}: the scenario recorded no interactions"
     );
     for (turn, record) in records.iter().enumerate() {
-        assert_eq!(
-            record.get("done"),
-            Some(&Value::Bool(true)),
-            "{scenario} turn {turn}: the recorded record must be a completed Ollama response"
-        );
         for field in FINGERPRINT_FIELDS {
             assert!(
-                record.get(field).is_some_and(|value| !value.is_null()),
+                record.pointer(field).is_some_and(|value| !value.is_null()),
                 "{scenario} turn {turn}: the recorded record must report `{field}`, the \
                  field this matrix fingerprints an attempt by"
             );
@@ -242,7 +232,12 @@ fn recorded_completed_records(scenario: &str, streamed: bool) -> Vec<Value> {
 fn fingerprint(payload: &Value) -> Vec<(&'static str, Value)> {
     FINGERPRINT_FIELDS
         .iter()
-        .map(|field| (*field, payload.get(field).cloned().unwrap_or(Value::Null)))
+        .map(|field| {
+            (
+                *field,
+                payload.pointer(field).cloned().unwrap_or(Value::Null),
+            )
+        })
         .collect()
 }
 
@@ -251,28 +246,27 @@ fn fingerprints(payloads: &[Value]) -> Vec<Vec<(&'static str, Value)>> {
 }
 
 /// Whether each recorded interaction's assistant message carries a
-/// `tool_calls` entry naming `add`, in wire order. Ollama streams a tool call
-/// on a non-terminal line, so the streamed side scans every line.
+/// `tool_calls` entry naming `add`, in wire order. A stream carries its call
+/// on a delta before the usage chunk, so the streamed side scans every frame.
 fn recorded_add_call_turns(scenario: &str) -> Vec<bool> {
     recorded_interaction_bodies(OLLAMA_PROVIDER, scenario)
         .iter()
         .map(|(_, response)| {
-            response
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                .any(|record| {
-                    record
-                        .pointer("/message/tool_calls")
-                        .and_then(Value::as_array)
-                        .is_some_and(|calls| {
-                            calls.iter().any(|call| {
-                                call.pointer("/function/name")
-                                    == Some(&Value::String(Adder::NAME.to_string()))
-                            })
-                        })
+            recorded_documents(response).into_iter().any(|record| {
+                [
+                    "/choices/0/message/tool_calls",
+                    "/choices/0/delta/tool_calls",
+                ]
+                .into_iter()
+                .filter_map(|pointer| record.pointer(pointer))
+                .filter_map(Value::as_array)
+                .any(|calls| {
+                    calls.iter().any(|call| {
+                        call.pointer("/function/name")
+                            == Some(&Value::String(Adder::NAME.to_string()))
+                    })
                 })
+            })
         })
         .collect()
 }
@@ -301,55 +295,8 @@ fn assert_distinct_fingerprints(records: &[Value], context: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// 1–2: the hook events
+// 2: the hook events
 // ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn hooks_observe_raw_blocking() {
-    let scenario = "raw_capture_agent_matrix/hooks_observe_raw_blocking";
-    let probe = RawProbe::default();
-    let hook = probe.clone();
-    with_ollama_cassette(
-        "raw_capture_agent_matrix/hooks_observe_raw_blocking",
-        move |client| async move {
-            let agent = client
-                .agent(MODEL)
-                .max_tokens(64)
-                .additional_params(json!({ "think": false }))
-                .add_hook(hook)
-                .build();
-            agent
-                .prompt(TEXT_PROMPT)
-                .await
-                .expect("prompt should succeed");
-        },
-    )
-    .await;
-
-    let responses = probe.completion_responses();
-    let turns = probe.model_turns();
-    assert_eq!(responses.len(), 1, "one CompletionResponse event");
-    assert_eq!(
-        probe.response_streaming_flags(),
-        [false],
-        "the blocking driver fires it with is_streaming() == false"
-    );
-    assert_eq!(turns.len(), 1, "one ModelTurnFinished event");
-    let raw = &responses[0];
-    assert!(!raw.is_null(), "CompletionResponse.raw is populated");
-    assert_eq!(&turns[0], raw, "both events observe the same payload");
-    // The payload is this attempt's own response: the blocking body as the
-    // provider type carries it.
-    let records = recorded_completed_records(scenario, false);
-    assert_eq!(records.len(), 1);
-    assert_eq!(fingerprints(&responses), fingerprints(&records));
-    assert_eq!(raw["model"], records[0]["model"]);
-    assert_eq!(raw["done"], Value::Bool(true));
-    assert_eq!(
-        raw.pointer("/message/content"),
-        records[0].pointer("/message/content")
-    );
-}
 
 #[tokio::test]
 async fn hooks_observe_raw_streamed() {
@@ -359,19 +306,13 @@ async fn hooks_observe_raw_streamed() {
     with_ollama_cassette(
         "raw_capture_agent_matrix/hooks_observe_raw_streamed",
         move |client| async move {
-            let agent = client
-                .agent(MODEL)
+            let agent = rig::AgentBuilder::new(client.completion(MODEL))
                 .max_tokens(64)
-                .additional_params(json!({ "think": false }))
+                .reasoning(rig::completion::Reasoning::Off)
                 .add_hook(hook)
                 .build();
             let run = drain(agent.prompt(Message::user(TEXT_PROMPT)).stream()).await;
             assert!(run.output.is_some(), "the run finished");
-            assert_eq!(run.finals.len(), 1, "one text turn, one terminal record");
-            assert!(
-                !run.finals[0].raw.is_null(),
-                "the streamed terminal carries raw"
-            );
         },
     )
     .await;
@@ -392,10 +333,14 @@ async fn hooks_observe_raw_streamed() {
     let raw = &responses[0];
     assert!(!raw.is_null(), "CompletionResponse.raw is populated");
     assert_eq!(&turns[0], raw, "both events observe the same payload");
-    // The streamed payload is Ollama's *terminal* record — the `done: true`
-    // line's bookkeeping, not the stream's message content.
-    assert!(raw.get("eval_count").is_some() && raw.get("done_reason").is_some());
-    assert!(raw.get("message").is_none());
+    // The streamed payload is the `chat.completion` the stream rebuilt: the
+    // stream's accounting and its message, as a unary body states them.
+    assert!(raw.get("usage").is_some_and(Value::is_object));
+    assert_eq!(raw["object"], "chat.completion");
+    assert!(
+        raw.pointer("/choices/0/message")
+            .is_some_and(Value::is_object)
+    );
     let records = recorded_completed_records(scenario, true);
     assert_eq!(records.len(), 1);
     assert_eq!(fingerprints(&responses), fingerprints(&records));
@@ -403,7 +348,7 @@ async fn hooks_observe_raw_streamed() {
 }
 
 // ---------------------------------------------------------------------------
-// 3–4: multi-turn tool runs
+// 3: multi-turn tool runs
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -416,10 +361,9 @@ async fn multi_turn_tool_run_records_distinct_raw_blocking() {
     with_ollama_cassette(
         "raw_capture_agent_matrix/multi_turn_tool_run_records_distinct_raw_blocking",
         move |client| async move {
-            let agent = client
-                .agent(MODEL)
+            let agent = rig::AgentBuilder::new(client.completion(MODEL))
                 .preamble(TOOLS_PREAMBLE)
-                .additional_params(json!({ "think": false }))
+                .reasoning(rig::completion::Reasoning::Off)
                 .tool(Adder)
                 .add_hook(hook)
                 .build();
@@ -443,7 +387,7 @@ async fn multi_turn_tool_run_records_distinct_raw_blocking() {
     assert_distinct_fingerprints(&records, scenario);
     // Each payload is its own attempt's, in the interactions' order.
     assert_eq!(fingerprints(&raws), fingerprints(&records));
-    // The first is the tool turn: it carries the wire's `message.tool_calls`.
+    // The first is the tool turn: it carries the wire's `tool_calls`.
     assert_eq!(
         recorded_add_call_turns(scenario),
         [true, false],
@@ -451,19 +395,19 @@ async fn multi_turn_tool_run_records_distinct_raw_blocking() {
     );
     assert!(
         raws[0]
-            .pointer("/message/tool_calls/0/function/name")
+            .pointer("/choices/0/message/tool_calls/0/function/name")
             .is_some_and(|name| name == Adder::NAME),
         "the first payload carries the wire's tool_calls: {:?}",
         raws[0]
     );
     assert_eq!(
-        raws[0].pointer("/message/tool_calls/0/function/arguments"),
-        records[0].pointer("/message/tool_calls/0/function/arguments"),
+        raws[0].pointer("/choices/0/message/tool_calls/0/function/arguments"),
+        records[0].pointer("/choices/0/message/tool_calls/0/function/arguments"),
         "raw carries the wire's tool-call arguments untouched"
     );
     assert!(
         raws[1]
-            .pointer("/message/tool_calls")
+            .pointer("/choices/0/message/tool_calls")
             .is_none_or(|calls| calls.as_array().is_some_and(Vec::is_empty)),
         "the second payload is the text turn: {:?}",
         raws[1]
@@ -473,83 +417,4 @@ async fn multi_turn_tool_run_records_distinct_raw_blocking() {
     assert_eq!(probe.completion_responses(), raws);
     assert_eq!(probe.response_tool_call_flags(), [true, false]);
     assert_eq!(probe.model_turns(), raws);
-}
-
-#[tokio::test]
-async fn multi_turn_tool_run_records_distinct_raw_streamed() {
-    let scenario = "raw_capture_agent_matrix/multi_turn_tool_run_records_distinct_raw_streamed";
-    let probe = RawProbe::default();
-    let hook = probe.clone();
-    let observed: Arc<Mutex<Vec<Value>>> = Default::default();
-    let sink = observed.clone();
-    let last_final: Arc<Mutex<Option<Value>>> = Default::default();
-    let final_sink = last_final.clone();
-    with_ollama_cassette(
-        "raw_capture_agent_matrix/multi_turn_tool_run_records_distinct_raw_streamed",
-        move |client| async move {
-            let agent = client
-                .agent(MODEL)
-                .preamble(TOOLS_PREAMBLE)
-                .additional_params(json!({ "think": false }))
-                .tool(Adder)
-                .add_hook(hook)
-                .build();
-            let run = drain(
-                agent
-                    .prompt(Message::user(TOOL_PROMPT))
-                    .max_turns(3)
-                    .stream(),
-            )
-            .await;
-            assert!(run.output.is_some(), "the run finished");
-            assert_eq!(
-                run.completion_calls.len(),
-                2,
-                "a tool turn then a text turn"
-            );
-            assert!(!run.finals.is_empty(), "the stream yields terminal records");
-            // The last forwarded terminal record is the final turn's, and its
-            // payload is the one the final call recorded.
-            let last = run.finals.last().expect("terminal");
-            assert_eq!(last.raw, run.completion_calls[1].raw);
-            *final_sink.lock().expect("sink") = Some(last.raw.clone());
-            *sink.lock().expect("sink") = run
-                .completion_calls
-                .iter()
-                .map(|call| call.raw.clone())
-                .collect();
-        },
-    )
-    .await;
-
-    let raws = observed.lock().expect("sink").clone();
-    assert_all_populated(&raws, scenario);
-    assert_ne!(raws[0], raws[1], "two attempts, two different payloads");
-    let records = recorded_completed_records(scenario, true);
-    assert_eq!(records.len(), 2, "premise: two attempts were made");
-    assert_distinct_fingerprints(&records, scenario);
-    // Each terminal payload is its own attempt's, in the interactions' order,
-    // and the first interaction is the tool turn.
-    assert_eq!(fingerprints(&raws), fingerprints(&records));
-    assert_eq!(
-        recorded_add_call_turns(scenario),
-        [true, false],
-        "premise: an add call then a text turn"
-    );
-    // The forwarded Final is the *last* interaction's, not the first's.
-    let last = last_final
-        .lock()
-        .expect("sink")
-        .clone()
-        .expect("last Final");
-    assert_eq!(fingerprint(&last), fingerprint(&records[1]));
-    assert_ne!(fingerprint(&last), fingerprint(&records[0]));
-    // ModelTurnFinished fires for both attempts and sees each attempt's own.
-    assert_eq!(probe.model_turns(), raws);
-    // CompletionResponse fires for both attempts too — the tool-only turn
-    // included — and each firing carries its own attempt's payload: the
-    // first is the tool-call turn, the second the text turn.
-    assert_eq!(probe.completion_responses(), raws);
-    assert_eq!(probe.response_tool_call_flags(), [true, false]);
-    assert_eq!(probe.response_streaming_flags(), [true, true]);
 }

@@ -6,18 +6,19 @@
 //! assert!(tools.catalog().is_empty());
 //! ```
 
-use std::collections::HashMap;
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 use rig_core::serve::adapters::ToolAdapter;
 use rig_core::serve::{ErasedHandler, Serve};
 use rig_core::{
-    completion::{Document, ToolDefinition},
+    completion::ToolDefinition,
     effect::{
-        EffectKind, FamilyDescriptor, Key, Outcome, ToolEmbeddingDescriptor, family, tool_key,
+        Answered, EffectKind, FamilyDescriptor, Key, ToolEmbeddingDescriptor, family, tool_key,
     },
     embeddings::{embed::EmbedError, tool::ToolSchema},
     error::{ErrorKind, ErrorReport},
+    message::ToolName,
     tool::{
         DynamicTool, LivenessFn, Tool, ToolContext, ToolEmbedding, ToolExecutionError, ToolResult,
         tool_definition,
@@ -27,11 +28,11 @@ use rig_core::{
 use super::catalog::ToolCatalog;
 
 /// One registration: the tool's serde description, the key it is (or will
-/// be) served under, and the erased handler a bus takes. Cloning shares the
+/// be) served under, and the erased handler a table takes. Cloning shares the
 /// handler.
 #[derive(Clone)]
 pub struct RegisteredTool {
-    definition: ToolDefinition,
+    definition: Arc<ToolDefinition>,
     embedding: Option<ToolEmbeddingDescriptor>,
     key: Key<family::Tool>,
     handler: ErasedHandler,
@@ -69,15 +70,12 @@ impl RegisteredTool {
     where
         T: ToolEmbedding + 'static,
     {
-        let definition = tool_definition(&tool);
-        let embedding = ToolEmbeddingDescriptor {
-            context: serde_json::to_value(tool.context())?,
-            embedding_docs: tool.embedding_docs(),
-        };
         let adapter = ToolAdapter::retrievable(tool)?;
+        let definition = tool_definition(adapter.tool());
+        let embedding = adapter.embedding().cloned();
         Ok(Self::from_parts(
             definition,
-            Some(embedding),
+            embedding,
             ErasedHandler::new(adapter),
             None,
         ))
@@ -109,12 +107,22 @@ impl RegisteredTool {
                 ),
             ));
         };
+        let name = ToolName::new(name).map_err(|_| {
+            ErrorReport::new(
+                ErrorKind::HandlerUnavailable,
+                format!(
+                    "handler `{}` serves a tool with an empty name",
+                    descriptor.key
+                ),
+            )
+        })?;
         Ok(Self {
-            definition: ToolDefinition {
+            definition: Arc::new(ToolDefinition {
                 name,
                 description,
                 parameters,
-            },
+                annotations: Default::default(),
+            }),
             embedding,
             key: Key::new_unchecked(descriptor.key),
             handler: ErasedHandler::new(handler),
@@ -136,7 +144,7 @@ impl RegisteredTool {
     ) -> Self {
         let key = Key::new_unchecked(tool_key(&definition.name));
         Self {
-            definition,
+            definition: Arc::new(definition),
             embedding,
             key,
             handler,
@@ -153,7 +161,7 @@ impl RegisteredTool {
 
     /// The tool's name.
     pub fn name(&self) -> String {
-        self.definition.name.clone()
+        self.definition.name.to_string()
     }
 
     /// The key the handler is served under: a tool key, proven at
@@ -167,23 +175,9 @@ impl RegisteredTool {
         &self.handler
     }
 
-    /// The definition, advertised under `name`.
-    pub(crate) fn definition_with_name(&self, name: impl Into<String>) -> ToolDefinition {
-        ToolDefinition {
-            name: name.into(),
-            description: self.definition.description.clone(),
-            parameters: self.definition.parameters.clone(),
-        }
-    }
-
-    /// The family-keyed descriptor of this registration.
-    pub fn descriptor(&self) -> FamilyDescriptor {
-        FamilyDescriptor::Tool {
-            name: self.definition.name.clone(),
-            description: self.definition.description.clone(),
-            parameters: self.definition.parameters.clone(),
-            embedding: self.embedding.clone(),
-        }
+    /// The definition advertised to the model.
+    pub(crate) fn definition(&self) -> Arc<ToolDefinition> {
+        Arc::clone(&self.definition)
     }
 
     /// The embedding context, for retrievable tools.
@@ -202,7 +196,7 @@ impl RegisteredTool {
     /// the future mid-call leaves the caller's entire context unchanged.
     /// Handler errors and wrong-family outcomes become failed tool results.
     pub async fn execute(&self, args: String, context: &mut ToolContext) -> ToolResult {
-        let name = self.definition.name.clone();
+        let name = self.definition.name.to_string();
         // Context travels outside the serializable effect payload.
         let published = rig_core::tool::PublishedContext::new();
         let outcome = rig_core::serve::serve_inline_with(
@@ -218,12 +212,12 @@ impl RegisteredTool {
         // that published nothing (or never ran) leaves an empty result map.
         context.accept_dispatch_result(published.take().unwrap_or_default());
         match outcome {
-            Ok(Outcome::ToolResult { result }) => result,
+            Ok(Answered::ToolResult { result }) => result,
             Ok(other) => ToolResult::failed(ToolExecutionError::other(format!(
                 "tool handler answered with a {} outcome",
                 other.family()
             ))),
-            Err(report) => ToolResult::failed(ToolExecutionError::other(report.message)),
+            Err(report) => ToolResult::failed(report.into()),
         }
     }
 }
@@ -245,51 +239,8 @@ impl ToolRegistration {
     }
 }
 
-/// A tool call's result together with the dispatch-scoped context it
-/// published into.
-pub struct ToolDispatch {
-    /// The result.
-    pub result: ToolResult,
-    /// The context after the tool ran.
-    pub context: ToolContext,
-}
-
-impl ToolDispatch {
-    /// Publish the dispatch's result metadata into `context` and return the
-    /// result.
-    pub fn publish_to(self, context: &mut ToolContext) -> ToolResult {
-        context.accept_dispatch_result(self.context);
-        self.result
-    }
-}
-
-/// Run `tool` (or answer `not found`) on a dispatch-scoped copy of
-/// `context`.
-pub async fn execute_tool(
-    name: &str,
-    args: String,
-    tool: Option<RegisteredTool>,
-    context: &ToolContext,
-) -> ToolDispatch {
-    let mut dispatch_context = context.for_dispatch();
-    let result = match tool {
-        Some(tool) => {
-            tracing::debug!(target: "rig", tool_name = name, "calling tool with args:\n{args}");
-            tool.execute(args, &mut dispatch_context).await
-        }
-        None => ToolResult::failed(
-            ToolExecutionError::not_found(format!("no tool named `{name}` is registered"))
-                .with_model_feedback(format!("tool `{name}` not found")),
-        ),
-    };
-    ToolDispatch {
-        result,
-        context: dispatch_context,
-    }
-}
-
 /// Insertion-ordered named tool registrations and their advertisement policy.
-/// Direct execution is inline; hosts may install the registrations on a bus.
+/// Direct execution is inline; hosts may install the registrations in a table.
 #[derive(Clone, Default)]
 pub struct ToolSet {
     pub(crate) tools: IndexMap<String, ToolRegistration>,
@@ -304,15 +255,6 @@ impl ToolSet {
         let mut set = Self::default();
         for tool in tools {
             set.add_tool(tool);
-        }
-        set
-    }
-
-    /// A set from runtime-defined tools.
-    pub fn from_dynamic_tools(tools: Vec<DynamicTool>) -> Self {
-        let mut set = Self::default();
-        for tool in tools {
-            set.add_dynamic_tool(tool);
         }
         set
     }
@@ -441,52 +383,31 @@ impl ToolSet {
     }
 
     /// Every definition, in insertion order.
-    pub fn tool_definitions(&self) -> Vec<ToolDefinition> {
+    pub fn tool_definitions(&self) -> Vec<Arc<ToolDefinition>> {
         self.tools
-            .iter()
-            .map(|(name, registration)| registration.tool.definition_with_name(name.clone()))
+            .values()
+            .map(|registration| registration.tool.definition())
             .collect()
     }
 
-    /// Run the tool named `name` inline, publishing its result metadata
-    /// into `context`.
+    /// Run the tool named `name` inline ([`RegisteredTool::execute`]),
+    /// publishing its result metadata into `context`; a name nothing is
+    /// registered under is a `not_found` failure, with no metadata.
     pub async fn execute(
         &self,
         name: &str,
         args: impl Into<String>,
         context: &mut ToolContext,
     ) -> ToolResult {
-        context.clear_dispatch_result();
-        let tool = self.get(name).cloned();
-        let dispatch = execute_tool(name, args.into(), tool, context).await;
-        dispatch.publish_to(context)
-    }
-
-    /// Every definition as a document, for embedding-based retrieval.
-    pub fn documents(&self) -> Vec<Document> {
-        self.tools
-            .iter()
-            .map(|(name, registration)| {
-                let definition = registration.tool.definition_with_name(name.clone());
-                let serialized =
-                    serde_json::to_string_pretty(&definition).unwrap_or_else(|error| {
-                        tracing::warn!(
-                            tool_name = %name,
-                            %error,
-                            "tool definition could not be pretty-printed; using a plain representation"
-                        );
-                        format!(
-                            "name: {}\ndescription: {}\nparameters: {}",
-                            definition.name, definition.description, definition.parameters
-                        )
-                    });
-                Document {
-                    id: name.clone(),
-                    text: format!("Tool: {name}\nDefinition: \n{serialized}"),
-                    additional_props: HashMap::new(),
-                }
-            })
-            .collect()
+        let Some(tool) = self.get(name) else {
+            context.clear_dispatch_result();
+            return ToolResult::failed(
+                ToolExecutionError::not_found(format!("no tool named `{name}` is registered"))
+                    .with_model_feedback(format!("tool `{name}` not found")),
+            );
+        };
+        tracing::debug!(target: "rig", tool_name = name, "calling tool");
+        tool.execute(args.into(), context).await
     }
 
     /// The embedding schemas of the retrievable registrations.

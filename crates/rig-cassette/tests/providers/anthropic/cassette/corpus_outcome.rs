@@ -12,11 +12,11 @@
 use futures::StreamExt;
 use rig::agent::MultiTurnStreamItem;
 use rig::completion::PromptError;
-use rig::effect::{EffectFamily, Outcome};
+use rig::effect::{Answered, EffectFamily};
 use rig::error::ErrorKind;
-use rig::prelude::*;
 use rig::providers::anthropic::completion::CLAUDE_SONNET_4_6;
-use rig::streaming::{Delta, StreamEvent};
+use rig::streaming::Item;
+use rig::streaming::StreamEvent;
 use rig_cassette::agent::AgentReplayExt;
 
 use super::super::support::{
@@ -36,7 +36,7 @@ async fn final_output(stream: &mut rig::agent::StreamingResult) -> String {
     let mut output = None;
     while let Some(item) = stream.next().await {
         if let MultiTurnStreamItem::FinalResponse(response) = item.expect("the stream yields") {
-            output = Some(response.output);
+            output = Some(response.output());
         }
     }
     output.expect("a final response")
@@ -46,7 +46,7 @@ pub(super) fn tool_outcome(log: &rig::cassette::effect_log::EffectLog) -> &rig::
     log.records
         .iter()
         .find_map(|record| match &record.outcome {
-            Ok(Outcome::ToolResult { result, .. }) => Some(result),
+            Ok(Answered::ToolResult { result, .. }) => Some(result),
             _ => None,
         })
         .expect("a tool record")
@@ -63,8 +63,7 @@ async fn cancel_after_tool_call_delta_effect_log_is_the_golden_fixture() {
         "corpus_outcome/cancel_after_tool_call_delta",
         |client| async move {
             let recorder = rig_cassette::effect_log::EffectLogRecorder::keeping_stream_events();
-            let agent = client
-                .agent(CLAUDE_SONNET_4_6)
+            let agent = rig::AgentBuilder::new(client.completion(CLAUDE_SONNET_4_6))
                 .name("golden")
                 .preamble(NOTE_PREAMBLE)
                 .temperature(0.0)
@@ -74,10 +73,9 @@ async fn cancel_after_tool_call_delta_effect_log_is_the_golden_fixture() {
             {
                 let mut stream = agent.prompt(NOTE_PROMPT).max_turns(3).stream();
                 while let Some(item) = stream.next().await {
-                    if let Ok(MultiTurnStreamItem::StreamAssistantItem(StreamEvent::BlockDelta {
-                        delta: Delta::ToolName { .. } | Delta::ToolArguments { .. },
-                        ..
-                    })) = item
+                    if let Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(
+                        StreamEvent::Arguments { .. },
+                    ))) = item
                     {
                         break;
                     }
@@ -106,8 +104,7 @@ async fn cancel_after_tool_call_delta_effect_log_is_the_golden_fixture() {
 async fn tool_error_effect_log_is_the_golden_fixture() {
     with_anthropic_corpus_outcome_cassette("corpus_outcome/tool_error", |client| async move {
         let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
-        let agent = client
-            .agent(CLAUDE_SONNET_4_6)
+        let agent = rig::AgentBuilder::new(client.completion(CLAUDE_SONNET_4_6))
             .name("golden")
             .preamble(TOOLS_PREAMBLE)
             .temperature(0.0)
@@ -119,7 +116,7 @@ async fn tool_error_effect_log_is_the_golden_fixture() {
             .max_turns(3)
             .await
             .expect("the agent answers around the failure");
-        assert!(!response.output.is_empty());
+        assert!(!response.output().is_empty());
         let log = agent.stamp(recorder.take());
         assert_eq!(
             families(&log),
@@ -144,8 +141,7 @@ async fn tool_error_streamed_effect_log_is_the_golden_fixture() {
         "corpus_outcome/tool_error_streamed",
         |client| async move {
             let recorder = rig_cassette::effect_log::EffectLogRecorder::keeping_stream_events();
-            let agent = client
-                .agent(CLAUDE_SONNET_4_6)
+            let agent = rig::AgentBuilder::new(client.completion(CLAUDE_SONNET_4_6))
                 .name("golden")
                 .preamble(TOOLS_PREAMBLE)
                 .temperature(0.0)
@@ -179,8 +175,7 @@ async fn tool_error_streamed_effect_log_is_the_golden_fixture() {
 async fn model_error_effect_log_is_the_golden_fixture() {
     with_anthropic_cassette_bogus_key("corpus_outcome/model_error", |client| async move {
         let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
-        let agent = client
-            .agent(CLAUDE_SONNET_4_6)
+        let agent = rig::AgentBuilder::new(client.completion(CLAUDE_SONNET_4_6))
             .name("golden")
             .preamble(BASIC_PREAMBLE)
             .temperature(0.0)
@@ -213,8 +208,7 @@ async fn model_error_effect_log_is_the_golden_fixture() {
 async fn model_error_streamed_effect_log_is_the_golden_fixture() {
     with_anthropic_cassette_bogus_key("corpus_outcome/model_error_streamed", |client| async move {
         let recorder = rig_cassette::effect_log::EffectLogRecorder::keeping_stream_events();
-        let agent = client
-            .agent(CLAUDE_SONNET_4_6)
+        let agent = rig::AgentBuilder::new(client.completion(CLAUDE_SONNET_4_6))
             .name("golden")
             .preamble(BASIC_PREAMBLE)
             .temperature(0.0)
@@ -243,7 +237,7 @@ async fn model_error_streamed_effect_log_is_the_golden_fixture() {
 
 /// The runner's budget exhausted with a tool call pending: one model call
 /// allowed, the tool runs, the next call is refused by the budget. Two
-/// records, then `MaxTurnsError`. Its own recording: the run makes one
+/// records, then `MaxTurns`. Its own recording: the run makes one
 /// request, and a cassette with a second interaction refuses to leave it
 /// unused.
 #[tokio::test]
@@ -252,8 +246,7 @@ async fn max_turns_exhausted_effect_log_is_the_golden_fixture() {
         "corpus_outcome/max_turns_exhausted",
         |client| async move {
             let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
-            let agent = client
-                .agent(CLAUDE_SONNET_4_6)
+            let agent = rig::AgentBuilder::new(client.completion(CLAUDE_SONNET_4_6))
                 .name("golden")
                 .preamble(TOOLS_PREAMBLE)
                 .temperature(0.0)
@@ -266,7 +259,7 @@ async fn max_turns_exhausted_effect_log_is_the_golden_fixture() {
                 .await
                 .expect_err("one call cannot finish a tool turn");
             assert!(
-                matches!(error, PromptError::MaxTurnsError { max_turns: 1, .. }),
+                matches!(error, PromptError::MaxTurns { max_turns: 1, .. }),
                 "{error:?}"
             );
             let log = agent.stamp(recorder.take());
@@ -288,8 +281,7 @@ async fn max_turns_exhausted_effect_log_is_the_golden_fixture() {
 async fn default_max_turns_effect_log_is_the_golden_fixture() {
     with_anthropic_cassette("effect_corpus/tool_call_turn", |client| async move {
         let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
-        let agent = client
-            .agent(CLAUDE_SONNET_4_6)
+        let agent = rig::AgentBuilder::new(client.completion(CLAUDE_SONNET_4_6))
             .name("golden")
             .preamble(TOOLS_PREAMBLE)
             .temperature(0.0)
@@ -298,7 +290,7 @@ async fn default_max_turns_effect_log_is_the_golden_fixture() {
             .record_to(recorder.clone())
             .build();
         let response = agent.prompt(ADD_PROMPT).await.expect("the agent answers");
-        assert!(response.output.contains("42"), "{}", response.output);
+        assert!(response.output().contains("42"), "{}", response.output());
         let log = agent.stamp(recorder.take());
         assert_eq!(
             families(&log),

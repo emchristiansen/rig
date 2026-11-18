@@ -7,10 +7,14 @@
 //! (`recordings.tsv`), failed recordings, fixtures kept from failed runs and the
 //! created-resource ledger (`ledger.jsonl`).
 
+mod acceptance;
+pub(crate) mod bank;
 mod goldens;
 mod owner;
 mod record;
 mod scan;
+mod shapes;
+mod snapshots;
 mod spend;
 
 use std::path::{Path, PathBuf};
@@ -27,8 +31,17 @@ pub(crate) const USAGE: &str = "\
   cassette scan [--base REF] [<fixture>...]
                               scan changed fixtures for credentials and account data
   cassette goldens [--test TARGET]...
-                              regenerate effect goldens from replay and revert
-                              delivery-only churn
+                              regenerate effect goldens from replay
+  cassette snapshots [--check] [--test TARGET]...
+                              rewrite the request snapshots from replay, or
+                              with --check fail when a request differs from one
+  cassette acceptance [--check]
+                              write the acceptance index, or with --check fail
+                              when a request fact Rig sends has no live
+                              recording or the index is stale
+  cassette bank [--check]    write the reply bank, one real recorded reply per
+                              provider, completion encoder, reply shape and
+                              called tools, or with --check fail when it is stale
   cassette cleanup [ledger.jsonl]
                               delete provider state the ledger still holds";
 
@@ -54,6 +67,9 @@ pub(crate) fn run(root: &Path, args: Vec<String>) -> Result<(), String> {
         "spend" => spend::run(root, rest),
         "scan" => scan::run(root, rest),
         "goldens" => goldens::run(root, rest),
+        "snapshots" => snapshots::run(root, rest),
+        "acceptance" => acceptance::run(root, rest),
+        "bank" => bank::run(root, rest),
         "cleanup" => cleanup(root, rest),
         other => Err(format!("unknown cassette command {other:?}\n{USAGE}")),
     }

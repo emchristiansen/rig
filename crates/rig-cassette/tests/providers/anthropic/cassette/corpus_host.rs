@@ -9,13 +9,11 @@
 
 use futures::StreamExt;
 use rig::agent::{AgentBuilder, MultiTurnStreamItem};
-use rig::bus::Bus;
-use rig::driver::Bound;
 use rig::effect::{EffectFamily, EffectKind, HandlerKey};
+use rig::handlers::Handlers;
 use rig::providers::anthropic::completion::CLAUDE_SONNET_4_6;
-use rig::providers::anthropic::wire::Anthropic;
-use rig::serve::ServingPolicy;
 use rig_cassette::agent::AgentReplayExt;
+use rig_test_support::cassette_models::AnthropicModels;
 
 use super::super::support::with_anthropic_corpus_host_cassette;
 use crate::goldens::{
@@ -45,7 +43,6 @@ struct Host {
     /// Register the note taker.
     notes: bool,
     /// The host's serving policy.
-    serial: bool,
     /// Keep stream events.
     streamed: bool,
     /// Advertise `add` and ask for a sum.
@@ -54,7 +51,6 @@ struct Host {
 
 const PLAIN: Host = Host {
     notes: true,
-    serial: false,
     streamed: false,
     with_tool: false,
 };
@@ -63,13 +59,13 @@ async fn final_output(stream: &mut rig::agent::StreamingResult) -> String {
     let mut output = None;
     while let Some(item) = stream.next().await {
         if let MultiTurnStreamItem::FinalResponse(response) = item.expect("the stream yields") {
-            output = Some(response.output);
+            output = Some(response.output());
         }
     }
     output.expect("a final response")
 }
 
-fn with_hooks<S>(builder: AgentBuilder<S>, hooks: Hooks) -> AgentBuilder<S> {
+fn with_hooks(builder: AgentBuilder, hooks: Hooks) -> AgentBuilder {
     match hooks {
         Hooks::AtStart => builder.add_hook(NoteAtStart),
         Hooks::AtCompletionCall => builder.add_hook(NoteAtCompletionCall),
@@ -83,27 +79,23 @@ fn with_hooks<S>(builder: AgentBuilder<S>, hooks: Hooks) -> AgentBuilder<S> {
 
 /// The program over the host's bus, with `hooks` registered on the agent.
 async fn over_host(
-    client: Bound<Anthropic>,
+    client: AnthropicModels,
     host: Host,
     hooks: Hooks,
 ) -> rig::cassette::effect_log::EffectLog {
-    let config = ServingPolicy {
-        serial_per_handler: host.serial,
-        ..ServingPolicy::default()
-    };
-    let (dispatcher, registrar, mut driver) = Bus::channel_with(config);
+    let handlers = Handlers::default();
     let model_key = HandlerKey::from("golden/model:default");
-    driver
+    handlers
         .register_erased(
             model_key.clone(),
-            rig::serve::ErasedHandler::new(rig::serve::adapters::CompletionAdapter::new(
+            rig::serve::ErasedHandler::new(rig::serve::adapters::ModelAdapter::new(
                 "default",
                 client.completion(CLAUDE_SONNET_4_6),
             )),
         )
         .expect("a fresh key");
     if host.notes {
-        driver
+        handlers
             .register_erased(
                 HandlerKey::from(NOTE_KEY),
                 rig::serve::ErasedHandler::new(NoteTaker),
@@ -115,12 +107,10 @@ async fn over_host(
     } else {
         rig::cassette::effect_log::EffectLogRecorder::new()
     };
-    driver.record_to(recorder.clone());
-    let driver = tokio::spawn(driver);
-    let builder =
-        AgentBuilder::over_bus(dispatcher.clone(), registrar.clone(), "golden", model_key)
-            .name("golden")
-            .temperature(0.0);
+    handlers.record_to(recorder.clone());
+    let builder = AgentBuilder::over_handlers(handlers.clone(), "golden", model_key)
+        .name("golden")
+        .temperature(0.0);
     let agent = if host.with_tool {
         with_hooks(builder.preamble(TOOLS_PREAMBLE).tool(Adder), hooks).build()
     } else {
@@ -138,15 +128,13 @@ async fn over_host(
             .max_turns(3)
             .await
             .expect("the agent answers")
-            .output
+            .output()
     };
     if host.with_tool {
         assert!(output.contains("42"), "{output}");
     }
     let log = agent.stamp(recorder.take());
-    drop((agent, dispatcher, registrar));
-    driver.await.expect("the host's driver");
-    assert_eq!(log.header.bus, None, "the policy is the host's");
+    drop(agent);
     log
 }
 
@@ -261,10 +249,7 @@ async fn custom_start_and_settled_effect_log_is_the_golden_fixture() {
 #[tokio::test]
 async fn custom_twice_serial_effect_log_is_the_golden_fixture() {
     with_anthropic_corpus_host_cassette("corpus_host/custom_twice_serial", |client| async move {
-        let host = Host {
-            serial: true,
-            ..PLAIN
-        };
+        let host = Host { ..PLAIN };
         let log = over_host(client, host, Hooks::Twice).await;
         assert_eq!(
             families(&log),

@@ -1,7 +1,6 @@
 //! Matrix T's cells: a layer's denial under every consumer mapping — on a
 //! tool (the model sees the skipped result), on a completion (the run
-//! fails), on a memory `Load` (the run fails at the record), on a custom
-//! effect from a hook (the hook sees `Denied`) — and the leftovers of the
+//! fails), on a custom effect from a hook (the hook sees `Denied`) — and the leftovers of the
 //! #2443 review: a host effect that does not serialize dispatched from a
 //! hook (L3), required host keys of the embed, rerank and custom families
 //! described from the handler table on replay (L4), and the recorder
@@ -11,53 +10,24 @@
 //! replays live in `crates/rig-cassette/tests/corpus_leftovers.rs`.
 
 use rig::agent::AgentBuilder;
-use rig::bus::Bus;
 use rig::effect::{EffectFamily, HandlerKey};
+use rig::handlers::Handlers;
 use rig::serve::ErasedHandler;
 use rig::test_utils::{MockCompletionModel, MockTurn};
 use rig_cassette::agent::AgentReplayExt;
 use rig_cassette::effect_log::{EffectLog, EffectLogRecorder};
 use serde_json::json;
 
+use super::tool_result_texts;
 use crate::goldens::{
-    CONVERSATION, DenyAllLayer, HOST_DENY_REASON, MockRerank, NOTE_KEY, NeverAsked,
-    NoteDeniedAtStart, NoteTaker, NoteUnserializableAtStart, NotesAtStart, UNSERIALIZABLE_KEY,
-    add_tool_under, families,
+    DenyAllLayer, HOST_DENY_REASON, MockRerank, NOTE_KEY, NeverAsked, NoteDeniedAtStart, NoteTaker,
+    NoteUnserializableAtStart, NotesAtStart, UNSERIALIZABLE_KEY, add_tool_under, families,
 };
 
 const TOOLS_PREAMBLE: &str = "You are a calculator here to help the user perform arithmetic operations. Use the tools provided to answer the user's question.";
 const BASIC_PREAMBLE: &str = "You are a concise assistant. Answer directly.";
 const ADD_PROMPT: &str = "Use the add tool to add 17 and 25, then reply with just the number.";
 const PROMPT: &str = "Reply with the single word: ready.";
-
-fn tool_result_texts(log: &EffectLog) -> Vec<String> {
-    let request = match &log.records.last().expect("a record").kind {
-        rig::effect::EffectKind::Completion { request, .. } => request,
-        other => panic!("the last record is a completion, not {other:?}"),
-    };
-    request
-        .chat_history
-        .iter()
-        .filter_map(|message| match message {
-            rig::message::Message::User { content } => Some(content.iter()),
-            _ => None,
-        })
-        .flatten()
-        .filter_map(|content| match content {
-            rig::message::UserContent::ToolResult(result) => Some(
-                result
-                    .content
-                    .iter()
-                    .map(|part| match part {
-                        rig::message::ToolResultContent::Text(text) => text.text.clone(),
-                        other => format!("{other:?}"),
-                    })
-                    .collect::<String>(),
-            ),
-            _ => None,
-        })
-        .collect()
-}
 
 #[tokio::test]
 async fn denied_tool_effect_log_is_the_golden_fixture() {
@@ -78,13 +48,16 @@ async fn denied_tool_effect_log_is_the_golden_fixture() {
         .max_turns(3)
         .await
         .expect("the model sees the skipped result and answers");
-    assert_eq!(response.output, "I could not add them.");
+    assert_eq!(response.output(), "I could not add them.");
     let log = agent.stamp(recorder.take());
     assert_eq!(
         families(&log),
         [EffectFamily::Completion, EffectFamily::Completion]
     );
-    assert_eq!(tool_result_texts(&log), [HOST_DENY_REASON]);
+    assert_eq!(
+        tool_result_texts(&log, log.records.len() - 1),
+        [HOST_DENY_REASON]
+    );
     assert_eq!(log.header.hooks, ["DenyAllLayer"]);
     crate::goldens::golden_effects("mock_leftovers_denied_tool", &log);
 }
@@ -93,12 +66,12 @@ async fn denied_tool_effect_log_is_the_golden_fixture() {
 async fn denied_completion_effect_log_is_the_golden_fixture() {
     // A host's layer on the model key denies: the run fails with the
     // report, and the log holds no record.
-    let (dispatcher, registrar, mut driver) = Bus::channel();
+    let handlers = Handlers::default();
     let model_key = HandlerKey::from("golden/model:default");
-    driver
+    handlers
         .register_erased(
             model_key.clone(),
-            ErasedHandler::new(rig::serve::adapters::CompletionAdapter::new(
+            ErasedHandler::new(rig::serve::adapters::ModelAdapter::new(
                 "default",
                 MockCompletionModel::text("never asked"),
             ))
@@ -106,9 +79,8 @@ async fn denied_completion_effect_log_is_the_golden_fixture() {
         )
         .expect("a fresh key");
     let recorder = EffectLogRecorder::new();
-    driver.record_to(recorder.clone());
-    let driver = tokio::spawn(driver);
-    let agent = AgentBuilder::over_bus(dispatcher.clone(), registrar.clone(), "golden", model_key)
+    handlers.record_to(recorder.clone());
+    let agent = AgentBuilder::over_handlers(handlers.clone(), "golden", model_key)
         .name("golden")
         .preamble(BASIC_PREAMBLE)
         .temperature(0.0)
@@ -122,44 +94,10 @@ async fn denied_completion_effect_log_is_the_golden_fixture() {
         "{error:?}"
     );
     let log = agent.stamp(recorder.take());
-    drop((agent, dispatcher, registrar));
-    driver.await.expect("the host's driver");
+    drop(agent);
     assert!(log.records.is_empty(), "no record for a denied completion");
     assert_eq!(log.header.hooks, ["DenyAllLayer"]);
     crate::goldens::golden_effects("mock_leftovers_denied_completion", &log);
-}
-
-#[tokio::test]
-async fn denied_memory_load_effect_log_is_the_golden_fixture() {
-    let memory = ErasedHandler::new(rig::serve::adapters::MemoryAdapter::new(
-        rig::memory::InMemoryConversationMemory::new(),
-    ))
-    .layered(DenyAllLayer);
-    let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
-    let agent = AgentBuilder::new(MockCompletionModel::text("never asked"))
-        .name("golden")
-        .preamble(BASIC_PREAMBLE)
-        .temperature(0.0)
-        .memory_handler(memory)
-        .conversation(CONVERSATION)
-        .record_to(recorder.clone())
-        .build();
-    let error = agent
-        .prompt(PROMPT)
-        .await
-        .expect_err("the denied load fails the run");
-    assert!(
-        matches!(
-            &error,
-            rig::completion::PromptError::MemoryError(rig::memory::MemoryError::Policy(reason))
-                if reason == HOST_DENY_REASON
-        ),
-        "{error:?}"
-    );
-    let log = agent.stamp(recorder.take());
-    assert!(log.records.is_empty(), "no record for a denied load");
-    assert_eq!(log.header.hooks, ["DenyAllLayer"]);
-    crate::goldens::golden_effects("mock_leftovers_denied_memory_load", &log);
 }
 
 #[tokio::test]
@@ -167,73 +105,67 @@ async fn denied_custom_from_hook_effect_log_is_the_golden_fixture() {
     // The host's layer on its own note key denies the hook's note: the
     // hook sees `Denied` and the run goes on; the log holds the completion
     // only.
-    let (dispatcher, registrar, mut driver) = Bus::channel();
+    let handlers = Handlers::default();
     let model_key = HandlerKey::from("golden/model:default");
-    driver
+    handlers
         .register_erased(
             model_key.clone(),
-            ErasedHandler::new(rig::serve::adapters::CompletionAdapter::new(
+            ErasedHandler::new(rig::serve::adapters::ModelAdapter::new(
                 "default",
                 MockCompletionModel::text("ready"),
             )),
         )
         .expect("a fresh key");
-    driver
+    handlers
         .register_erased(
             HandlerKey::from(NOTE_KEY),
             ErasedHandler::new(NoteTaker).layered(DenyAllLayer),
         )
         .expect("a fresh key");
     let recorder = EffectLogRecorder::new();
-    driver.record_to(recorder.clone());
-    let driver = tokio::spawn(driver);
-    let agent = AgentBuilder::over_bus(dispatcher.clone(), registrar.clone(), "golden", model_key)
+    handlers.record_to(recorder.clone());
+    let agent = AgentBuilder::over_handlers(handlers.clone(), "golden", model_key)
         .name("golden")
         .preamble(BASIC_PREAMBLE)
         .temperature(0.0)
         .add_hook(NoteDeniedAtStart)
         .build();
     let response = agent.prompt(PROMPT).await.expect("the run goes on");
-    assert_eq!(response.output, "ready");
+    assert_eq!(response.output(), "ready");
     let log = agent.stamp(recorder.take());
-    drop((agent, dispatcher, registrar));
-    driver.await.expect("the host's driver");
+    drop(agent);
     assert_eq!(families(&log), [EffectFamily::Completion]);
     assert_eq!(log.header.hooks, ["NoteDeniedAtStart", "DenyAllLayer"]);
     crate::goldens::golden_effects("mock_leftovers_denied_custom_from_hook", &log);
 }
 
-/// A host bus with the mock model under the agent's key and `host`
+/// A host table with the mock model under the agent's key and `host`
 /// registered; the run's log stamped by the agent.
 async fn over_host(
     model: MockCompletionModel,
     streamed: bool,
-    host: impl FnOnce(&mut rig::bus::BusDriver),
-    agent: impl FnOnce(AgentBuilder<rig::agent::NoToolConfig>) -> rig::agent::Agent,
+    host: impl FnOnce(&rig::handlers::Handlers),
+    agent: impl FnOnce(AgentBuilder) -> rig::agent::Agent,
     prompt: &str,
 ) -> (EffectLog, String) {
-    let (dispatcher, registrar, mut driver) = Bus::channel();
+    let handlers = Handlers::default();
     let model_key = HandlerKey::from("golden/model:default");
-    driver
+    handlers
         .register_erased(
             model_key.clone(),
-            ErasedHandler::new(rig::serve::adapters::CompletionAdapter::new(
-                "default", model,
-            )),
+            ErasedHandler::new(rig::serve::adapters::ModelAdapter::new("default", model)),
         )
         .expect("a fresh key");
-    host(&mut driver);
+    host(&handlers);
     let recorder = if streamed {
         EffectLogRecorder::keeping_stream_events()
     } else {
         EffectLogRecorder::new()
     };
-    driver.record_to(recorder.clone());
-    let driver = tokio::spawn(driver);
-    let builder =
-        AgentBuilder::over_bus(dispatcher.clone(), registrar.clone(), "golden", model_key)
-            .name("golden")
-            .temperature(0.0);
+    handlers.record_to(recorder.clone());
+    let builder = AgentBuilder::over_handlers(handlers.clone(), "golden", model_key)
+        .name("golden")
+        .temperature(0.0);
     let agent = agent(builder);
     let output = if streamed {
         use futures::StreamExt;
@@ -243,7 +175,7 @@ async fn over_host(
             if let rig::agent::MultiTurnStreamItem::FinalResponse(response) =
                 item.expect("the stream yields")
             {
-                output = Some(response.output);
+                output = Some(response.output());
             }
         }
         drop(stream);
@@ -254,14 +186,13 @@ async fn over_host(
             .max_turns(200)
             .await
             .expect("the agent answers")
-            .output
+            .output()
     };
     for _ in 0..64 {
         tokio::task::yield_now().await;
     }
     let log = agent.stamp(recorder.take());
-    drop((agent, dispatcher, registrar));
-    driver.await.expect("the host's driver");
+    drop(agent);
     (log, output)
 }
 
@@ -275,8 +206,8 @@ async fn unserializable_from_hook_effect_log_is_the_golden_fixture() {
     let (log, output) = over_host(
         MockCompletionModel::text("ready"),
         false,
-        move |driver| {
-            driver
+        move |handlers| {
+            handlers
                 .register_erased(
                     HandlerKey::from(UNSERIALIZABLE_KEY),
                     ErasedHandler::new(NeverAsked { reached: counter }),
@@ -311,7 +242,7 @@ async fn unserializable_from_hook_effect_log_is_the_golden_fixture() {
 
 /// L4: a host key the program registers and never dispatches to: in the
 /// handler table, in no record; on replay it is described from the table.
-async fn required_host_key(register: impl FnOnce(&mut rig::bus::BusDriver)) -> EffectLog {
+async fn required_host_key(register: impl FnOnce(&rig::handlers::Handlers)) -> EffectLog {
     let (log, output) = over_host(
         MockCompletionModel::text("ready"),
         false,
@@ -327,13 +258,13 @@ async fn required_host_key(register: impl FnOnce(&mut rig::bus::BusDriver)) -> E
 
 #[tokio::test]
 async fn required_embed_effect_log_is_the_golden_fixture() {
-    let log = required_host_key(|driver| {
-        driver
+    let log = required_host_key(|handlers| {
+        handlers
             .register_erased(
                 HandlerKey::from("host/embed"),
-                ErasedHandler::new(rig::serve::adapters::EmbedAdapter::new(
+                ErasedHandler::new(rig::serve::adapters::ModelAdapter::new(
                     "host",
-                    rig::test_utils::MockEmbeddingModel,
+                    rig::test_utils::MockEmbeddings::model(),
                 )),
             )
             .expect("a fresh key");
@@ -344,11 +275,14 @@ async fn required_embed_effect_log_is_the_golden_fixture() {
 
 #[tokio::test]
 async fn required_rerank_effect_log_is_the_golden_fixture() {
-    let log = required_host_key(|driver| {
-        driver
+    let log = required_host_key(|handlers| {
+        handlers
             .register_erased(
                 HandlerKey::from("host/rerank"),
-                ErasedHandler::new(rig::serve::adapters::RerankAdapter::new("host", MockRerank)),
+                ErasedHandler::new(rig::serve::adapters::ModelAdapter::new(
+                    "host",
+                    MockRerank::model(),
+                )),
             )
             .expect("a fresh key");
     })
@@ -358,8 +292,8 @@ async fn required_rerank_effect_log_is_the_golden_fixture() {
 
 #[tokio::test]
 async fn required_custom_effect_log_is_the_golden_fixture() {
-    let log = required_host_key(|driver| {
-        driver
+    let log = required_host_key(|handlers| {
+        handlers
             .register_erased(HandlerKey::from(NOTE_KEY), ErasedHandler::new(NoteTaker))
             .expect("a fresh key");
     })
@@ -382,8 +316,8 @@ async fn five_thousand_events_effect_log_is_the_golden_fixture() {
     let (log, output) = over_host(
         model,
         true,
-        |driver| {
-            driver
+        |handlers| {
+            handlers
                 .register_erased(HandlerKey::from(NOTE_KEY), ErasedHandler::new(NoteTaker))
                 .expect("a fresh key");
         },
@@ -401,12 +335,9 @@ async fn five_thousand_events_effect_log_is_the_golden_fixture() {
     assert_eq!(output, expected);
     let events = log.records[200].events.as_ref().expect("kept");
     let deltas: Vec<&str> = events
-        .iter()
+        .events()
         .filter_map(|event| match event {
-            rig::streaming::StreamEvent::BlockDelta {
-                delta: rig::streaming::Delta::Text { text },
-                ..
-            } => Some(text.as_str()),
+            rig::streaming::StreamEvent::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect();
@@ -453,7 +384,10 @@ async fn denied_tool_streamed_effect_log_is_the_golden_fixture() {
         families(&log),
         [EffectFamily::Completion, EffectFamily::Completion]
     );
-    assert_eq!(tool_result_texts(&log), [HOST_DENY_REASON]);
+    assert_eq!(
+        tool_result_texts(&log, log.records.len() - 1),
+        [HOST_DENY_REASON]
+    );
     assert!(log.records[0].events.is_some());
     crate::goldens::golden_effects("mock_leftovers_denied_tool_streamed", &log);
 }
@@ -467,8 +401,8 @@ async fn denied_custom_from_hook_streamed_effect_log_is_the_golden_fixture() {
     let (log, output) = over_host(
         model,
         true,
-        |driver| {
-            driver
+        |handlers| {
+            handlers
                 .register_erased(
                     HandlerKey::from(NOTE_KEY),
                     ErasedHandler::new(NoteTaker).layered(DenyAllLayer),

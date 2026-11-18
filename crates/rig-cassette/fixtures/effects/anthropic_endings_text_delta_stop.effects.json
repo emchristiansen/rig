@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 10072942899351225430,
+    "run_spec": 11761598427705777809,
     "handlers": [
       {
         "key": "golden/model:default",
@@ -22,11 +22,6 @@
     ],
     "required": {
       "golden/model:default": "completion"
-    },
-    "bus": {
-      "command_capacity": 16,
-      "stream_capacity": 64,
-      "serial_per_handler": false
     }
   },
   "records": [
@@ -76,21 +71,27 @@
       },
       "events": [
         {
-          "event": "block_start",
-          "id": "minted:block:0",
-          "kind": {
+          "item": "event",
+          "value": {
+            "event": "start",
+            "part": 0,
             "kind": "text"
           }
         },
         {
-          "event": "block_delta",
-          "id": "minted:block:0",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": "# The History of the"
           }
         }
-      ]
+      ],
+      "stream_origin": {
+        "api": "anthropic.messages",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6"
+      }
     }
   ]
 }

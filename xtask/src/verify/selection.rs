@@ -26,12 +26,7 @@ pub(super) fn changes(root: &Path, opts: &Options) -> Result<BTreeSet<String>> {
             &revision,
         ],
     ] {
-        paths.extend(
-            output(root, "git", &args)?
-                .split('\0')
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned),
-        );
+        paths.extend(execute::git_paths(root, &args)?);
     }
     paths.extend(execute::untracked_inputs(root)?);
     Ok(paths)
@@ -135,6 +130,69 @@ fn package<'a>(root: &Path, packages: &'a [Value], path: &str) -> Option<&'a Val
         .max_by_key(|(depth, _)| *depth)
         .map(|(_, p)| p)
 }
+/// `--affected`: one nextest run, with the local profile and four build
+/// jobs and test threads, of every test the changed `paths` can break: the
+/// tests of each package a path is in and of every package depending on one
+/// (nextest's `rdeps`). A path in no package's own sources (the workspace
+/// manifest, the lockfile, CI or tool configuration) can break any test, so
+/// it selects them all; a Markdown file outside a package selects none.
+fn affected(root: &Path, metadata: &Value, paths: &BTreeSet<String>) -> Result<Vec<Check>> {
+    let packages = metadata["packages"]
+        .as_array()
+        .ok_or_else(|| invalid("Cargo metadata missing packages"))?;
+    // The facade's directory is the workspace root: only its own source
+    // folders are its.
+    let facade = ["src/", "tests/", "benches/", "examples/"];
+    let mut names = BTreeSet::new();
+    let mut everything = false;
+    for path in paths {
+        let owner = package(root, packages, path).filter(|p| {
+            let at_root =
+                Path::new(p["manifest_path"].as_str().unwrap_or_default()).parent() == Some(root);
+            !at_root || facade.iter().any(|folder| path.starts_with(folder))
+        });
+        match owner.and_then(|p| p["name"].as_str()) {
+            Some(name) => {
+                names.insert(name.to_owned());
+            }
+            None if path.ends_with(".md") => {}
+            None => everything = true,
+        }
+    }
+    if names.is_empty() && !everything {
+        return Ok(Vec::new());
+    }
+    let (filter, reason) = if everything {
+        (
+            "all()".to_owned(),
+            "a change outside every package's sources",
+        )
+    } else {
+        let each: Vec<String> = names.iter().map(|name| format!("rdeps({name})")).collect();
+        (
+            each.join(" | "),
+            "the changed packages and every package depending on one",
+        )
+    };
+    let mut args: Vec<String> = [
+        "nextest",
+        "run",
+        "--locked",
+        "--workspace",
+        "--profile",
+        "local",
+        "--build-jobs",
+        "4",
+        "--test-threads",
+        "4",
+        "-E",
+    ]
+    .iter()
+    .map(|arg| (*arg).to_owned())
+    .collect();
+    args.push(filter);
+    Ok(vec![dynamic("affected-tests".into(), args, reason)])
+}
 fn consumers(packages: &[Value], name: &str) -> BTreeSet<String> {
     let mut result = BTreeSet::from([name.into()]);
     let mut queue = VecDeque::from([name.to_string()]);
@@ -187,13 +245,6 @@ fn provider_check(owner: &str, name: &str, reason: &str) -> Check {
     )
 }
 
-/// Cache-warming aliases: each compiles its source check's artifacts with
-/// nextest `--no-run` and executes nothing. cache-warm.yaml runs exactly these.
-pub(super) const WARMING: [(&str, &str); 2] = [
-    ("default-test-build", "default-tests"),
-    ("full-test-build", "full-tests"),
-];
-
 pub(super) fn plan(
     root: &Path,
     metadata: &Value,
@@ -201,34 +252,15 @@ pub(super) fn plan(
     paths: &BTreeSet<String>,
     all: &[Check],
 ) -> Result<Vec<Check>> {
+    if opts.mode == Mode::Affected {
+        return affected(root, metadata, paths);
+    }
     if opts.mode == Mode::Check {
         let id = opts
             .check
             .as_deref()
             .ok_or_else(|| invalid("missing check ID"))?;
         let mut out = Vec::new();
-        // Cache warming: compile exactly the artifacts a test check needs,
-        // without executing it or claiming its result. Each alias keeps its
-        // source check's package/feature graph so rust-cache entries match.
-        if let Some((_, source)) = WARMING.iter().find(|(alias, _)| *alias == id) {
-            add(
-                &mut out,
-                all,
-                source,
-                "cache warming only: compile test artifacts; executes no tests",
-            )?;
-            if let Some(check) = out.first_mut() {
-                check.id = id.into();
-                for step in &mut check.steps {
-                    // nextest rejects --retries together with --no-run.
-                    if let Some(index) = step.args.iter().position(|a| a == "--retries") {
-                        step.args.drain(index..index + 2);
-                    }
-                    step.args.push("--no-run".into());
-                }
-            }
-            return Ok(out);
-        }
         add(&mut out, all, id, "explicit check; always selected")?;
         return Ok(out);
     }
@@ -349,29 +381,39 @@ pub(super) fn plan(
             )?;
             continue;
         }
-        // Agent and world goldens share this prefix. Classify both before
-        // provider cassettes and the owning package's generic asset rule.
+        // The agent goldens. Classify them before provider cassettes and the
+        // owning package's generic asset rule.
         if path.starts_with("crates/rig-cassette/fixtures/effects/") {
             add(&mut out, all, "bus-verification", "consumed golden changed")?;
             add(
                 &mut out,
                 all,
                 "default-tests",
-                "goldens may be consumed by any original/native provider target",
+                "goldens may be consumed by any provider target",
             )?;
             add(
                 &mut out,
                 all,
-                "ecs-parity",
-                "a golden changed: replay the parity lane",
+                "effect-corpus",
+                "a golden changed: replay the effect corpus",
             )?;
+            continue;
+        }
+        // The reply bank is data the runtime scenarios read.
+        if path.starts_with("crates/rig-cassette/fixtures/bank/") {
+            add(&mut out, all, "bank", "the reply bank changed")?;
+            if !out.iter().any(|c| c.id == "provider-runtime") {
+                out.push(provider_check(
+                    "rig-cassette",
+                    "runtime",
+                    "the reply bank changed: replay the runtime scenarios it serves",
+                ));
+            }
             continue;
         }
         if let Some(name) = provider(path) {
             if let Some(owner) = provider_owner(packages, name) {
-                if owner == "rig-cassette"
-                    && matches!(name, "verify" | "world_replay" | "world_replay_world")
-                {
+                if owner == "rig-cassette" && name == "verify" {
                     affected.insert("rig-cassette-minimal".to_owned());
                 }
                 let id = format!("provider-{name}");
@@ -439,19 +481,43 @@ pub(super) fn plan(
     if paths.iter().any(|p| p != "DEVELOPING.md") {
         add(&mut out, all, "fmt", "changed files must remain formatted")?;
     }
-    // The runtimes and the effective-policy hash: an edit to rig-ecs (the
-    // hash, `Materialise`), rig-agent (the runner) or rig-core (the message
-    // and error rules) can stale or diverge the parity goldens, which the
-    // package's own tests never replay (tests/ecs_parity/README.md).
-    if affected
+    // Fixtures and their request snapshots are what the acceptance index
+    // reads.
+    if paths.iter().any(|p| {
+        p.starts_with("crates/rig-cassette/fixtures/cassettes/")
+            || p == "crates/rig-cassette/fixtures/acceptance.toml"
+    }) {
+        add(
+            &mut out,
+            all,
+            "acceptance",
+            "cassettes, snapshots or the index changed: every sent fact needs a recording",
+        )?;
+    }
+    // The bank is read off the cassettes.
+    if paths
         .iter()
-        .any(|name| matches!(name.as_str(), "rig-ecs" | "rig-agent" | "rig-core"))
+        .any(|p| p.starts_with("crates/rig-cassette/fixtures/cassettes/"))
     {
         add(
             &mut out,
             all,
-            "ecs-parity",
-            "runtime crate changed: the parity goldens may be stale or diverge",
+            "bank",
+            "cassettes changed: the reply bank must be the one they give",
+        )?;
+    }
+    // The runtime and the effective-policy hash: an edit to rig-agent (the
+    // runner) or rig-core (the message and error rules) can stale the effect
+    // goldens, which the package's own tests never replay.
+    if affected
+        .iter()
+        .any(|name| matches!(name.as_str(), "rig-agent" | "rig-core"))
+    {
+        add(
+            &mut out,
+            all,
+            "effect-corpus",
+            "runtime crate changed: the effect goldens may be stale",
         )?;
     }
     let mut downstream = BTreeSet::new();

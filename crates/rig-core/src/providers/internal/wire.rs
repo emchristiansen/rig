@@ -3,46 +3,17 @@
 //! become ignorable unknown events.
 //!
 //! ```
-//! use rig_core::providers::internal::wire::{classify_untyped_line, WireEvent};
+//! use rig_core::providers::internal::wire::classify_untyped_line;
+//! use rig_core::wire::WireEvent;
 //! let event = classify_untyped_line::<serde_json::Value>(b"{}");
 //! assert!(matches!(event, WireEvent::Known(_)));
 //! ```
 
-use crate::error::CorruptFrame;
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, Visitor};
+use serde_json::Value;
+use serde_json::value::RawValue;
 
-/// One classified wire frame.
-#[derive(Debug)]
-pub enum WireEvent<T> {
-    /// The frame carries a discriminator this client models and its payload
-    /// decoded fully.
-    Known(T),
-    /// Valid JSON not recognized by this classifier.
-    /// Drivers log structural metadata only and skip interpretation.
-    Unknown {
-        /// The unmodeled discriminator value.
-        event_type: String,
-        /// Full payload for raw passthrough, never warning logs. Debug is redacted.
-        value: crate::streaming::UnknownPayload,
-    },
-    /// Invalid JSON or a recognized frame that failed typed decoding, with
-    /// what was kept of the frame. Must not be demoted to `Unknown`.
-    Corrupt(CorruptFrame),
-}
-
-impl<T> WireEvent<T> {
-    /// Map the `Known` payload, preserving the classification.
-    ///
-    /// This is how an adapter layers a pure event-shape mapping on top of a
-    /// classifier without restating the triage: `Unknown` and `Corrupt` pass
-    /// through untouched, so policy stays with the driver.
-    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> WireEvent<U> {
-        match self {
-            Self::Known(event) => WireEvent::Known(f(event)),
-            Self::Unknown { event_type, value } => WireEvent::Unknown { event_type, value },
-            Self::Corrupt(error) => WireEvent::Corrupt(error),
-        }
-    }
-}
+use crate::wire::WireEvent;
 
 /// Classify JSON by its top-level `tag` string.
 /// Unknown strings and non-object JSON produce `Unknown`. Known, missing, or
@@ -56,39 +27,26 @@ pub fn classify_tagged_frame<T>(
 where
     T: serde::de::DeserializeOwned,
 {
-    let scanned = match scan_discriminators(data, &[tag], true) {
-        Ok(scanned) => scanned,
-        Err(error) => return corrupt(data, None, error),
-    };
-    match scanned {
-        DiscriminatorScan::Object(found) => {
-            match found.first().and_then(|key| key.string_value.as_deref()) {
-                Some(event_type) if !is_known_event_type(event_type) => {
-                    unknown_with_value(data, event_type.to_owned())
-                }
-                event_type => decode_known(data, event_type.map(ToOwned::to_owned)),
-            }
-        }
+    match scan(data, &[tag], true) {
+        Err(error) => WireEvent::Corrupt(error),
         // Non-object keep-alives must not become fatal typed-decode failures.
-        DiscriminatorScan::NotObject => unknown_with_value(data, String::new()),
+        Ok(None) => unknown(data, String::new()),
+        Ok(Some(found)) => match text(found.first().copied().flatten()) {
+            Some(event_type) if !is_known_event_type(&event_type) => unknown(data, event_type),
+            _ => decode_known(data),
+        },
     }
 }
 
-/// Parse the payload for raw passthrough after classifying a frame as unknown.
-fn unknown_with_value<T>(data: &str, event_type: String) -> WireEvent<T> {
-    match serde_json::from_str::<serde_json::Value>(data) {
+/// A frame classified as unknown, its payload kept for raw passthrough.
+fn unknown<T>(data: &str, event_type: String) -> WireEvent<T> {
+    match serde_json::from_str::<Value>(data) {
         Ok(value) => WireEvent::Unknown {
             event_type,
             value: value.into(),
         },
-        // Unreachable in practice: the scan already tokenized this text.
-        Err(error) => corrupt(data, Some(event_type).filter(|tag| !tag.is_empty()), error),
+        Err(error) => WireEvent::Corrupt(error),
     }
-}
-
-/// A text frame that failed to decode, kept exactly as received.
-fn corrupt<T>(data: &str, event_type: Option<String>, error: serde_json::Error) -> WireEvent<T> {
-    WireEvent::Corrupt(CorruptFrame::text(event_type, data, error))
 }
 
 /// Classify one chat-completions SSE frame (OpenAI-compatible chat wire).
@@ -103,66 +61,47 @@ pub fn classify_chat_completions_frame<T>(data: &str) -> WireEvent<T>
 where
     T: serde::de::DeserializeOwned,
 {
-    let scanned = match scan_discriminators(data, &["object", "choices"], true) {
-        Ok(scanned) => scanned,
-        Err(error) => return corrupt(data, None, error),
-    };
-    let found = match scanned {
-        DiscriminatorScan::Object(found) => found,
+    let found = match scan(data, &["object", "choices"], true) {
+        Ok(Some(found)) => found,
         // Non-object JSON is unrecognized rather than corrupt.
-        DiscriminatorScan::NotObject => return unknown_with_value(data, String::new()),
+        Ok(None) => return unknown(data, String::new()),
+        Err(error) => return WireEvent::Corrupt(error),
     };
-    let object_value = found.first().and_then(|key| key.string_value.as_deref());
-    let has_choices = found.get(1).is_some_and(|key| key.present);
-    let is_chat_chunk =
-        object_value.is_some_and(|object| object == "chat.completion.chunk") || has_choices;
-    if !is_chat_chunk {
-        return unknown_with_value(data, object_value.unwrap_or_default().to_owned());
+    let object = text(found.first().copied().flatten());
+    let has_choices = found.get(1).is_some_and(Option::is_some);
+    if object.as_deref() == Some("chat.completion.chunk") || has_choices {
+        decode_known(data)
+    } else {
+        unknown(data, object.unwrap_or_default())
     }
-
-    decode_known(data, object_value.map(ToOwned::to_owned))
 }
 
 /// Classify JSON by the presence of any top-level `marker_keys`.
 /// Recognized frames require typed decoding; failures produce `Corrupt`.
-/// Valid JSON without markers produces `Unknown`. Duplicate markers are allowed.
+/// Valid JSON without markers produces `Unknown`, named by its top-level
+/// keys so the driver's warn log stays diagnosable. Duplicate markers are
+/// allowed.
 pub fn classify_marker_keyed_frame<T>(data: &str, marker_keys: &[&str]) -> WireEvent<T>
 where
     T: serde::de::DeserializeOwned,
 {
-    // Presence markers permit duplicates because their values do not select a type.
-    let scanned = match scan_discriminators(data, marker_keys, false) {
-        Ok(scanned) => scanned,
-        Err(error) => return corrupt(data, None, error),
-    };
-    let recognizable = match &scanned {
-        DiscriminatorScan::Object(found) => found.iter().any(|key| key.present),
-        DiscriminatorScan::NotObject => false,
-    };
-    if !recognizable {
-        // Cold path: the Unknown channel needs the payload anyway, so parse
-        // it here and name the frame by its top-level keys so the driver's
-        // warn log stays diagnosable.
-        let value = match serde_json::from_str::<serde_json::Value>(data) {
-            Ok(value) => value,
-            // Unreachable in practice: the scan already tokenized this text.
-            Err(error) => return corrupt(data, None, error),
-        };
-        let event_type = value
-            .as_object()
-            .map(|object| object.keys().cloned().collect::<Vec<_>>().join(","))
-            .unwrap_or_default();
-        return WireEvent::Unknown {
-            event_type,
-            value: value.into(),
-        };
+    match scan(data, marker_keys, false) {
+        Err(error) => WireEvent::Corrupt(error),
+        Ok(Some(found)) if found.iter().any(Option::is_some) => decode_known(data),
+        Ok(_) => match serde_json::from_str::<Value>(data) {
+            Ok(value) => WireEvent::Unknown {
+                event_type: value
+                    .as_object()
+                    .map(|object| object.keys().cloned().collect::<Vec<_>>().join(","))
+                    .unwrap_or_default(),
+                value: value.into(),
+            },
+            Err(error) => WireEvent::Corrupt(error),
+        },
     }
-
-    // Presence markers select no type, so the frame has no discriminator value.
-    decode_known(data, None)
 }
 
-/// Classify one line of an undiscriminated NDJSON wire (Ollama).
+/// Classify one line of an undiscriminated JSON wire.
 ///
 /// The wire has no discriminator at all: a line either decodes as the
 /// response shape (`Known`) or is `Corrupt`. This family never produces
@@ -173,75 +112,7 @@ where
 {
     match serde_json::from_slice::<T>(line) {
         Ok(event) => WireEvent::Known(event),
-        Err(error) => WireEvent::Corrupt(match std::str::from_utf8(line) {
-            Ok(text) => CorruptFrame::text(None, text, error),
-            Err(_) => CorruptFrame::bytes(line.to_vec(), error),
-        }),
-    }
-}
-
-/// Triage of one already-deserialized event from a typed-transport wire
-/// (an aws-sdk event stream, a prost/tonic gRPC stream, an in-process
-/// generation channel), for [`classify_typed_event`].
-#[derive(Debug)]
-pub enum TypedEvent<T> {
-    /// A variant this client models.
-    Modeled(T),
-    /// An unrecognized variant reported by the transport SDK.
-    Unrecognized {
-        /// Discriminator for the driver's warn log.
-        event_type: String,
-        /// Frame detail retained for raw passthrough, not warning logs.
-        detail: String,
-    },
-    /// SDK decode failure for a modeled event.
-    Malformed(String),
-}
-
-/// Map modeled SDK events to `Known`, unrecognized events to `Unknown`, and
-/// malformed events to `Corrupt`. Unknown detail is retained for raw passthrough.
-pub fn classify_typed_event<T>(event: TypedEvent<T>) -> WireEvent<T> {
-    match event {
-        TypedEvent::Modeled(event) => WireEvent::Known(event),
-        TypedEvent::Unrecognized { event_type, detail } => WireEvent::Unknown {
-            event_type,
-            value: serde_json::Value::String(detail).into(),
-        },
-        TypedEvent::Malformed(message) => WireEvent::Corrupt(CorruptFrame::absent(
-            <serde_json::Error as serde::de::Error>::custom(message),
-        )),
-    }
-}
-
-/// Retry classification once after repairing a `Corrupt` frame.
-/// Initial `Known` and `Unknown` results pass through. No repair returns
-/// `on_unrepairable`'s error; repaired frames must classify as `Known` or return
-/// `on_still_corrupt`'s error. Either error keeps the original frame as
-/// received, never the repaired text.
-pub fn classify_with_repair<T>(
-    data: &str,
-    classify: impl Fn(&str) -> WireEvent<T>,
-    repair: impl FnOnce(&str) -> Option<String>,
-    on_unrepairable: impl FnOnce(&serde_json::Error) -> serde_json::Error,
-    on_still_corrupt: impl FnOnce() -> serde_json::Error,
-) -> WireEvent<T> {
-    match classify(data) {
-        WireEvent::Corrupt(corrupt) => match repair(data) {
-            None => {
-                let error = on_unrepairable(corrupt.error());
-                WireEvent::Corrupt(corrupt.with_error(error))
-            }
-            Some(repaired) => match classify(&repaired) {
-                WireEvent::Known(event) => WireEvent::Known(event),
-                // `Unknown` is unreachable in practice (an unknown tag never
-                // classified `Corrupt` in the first pass); treat it as the
-                // defect it would be.
-                WireEvent::Unknown { .. } | WireEvent::Corrupt(_) => {
-                    WireEvent::Corrupt(corrupt.with_error(on_still_corrupt()))
-                }
-            },
-        },
-        event => event,
+        Err(error) => WireEvent::Corrupt(error),
     }
 }
 
@@ -263,181 +134,173 @@ pub fn classify_or<T>(
     }
 }
 
-/// Discriminator presence and first string values collected in one JSON scan.
-enum DiscriminatorScan {
-    /// Presence and first string value for each requested top-level key.
-    Object(Vec<KeyScan>),
-    /// Valid non-object JSON with no top-level keys.
-    NotObject,
+/// The `{ "message": ... }` error envelope some APIs answer with HTTP 200.
+#[derive(serde::Deserialize)]
+struct MessageEnvelope {
+    #[allow(dead_code)]
+    message: String,
 }
 
-#[derive(Default, Clone)]
-struct KeyScan {
-    present: bool,
-    string_value: Option<String>,
-}
-
-fn scan_discriminators(
+/// Classify a whole reply recognized by its `reply_marker` key, or the
+/// `{ "message": ... }` error envelope its API can send with HTTP 200 instead.
+/// The envelope yields its body verbatim as `Err`, so the decoder reports it
+/// and the driver adds the HTTP status. When neither shape decodes, the
+/// reply's diagnostic stands.
+pub fn classify_reply_or_message_envelope<T>(
     data: &str,
-    keys: &[&str],
-    reject_duplicates: bool,
-) -> Result<DiscriminatorScan, serde_json::Error> {
-    struct Scan<'a> {
-        keys: &'a [&'a str],
-        reject_duplicates: bool,
-    }
-
-    impl<'de> serde::de::Visitor<'de> for Scan<'_> {
-        type Value = DiscriminatorScan;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("a JSON value")
-        }
-
-        fn visit_map<A>(self, mut map: A) -> Result<DiscriminatorScan, A::Error>
-        where
-            A: serde::de::MapAccess<'de>,
-        {
-            let mut found = vec![KeyScan::default(); self.keys.len()];
-            while let Some(key) = map.next_key::<String>()? {
-                match self.keys.iter().position(|candidate| *candidate == key) {
-                    Some(index) => {
-                        let entry = found.get_mut(index).ok_or_else(|| {
-                            serde::de::Error::custom("discriminator index out of range")
-                        })?;
-                        if entry.present {
-                            if self.reject_duplicates {
-                                return Err(serde::de::Error::custom(format!(
-                                    "duplicate `{key}` discriminator key in stream frame"
-                                )));
-                            }
-                            // Presence-only keys tolerate duplicates; the
-                            // first occurrence's value stands.
-                            map.next_value::<serde::de::IgnoredAny>()?;
-                            continue;
-                        }
-                        entry.present = true;
-                        // Only string discriminators carry a value; anything
-                        // else (e.g. a `choices` array) records presence.
-                        entry.string_value = match map.next_value::<StringOrIgnored>()? {
-                            StringOrIgnored::String(value) => Some(value),
-                            StringOrIgnored::Ignored => None,
-                        };
-                    }
-                    None => {
-                        map.next_value::<serde::de::IgnoredAny>()?;
-                    }
-                }
-            }
-            Ok(DiscriminatorScan::Object(found))
-        }
-
-        fn visit_bool<E>(self, _: bool) -> Result<DiscriminatorScan, E> {
-            Ok(DiscriminatorScan::NotObject)
-        }
-        fn visit_i64<E>(self, _: i64) -> Result<DiscriminatorScan, E> {
-            Ok(DiscriminatorScan::NotObject)
-        }
-        fn visit_u64<E>(self, _: u64) -> Result<DiscriminatorScan, E> {
-            Ok(DiscriminatorScan::NotObject)
-        }
-        fn visit_f64<E>(self, _: f64) -> Result<DiscriminatorScan, E> {
-            Ok(DiscriminatorScan::NotObject)
-        }
-        fn visit_str<E>(self, _: &str) -> Result<DiscriminatorScan, E> {
-            Ok(DiscriminatorScan::NotObject)
-        }
-        fn visit_unit<E>(self) -> Result<DiscriminatorScan, E> {
-            Ok(DiscriminatorScan::NotObject)
-        }
-        fn visit_seq<A>(self, mut seq: A) -> Result<DiscriminatorScan, A::Error>
-        where
-            A: serde::de::SeqAccess<'de>,
-        {
-            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
-            Ok(DiscriminatorScan::NotObject)
-        }
-    }
-
-    /// Captures a string value, consumes-and-ignores every other shape.
-    enum StringOrIgnored {
-        String(String),
-        Ignored,
-    }
-
-    impl<'de> serde::Deserialize<'de> for StringOrIgnored {
-        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: serde::Deserializer<'de>,
-        {
-            struct V;
-            impl<'de> serde::de::Visitor<'de> for V {
-                type Value = StringOrIgnored;
-                fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                    formatter.write_str("any JSON value")
-                }
-                fn visit_str<E>(self, value: &str) -> Result<StringOrIgnored, E> {
-                    Ok(StringOrIgnored::String(value.to_owned()))
-                }
-                fn visit_string<E>(self, value: String) -> Result<StringOrIgnored, E> {
-                    Ok(StringOrIgnored::String(value))
-                }
-                fn visit_bool<E>(self, _: bool) -> Result<StringOrIgnored, E> {
-                    Ok(StringOrIgnored::Ignored)
-                }
-                fn visit_i64<E>(self, _: i64) -> Result<StringOrIgnored, E> {
-                    Ok(StringOrIgnored::Ignored)
-                }
-                fn visit_u64<E>(self, _: u64) -> Result<StringOrIgnored, E> {
-                    Ok(StringOrIgnored::Ignored)
-                }
-                fn visit_f64<E>(self, _: f64) -> Result<StringOrIgnored, E> {
-                    Ok(StringOrIgnored::Ignored)
-                }
-                fn visit_unit<E>(self) -> Result<StringOrIgnored, E> {
-                    Ok(StringOrIgnored::Ignored)
-                }
-                fn visit_map<A>(self, mut map: A) -> Result<StringOrIgnored, A::Error>
-                where
-                    A: serde::de::MapAccess<'de>,
-                {
-                    while map
-                        .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
-                        .is_some()
-                    {}
-                    Ok(StringOrIgnored::Ignored)
-                }
-                fn visit_seq<A>(self, mut seq: A) -> Result<StringOrIgnored, A::Error>
-                where
-                    A: serde::de::SeqAccess<'de>,
-                {
-                    while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
-                    Ok(StringOrIgnored::Ignored)
-                }
-            }
-            deserializer.deserialize_any(V)
-        }
-    }
-
-    let mut deserializer = serde_json::Deserializer::from_str(data);
-    let scanned = serde::Deserializer::deserialize_any(
-        &mut deserializer,
-        Scan {
-            keys,
-            reject_duplicates,
+    reply_marker: &str,
+) -> WireEvent<Result<T, String>>
+where
+    T: serde::de::DeserializeOwned,
+{
+    classify_or(
+        data,
+        |data| classify_marker_keyed_frame::<T>(data, &[reply_marker, "message"]).map(Ok),
+        |data| {
+            classify_marker_keyed_frame::<MessageEnvelope>(data, &["message"])
+                .map(|_| Err(data.to_owned()))
         },
-    )?;
-    deserializer.end()?;
-    Ok(scanned)
+    )
 }
 
-fn decode_known<T>(data: &str, event_type: Option<String>) -> WireEvent<T>
+/// [`classify_tagged_frame`] for a wire whose events carry `tag`, mapped by
+/// `tagged`, falling back to `untagged` for an object without the tag (a
+/// unary body), which is never parsed as an event first. A tagged frame that
+/// fails its typed decode stays corrupt rather than passing for the
+/// fallback's shape; an untagged object the fallback does not recognize
+/// takes the typed decode, so its error is the event's.
+pub fn classify_or_untagged<T, E>(
+    data: &str,
+    tag: &str,
+    is_known_event_type: impl Fn(&str) -> bool,
+    tagged: impl Fn(T) -> E,
+    untagged: impl Fn(&str) -> WireEvent<E>,
+) -> WireEvent<E>
+where
+    T: serde::de::DeserializeOwned,
+{
+    match scan(data, &[tag], true) {
+        Err(error) => WireEvent::Corrupt(error),
+        Ok(None) => unknown(data, String::new()),
+        Ok(Some(found)) => match found.first().copied().flatten() {
+            None => match untagged(data) {
+                WireEvent::Unknown { .. } => decode_known(data).map(tagged),
+                event => event,
+            },
+            Some(value) => match text(Some(value)) {
+                Some(event_type) if !is_known_event_type(&event_type) => unknown(data, event_type),
+                _ => decode_known(data).map(tagged),
+            },
+        },
+    }
+}
+
+/// What `data`, when it is a JSON object, holds of each of `keys` (the
+/// first occurrence), read in one pass that keeps no other value; `None`
+/// for any other text, invalid JSON included.
+pub(crate) fn top_level<'a>(data: &'a str, keys: &[&str]) -> Option<Found<'a>> {
+    scan(data, keys, false).ok().flatten()
+}
+
+/// The first value of each scanned key, in key order, as the frame's text;
+/// `None` when the object lacks the key.
+type Found<'a> = Vec<Option<&'a RawValue>>;
+
+/// `value` when it is a JSON string.
+fn text(value: Option<&RawValue>) -> Option<String> {
+    serde_json::from_str(value?.get()).ok()
+}
+
+/// When `data` is a JSON object, what it holds of each of `keys`, in one
+/// pass that reads every other value without keeping it; `None` for any
+/// other JSON. A second occurrence of one of `keys` is an error when
+/// `unique`.
+fn scan<'a>(
+    data: &'a str,
+    keys: &[&str],
+    unique: bool,
+) -> Result<Option<Found<'a>>, serde_json::Error> {
+    let mut json = serde_json::Deserializer::from_str(data);
+    let scanned = if data
+        .trim_start_matches([' ', '\t', '\n', '\r'])
+        .starts_with('{')
+    {
+        Some(serde::Deserializer::deserialize_map(&mut json, Scan(keys))?)
+    } else {
+        <IgnoredAny as serde::Deserialize>::deserialize(&mut json)?;
+        None
+    };
+    json.end()?;
+    match scanned {
+        Some((_, Some(key))) if unique => Err(serde::de::Error::custom(format!(
+            "duplicate `{key}` discriminator key in stream frame"
+        ))),
+        scanned => Ok(scanned.map(|(found, _)| found)),
+    }
+}
+
+/// Reads an object's `keys`, and the first of them that occurs twice.
+struct Scan<'k>(&'k [&'k str]);
+
+impl<'de, 'k> Visitor<'de> for Scan<'k> {
+    type Value = (Found<'de>, Option<&'k str>);
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut found = vec![None; self.0.len()];
+        let mut duplicate = None;
+        while let Some(index) = map.next_key_seed(Key(self.0))? {
+            match index.and_then(|index| found.get_mut(index).zip(self.0.get(index))) {
+                Some((slot @ None, _)) => *slot = Some(map.next_value()?),
+                Some((Some(_), key)) => {
+                    duplicate = duplicate.or(Some(*key));
+                    map.next_value::<IgnoredAny>()?;
+                }
+                None => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        Ok((found, duplicate))
+    }
+}
+
+/// An object key's position in a key list, read without allocating.
+struct Key<'k>(&'k [&'k str]);
+
+impl<'de> DeserializeSeed<'de> for Key<'_> {
+    type Value = Option<usize>;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_str(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Key<'_> {
+    type Value = Option<usize>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("an object key")
+    }
+
+    fn visit_str<E>(self, key: &str) -> Result<Self::Value, E> {
+        Ok(self.0.iter().position(|candidate| *candidate == key))
+    }
+}
+
+fn decode_known<T>(data: &str) -> WireEvent<T>
 where
     T: serde::de::DeserializeOwned,
 {
     match serde_json::from_str::<T>(data) {
         Ok(event) => WireEvent::Known(event),
-        Err(error) => corrupt(data, event_type, error),
+        Err(error) => WireEvent::Corrupt(error),
     }
 }
 

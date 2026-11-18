@@ -83,8 +83,8 @@ changes that still compile. All three inputs are required for each release.
 
 <!-- MIGRATING-GUIDE-INSTRUCTIONS:END -->
 
-This guide covers every breaking change from 0.30 through the unreleased changes
-after 0.41. Releases 0.36, 0.37, 0.40 and 0.41 were the disruptive ones; 0.40
+This guide covers migration from 0.30 through 0.46.
+Releases 0.36, 0.37, 0.40, 0.41, 0.43, 0.44, 0.45 and 0.46 were disruptive; 0.40
 alone carried 31 breaking changes, and 0.37 renamed `rig-core`'s library
 target.
 
@@ -95,7 +95,11 @@ above it, in order. Each one is self-contained.
 
 | You are on | Start at |
 | --- | --- |
-| 0.41 | [0.41 → next](#041--next) |
+| 0.45 | [0.45 → 0.46](#045--046) |
+| 0.44 | [0.44 → 0.45](#044--045) |
+| 0.43 | [0.43 → 0.44](#043--044) |
+| 0.42 | [0.42 → 0.43](#042--043) |
+| 0.41 | [0.41 → 0.42](#041--042) |
 | 0.40 | [0.40 → 0.41](#040--041) |
 | 0.39 | [0.39 → 0.40](#039--040) |
 | 0.38 | [0.38 → 0.39](#038--039) |
@@ -357,17 +361,7 @@ defined a `wasm` feature and expected it to drive these macros, you now get the
 target's answer instead. Gate on the target directly if you need the old
 association.
 
-### next
-
-#### `AgentRun::advertised_tools()` now carries the definitions the request sent
-
-rig-agent's driver recorded the advertised tools *after* the per-turn request
-assembly had already moved the definitions out of the registry snapshot, so
-`AgentRun::advertised_tools()` (and the serialized run's `turn_tools`) always
-held an empty list. With request preparation in `rig_agent::run::prepare::prepare_request`
-the driver advertises `PreparedRequest::tools` — the executable tools after
-any `active_tools` allow-list plus, in Tool output mode, the synthetic output
-tool — i.e. exactly what the provider received. Nothing on the wire changes.
+### 0.42
 
 #### An assistant turn that carried nothing is empty, not a fabricated empty text part
 
@@ -809,988 +803,2903 @@ that answers a batch with fewer embeddings than the texts it was sent is now
 that same error, naming the document and its slot range, where it previously
 handed back a silently short list.
 
+### 0.43
+
+The 0.43 changes that compile unchanged are listed under
+[Behavior Changes](#behavior-changes-1) in the 0.42 → 0.43 section.
+
+### 0.44
+
+The 0.44 changes that compile unchanged are listed under
+[Behavior Changes](#behavior-changes) in the 0.43 → 0.44 section. Check
+three first: a text answer with an unknown finish reason now fails the run,
+`Ollama::completion` now targets `/v1` (the native route is
+`native_completion`), and `Cohere::completion` now defaults to the
+Compatibility API.
+
 ---
 
-## 0.41 → next
+### 0.45
 
-### Ownership audit: relaxed generic bounds, fewer clones
+#### Hook outcomes no longer mean accepted turns
 
-No caller-visible breakage — every public signature change is a relaxation.
-The OpenAI-compatible embeddings impls (`GenericEmbeddingModel` and its
-`ConstructEmbeddingModel` impl) no longer require `H: 'static` /
-`Ext: 'static`; code that compiled before still compiles. Internal clone
-reductions in the agent loop (tool-result assembly, run-spec application)
-change no behaviour and no wire bytes.
+Every dispatched completion now gets exactly one `on_outcome`, including
+rejected, retried, recovered and abandoned attempts. An `Ok` outcome only
+means a whole response arrived, not that the agent accepted it. Move logic
+that persists or bills accepted assistant content to `on_model_turn_finished`.
+Pairing dispatch/outcome ids needs no workaround. Replacement outcomes are
+honored only in the accepted turn's outcome slot; other closes are
+observe-only. A hook stop mid-response produces a cancelled error outcome.
+Denied effects also clear any earlier hook's salvaged patch.
 
-### Compatibility shims are gone: `CompletionRequest::preamble`, retired model constants, `rig-candle` aliases, tolerant decoders
+#### Usage observations are normalized and emitted once
 
-Every remaining backwards-compatibility shim was removed in one sweep. None
-of them had a live producer in the tree; each existed only so that an older
-caller or an older persisted record kept working.
+Usage comes from the decoder's final normalized `Usage`, once per completed
+attempt, immediately before terminal `Finished`, not once per frame. Failed,
+truncated or dropped attempts emit no usage observation. An end containing
+only cost or cache-creation counters also emits no mapped usage event.
+`AdapterUsage::total_tokens` is always `None`; use the response's
+`Usage::total_tokens`. Anthropic input includes cache reads and writes, Gemini
+output includes thoughts, and Gemini input includes hosted-tool prompt tokens.
+Do not derive uncached Anthropic input as `input - cached`: cache-creation
+input has no separate adapter counter. Ollama/Cohere no longer invent a total;
+Interactions, per-choice usage and cache fallbacks are observed consistently.
 
-- **`CompletionRequest::preamble` is removed.** `CompletionRequestBuilder::preamble`
-  has always emitted the preamble as the leading `Message::System` of
-  `chat_history` and left the field `None`; the field was read by every
-  provider anyway, so a hand-built request could carry a second system prompt
-  through a path the builder never used. Put the system prompt in
-  `chat_history` — `chat_history: vec![Message::system("…"), …]` — and use the
-  new `CompletionRequest::system_instructions()` (the leading system message's
-  text, `Option<&str>`) where you read it. `CompletionRequestBuilder::without_preamble`
-  is removed with the field; the agent-level `AgentBuilder::without_preamble`
-  and `AgentRunner::without_preamble` are unchanged. Telemetry
-  `gen_ai.system_instructions` is now populated from the leading system
-  message, so spans that previously recorded nothing for the preamble record it.
-- **Retired model-name constants are removed** rather than `#[deprecated]`:
-  `deepseek::{DEEPSEEK_CHAT, DEEPSEEK_REASONER}` (use `DEEPSEEK_V4_FLASH`),
-  `cohere::{COMMAND_R_PLUS, COMMAND_R, COMMAND, COMMAND_NIGHTLY, COMMAND_LIGHT,
-  COMMAND_LIGHT_NIGHTLY}` (use the dated `COMMAND_*_08_2024` / `COMMAND_A_*`
-  constants), and `mistral::{PIXTRAL_LARGE, PIXTRAL_SMALL, MISTRAL_SABA,
-  MISTRAL_NEMO, CODESTRAL_MAMBA}` (use `MISTRAL_SMALL` / `MISTRAL_MEDIUM` /
-  `MINISTRAL_3B` / `CODESTRAL`). Pass the literal string to
-  `completion_model(..)` if you still need to address one of the retired ids.
-- **`rig_candle::{LlamaModel, ModelFamily}` aliases are removed.** Use
-  `CandleModel` and `ConversationProtocol`, which they aliased.
-- **Persisted-record tolerances are removed.** `CompletionCall::usage` no
-  longer accepts `null` (the pre-monoid `Option` encoding) — a record must
-  carry a `Usage` object; OpenAI `UserContent::Audio` no longer accepts the
-  never-on-the-wire `"type": "audio"` tag (only `"input_audio"`); and an OpenAI
-  `ToolResultContent` part must carry its `"type"` tag (`"text"` /
-  `"image_url"`). Records written by any released rig already have these
-  shapes; re-encode anything older before loading it.
+#### In-band errors can now be retryable
 
-### The bundled transport newtypes expose their inner client once, not three ways
+Statusless stream/2xx error envelopes use the same code classification as HTTP
+rejections. Transient Anthropic/OpenAI-compatible errors and numeric 429/503
+codes can now trigger retries after partial output. Known codes outrank
+`with_transient`; that hint applies only to absent/unrecognized codes.
+`with_status`/`with_provider_status` supplies an explicit status verdict.
+Numeric nested codes populate `http_status` and add a `status N:` Display
+prefix. Coded gRPC/Vertex/Bedrock errors may serialize without `transient`;
+loading a stored record re-derives its verdict from the body.
 
-`ReqwestClient` and `ReqwestMiddlewareClient` each handed out the client they
-wrap through a public tuple field, a `Deref`, *and* `From`. `Deref` on a type
-that is not a smart pointer makes reqwest's whole inherent API look like the
-newtype's own, which it is not, and the public field made it redundant besides.
-Both now have a private field and two explicit accessors:
+#### Old string documents change meaning
 
-```rust
-// Before
-let inner: &reqwest::Client = &client.0;
-let response = client.get(url).send().await?;   // via Deref
+Legacy document JSON with `"type":"string"` loads as plain text, even if its
+media type is PDF. If that value really holds base64, migrate it to
+`"type":"base64"` before replay. `DocumentData::Text` is sent as text on every
+wire. Legacy string image/audio/video sources instead load as Base64 and are
+recorded as blobs, not telemetry text. Gemini Interactions no longer
+base64-encodes an already encoded image/PDF a second time.
+New text documents serialize with `"type":"text"`, which 0.44 cannot read.
+Malformed document data now reports an untagged-enum error rather than the old
+source-specific location detail.
 
-// After
-let inner: &reqwest::Client = client.as_ref();
-let response = client.as_ref().get(url).send().await?;
-let owned: reqwest::Client = client.into_inner();
-```
+#### Tool streams and histories include recovery results
 
-Construction is unchanged (`From`, `Default`, and now an explicit
-`ReqwestClient::new(..)`), so `ReqwestClient::default()`,
-`reqwest_client.into()` and `ClientBuilder::new(..).build().into()` all keep
-working.
+Committed-history projection emits calls and results for Skip, Retry,
+preresolved recovery and output-tool reprompts, not only executed tools. An
+output-tool name need not be registered. A call id can occur both in a provider
+End part and a ToolCall stream item; deduplicate by the projection semantics,
+not by assuming every id appears once. `ToolResult` does not prove execution;
+use `ToolExecutionCommitted` for that. Skip results arrive with step
+projection; if usage recording fails first, they remain in the error history.
 
-`ReqwestMiddlewareClient` gained the erasure `ReqwestClient` already had —
-`boxed()` and `impl From<ReqwestMiddlewareClient> for BoxedHttpClient` — so a
-host that erases its transport does not lose the option by having chosen
-middleware. It deliberately still has no `Default`: a middleware client with no
-middleware is a `reqwest::Client` with extra indirection.
+`AgentRun::full_history()` now closes pending calls with their preresolved
+result or `No result provided`. Cancellation and mid-batch failure keep
+settled sibling results and close the rest. Use `messages()` for the raw
+committed view. `next_step()` while awaiting a model re-emits the same request
+without consuming another turn; cancel/drain the earlier call before
+reissuing it. A whole-turn recovery skip goes straight to the next model call.
 
-### `multipart_form` reports an unusable content type instead of dropping it
+Pairing accepts results split over adjacent user messages/system boundaries
+and owes no results for failed or aborted turns. Repeated call ids need one
+result per occurrence. Repair old partially answered repeats with
+`conversation::pairing::repair` before replay.
 
-`rig_reqwest::multipart_form` now returns
-`http_client::Result<reqwest::multipart::Form>`. It used to rebuild the part
-without its content type when reqwest rejected the MIME string and send the
-request anyway, so the provider saw a part with *no* content type and answered
-with something unrelated to the actual mistake.
+#### Catalog facts now reach every encoder
 
-```rust
-// Before
-let form = rig_reqwest::multipart_form(parts);
+Overrides apply to encoding, validation and pricing, including gateway models
+whose facts come from their origin vendor. Wires that previously ignored
+unsupported reasoning/sampling/cache settings now apply the request's
+`OnUnsupported` policy. Unknown reasoning controls no longer imply that every
+effort is forbidden. An unlisted cache price leaves that cost component
+`None`, not priced at the input rate; `Cost::is_complete()` tells whether the
+total covers every component.
 
-// After
-let form = rig_reqwest::multipart_form(parts)?;
-```
+MiniMax references default to the Anthropic endpoint; explicitly select
+`Format::OpenAi` to keep its OpenAI endpoint. Bedrock now rejects a Specific
+tool choice with zero or several names instead of dropping it or using its
+first name. Name one tool, or advertise the allowed set and use Required.
 
-Rig's own multipart parts carry a parsed `mime::Mime`, so in practice this
-fires only on a `mime`/`reqwest` version skew — the point is that it now fires
-at all rather than silently changing the request.
+#### Provider wire and credential behavior
 
-### Websockets are transport-agnostic: the protocol moved to `rig-core`, the socket to `rig-tungstenite`
+- Transcription array parameters are repeated multipart `name[]` fields;
+  `timestamp_granularities` now takes effect.
+- MCP tools with an output schema return structured content alone, not both
+  structured data and content blocks. Registered tools keep their connection
+  alive even if the original service handle is dropped.
+- MiniMax media HTTP-200 failure envelopes fail the call. TypeSafe accepts
+  numeric OpenRouter `usage.cost` and ignores unknown usage fields.
+- Gemini non-square image aspect ratios are width-first, fixing inverted
+  `4:3`/`16:9` requests. Interactions streams may include `Item::Unknown`
+  cursor items; event-only consumers ignore them. gRPC sends reasoning effort
+  as a thinking level, matches REST embedding widths and accepts replies up
+  to 256 MiB; it uses system `protoc` at build time.
+- ChatGPT sends `session-id`, not `session_id`, as its header. Supported wires
+  forward the new cache key as `prompt_cache_key`; ChatGPT also uses it for
+  its session identity.
+- Copilot's `access-token` and `api-key.json` are no longer read. Sign in again
+  to create the single `copilot.json` record. Nonstandard ChatGPT filenames
+  must be moved to `chatgpt.json`. Unix credential files/directories are
+  owner-only, writes are atomic, and shared refreshes can reuse another
+  client's saved token. Logout revokes ChatGPT credentials.
+- Tool arguments are no longer written to the DEBUG dispatch log. Credential
+  patterns are redacted in agent session/effect logs, spill files and replies.
 
-The OpenAI Responses websocket mode used to live in `rig-reqwest`, because
-`tokio-tungstenite` did. That put OpenAI *protocol* — the event envelopes, the
-turn state machine, the `previous_response_id` chaining — inside the reqwest
-transport crate, forced a TLS feature axis onto it that had nothing to do with
-reqwest, and left the next provider's websocket support nowhere to go.
+#### Stored effect streams must be complete
 
-It now follows the same split HTTP already had. `rig-core` states the contract
-and owns the protocol; a backend-named crate supplies the socket:
+`StreamRecord` (formerly `streaming::Transcript`) deserialization now validates
+with `from_items`, not the old prefix parser. An incomplete saved stream that
+previously deserialized as a prefix can now fail. Use `StreamRecord::parse_prefix`
+explicitly when inspecting intentionally incomplete data; do not treat it as a
+completed replay. Old logs containing the removed memory effect family also
+need conversion or an old reader, not just an updated type import.
 
-| Was | Is |
-| --- | --- |
-| `rig_reqwest::openai_websocket::*` (protocol + session) | `rig_core::providers::openai::responses_api::websocket::*` |
-| `rig_reqwest::openai_websocket::ResponsesWebSocketExt` | `rig_core::…::websocket::ResponsesWebSocketExt` (backend-taking) and `rig_tungstenite::DefaultWebSocketClient` (bundled backend) |
-| — | `rig_core::ws_client` — `WebSocketClientExt`, `WebSocketConnection`, `Frame` |
-| `rig-reqwest` features `websocket`, `websocket-rustls`, `websocket-native-tls` | `rig-tungstenite` features `rustls` / `native-tls`; the facade keeps all three spellings, each usable on its own. A native-tls-**only** socket means depending on `rig-tungstenite` directly with `default-features = false` — through the facade, `websocket-native-tls` compiles rustls as well |
+#### Storage, compaction and the coding-agent fronts
 
-**Through the `rig` facade the common path is unchanged.** With the `websocket`
-feature and `use rig::prelude::*`, this keeps working verbatim:
+Overlapping conversation saves now fail rather than corrupting a log.
+`DirStore` uses cross-process locking and creates `.rig-memory.lock` files.
+Save checks stamps and the expected log length, not whether every change
+applies; reads still validate changes. Earlier session formats are refused;
+see [persistent storage](#13-persistent-storage-and-replay).
 
-```rust
-use rig::prelude::*;
+For the new coding agent, the system prompt is fixed rather than including
+date, directory, instruction-file contents and changing plugin lists. The
+model reads project instructions itself; `CLAUDE.md` applies only where
+`AGENTS.md` is absent. A changing call cannot start if its recovery mark
+cannot be saved, and untrusted remote/MCP calls are not automatically rerun
+after a crash.
 
-let client = rig::providers::openai::Client::from_env()?;
-let mut session = client.responses_websocket("gpt-5.4").await?;
-```
+Compaction recovery is clear, then compact, then fail, once each until a reply
+advances the run. Configure it in `[compaction]`, not `/compaction` or per-agent
+knobs. `per_turn` is refused. Clearing keeps 20k tokens by default (formerly
+40k), keeps small outputs under 500 tokens, and no longer applies the old
+near-window tenth-of-room cap. A held summary is cancelled on stop rather
+than applied. Forks are agents in the same session, not session branches.
+Unknown startup `--model` values now fail with suggestions; `/model` leaves
+the old model selected. Providers must register by Startup.
 
-The `responses_websocket(..)` / `builder().connect()` you were calling now come
-from `rig_tungstenite`'s `DefaultWebSocketClient` / `DefaultWebSocketBuilder`
-rather than from `rig-reqwest`, exactly as `from_env()` comes from
-`DefaultTransportClient`. Both are in `rig::prelude`.
+Shell output is line-interleaved, strips terminal escapes, and keeps head,
+error lines and tail when cut. Commands stop with SIGTERM, then SIGKILL after
+the grace interval. The default timeout also stops calls quiet for 60 seconds;
+choose an explicit timeout to avoid that default quiet limit. Killing a remote
+transport does not prove its remote process stopped. Remote file calls are
+limited to two per host; read-only exit-255 failures retry once. Failed writes
+report whether they happened or might have happened. Edits apply in order,
+atomically as one call, and replies show changed lines and context. Search
+paths preserve relative versus absolute input; `files: true` lists files.
+A diff exceeding its time budget remains exact but may be less minimal.
 
-**If you named the old path directly**, update the import:
+A subagent's message does not complete its request; only its final report
+does. Messages/reports are delivered on the next model call and a wait also
+ends when the awaited turn ends without a message. Subagents always retain
+message/wait access and inherit task environment. `-p` with a prompt only
+waits briefly for piped input; JSON mode ends at EOF. Terminal state and
+styling changed, including nonzero-exit calls marked failed, NO_COLOR-aware
+selections and status in the input row; do not parse terminal rendering as a
+machine protocol.
 
-```rust
-// Before
-use rig::rig_reqwest::openai_websocket::{ResponsesWebSocketEvent, ResponsesWebSocketExt as _};
+### 0.46
 
-// After
-use rig::providers::openai::responses_api::websocket::ResponsesWebSocketEvent;
-use rig::prelude::*; // DefaultWebSocketClient
-```
+#### JSON key order and float parsing follow your own serde_json features
 
-**If you depended on `rig-reqwest` directly for websockets**, depend on
-`rig-tungstenite` instead; `rig-reqwest` no longer has a `websocket` feature and
-no longer pulls in `tokio-tungstenite`.
+rig-core no longer turns on serde_json's `preserve_order` and
+`float_roundtrip`. Unless something else in your build enables them, schema
+properties are sorted, JSON text in prompts, embeddings and tool results can
+change order, and parsed floats can differ in their low bits. Generated text,
+embedding vectors and exact comparisons can change. See
+[serde_json features](#1-serde_json-features-are-yours-to-choose).
 
-**To use a different websocket backend**, implement
-`rig_core::ws_client::WebSocketClientExt` and open the session with the
-backend-taking entry points, which name no backend:
+#### Streams that go quiet fail after five minutes
 
-```rust
-use rig::providers::openai::responses_api::websocket::ResponsesWebSocketExt as _;
-
-let mut session = client.responses_websocket_with("gpt-5.4", &my_backend).await?;
-// or, with options:
-let mut session = client
-    .responses_websocket_builder("gpt-5.4")
-    .event_timeout(std::time::Duration::from_secs(30))
-    .connect_with(&my_backend)
-    .await?;
-```
-
-A session can also be built over an already-open connection with
-`ResponsesWebSocketSession::from_connection(model, connection, event_timeout)` —
-which is how the protocol is now tested, with no socket involved.
-
-Three smaller consequences:
-
-- **The connect-timeout error text changed.** The handshake deadline is the
-  backend's now (it owns the handshake), so a hung connect reports
-  `ProviderError: Http client error: timed out connecting the websocket after
-  30s` where it used to report `ProviderError: Timed out connecting to the
-  OpenAI websocket after 30s`. Both are `CompletionError::ProviderError`; only
-  code matching on the string is affected. The per-event timeout is unchanged —
-  it stays with the session, which is the only side that knows where a turn
-  ends.
-- `rig_core::http_client::Error::non_success_status()` and `non_success_body()`
-  are now public (they were `pub(crate)`). A websocket backend outside rig-core
-  builds a rejected upgrade into that error, and the provider layer reads the
-  status and body back off it.
-- `rig-core` gained a `websocket` feature, gating `ws_client` and the provider
-  session modules. It adds no dependency — rig-core still pulls in no tokio, no
-  reqwest and no tungstenite.
-
-### Typed ids: `InternalCallId` is a counter, `ConversationId` is a newtype
-
-Two identifiers that were bare `String`s are now dedicated types in
-`rig_core::id`, alongside `RunId`:
-
-- **`InternalCallId`** — the rig-generated correlator tying one tool call's
-  stream items together (argument deltas → completed call → execution →
-  result) — is now a `Copy + Hash + Ord` `NonZeroU64` counter id with
-  transparent serde, minted by the streaming assembler (it was a 21-char
-  nanoid `String`). It changes type everywhere it appears:
-  `StreamedAssistantContent::{ToolCall, ToolCallDelta}`,
-  `StreamedUserContent::ToolResult`, `RawStreamingToolCall`,
-  `MultiTurnStreamItem::ToolExecutionCommitted`,
-  `rig_agent::run::PendingToolCall::internal_call_id`,
-  `rig_agent::run::policy::InvalidToolCallContext`, and the hook events
-  (`ToolCall`/`ToolResultEvent`/`ToolCallDelta`, where it was `&'a str` and is
-  now a by-value `InternalCallId`). Code that compared it to string literals
-  should compare ids; code that displayed it still can (`Display` renders the
-  decimal). **Serialized stream items and persisted runs now carry it as a
-  number** — run-state has no cross-version stability contract, so re-persist
-  runs with this release. Persisted ids loaded by a new process advance the
-  mint counter (`InternalCallId::advance_past`, wired into
-  `PendingToolCall`'s deserialize) so fresh mints cannot collide with ids
-  consumers already saw.
-- **`ConversationId`** — the key scoping `ConversationMemory` — is a
-  string-backed `Hash + Eq` newtype with transparent serde (`From<&str>`,
-  `From<String>`, `Display`, `as_str`). The `ConversationMemory` trait
-  methods, the rig-memory adapters (`on_demote`, `compact`, `forget`),
-  `InMemoryConversationMemory`'s keys, and the `conversation(..)` setters on
-  `AgentBuilder`/`AgentRunner`/prompt requests all use it; the setters take
-  `impl Into<ConversationId>`, so call sites passing strings compile
-  unchanged — only `ConversationMemory` implementors and callers of `load`/
-  `append`/`clear` with `&str` must wrap (`&"thread-1".into()`).
-
-### The protocol surface is fully data; owned-future entry points
-
-Groundwork for stepping `AgentRun` from a host scheduler (the upcoming Bevy
-plugin), all additive or derive-only:
-
-- `rig_agent::run::ModelTurn::from_response(resp, &PreparedRequest)` (and
-  `from_response_parts`) is now the one blessed `CompletionResponse →
-  ModelTurn` conversion; rig-agent's runner uses it, and any external driver
-  must too — it settles the two inputs hand-assembly gets wrong (tool-name
-  sets from the *prepared request*; the normalized `finish_reason()`
-  accessor).
-- `AgentRunStep`, `PreparedRequest`, `RequestPatch`,
-  `InvalidToolCallContext`, `RetryRequest`, `InvalidToolCallAction`, and
-  `StreamedTurnEvent` derive `Serialize + Deserialize`; `ModelTurnOutcome` is
-  additionally `Clone`. `StreamedTurnAssembler` is now `Clone + Serialize +
-  Deserialize`, so a mid-stream streamed turn persists and resumes like a
-  blocking `AgentRun` (same no-cross-version caveat).
-- `ToolCatalog::execute_owned(self, name, args, context) → (ToolResult,
-  ToolContext)` and `ConversationMemoryExt::{load_owned, append_owned,
-  clear_owned}` (blanket-implemented, `Arc<Self>` + owned `ConversationId`)
-  provide `Send + 'static` futures for hosts that spawn tasks; the borrowed
-  methods remain the implementation surface.
-
-### The `discord-bot` feature is gone; the integration is an example
-
-`rig`'s `discord-bot` feature, rig-agent's `discord-bot` feature, and
-`rig_agent::integrations::discord_bot` (`DiscordExt`, `DiscordBotError`) are
-removed. `serenity` 0.12.5 is the newest published release and pins `rustls`
-0.22, whose `rustls-webpki` 0.102.8 carries four unpatched advisories — a
-reachable CRL-parsing panic plus three name-constraint/CRL-authority
-weaknesses — with no version to bump to. A demo-grade integration is not worth
-putting that in the dependency graph of everyone who builds the facade with
-`--all-features`.
-
-The code moved verbatim to `examples/discord_bot`, which is now excluded from
-the workspace and carries its own lockfile, so `serenity` is out of the
-workspace `Cargo.lock` entirely. If you were using `DiscordExt`, copy
-`examples/discord_bot/src/discord_bot.rs` into your own crate and depend on
-`serenity` directly — it is ~230 lines over the public `Agent` API and needs
-nothing internal. Two incidental trims came with the move: the unused
-`DiscordExt::into_discord_bot_from_env` default method and the
-`DiscordBotError::MissingToken` variant it fed.
-
-Run the example with `cargo run --manifest-path examples/discord_bot/Cargo.toml`
-(`-p discord_bot` no longer resolves).
-
-### Run lifecycle hooks and transport middleware
-
-The agent hook surface gained a pre-run and a terminal event, and the erased
-HTTP transport gained a middleware seam. What breaks:
-
-- **`StepEventKind` gained `RunStart` and `RunSettled`.** Exhaustive `match`es
-  over `StepEventKind` (e.g. in an `AgentHook::observes` implementation) must
-  add the two arms. `AgentHook` itself is unaffected: the new `on_run_start`
-  and `on_run_settled` methods are default-implemented.
-- **`BoxedHttpClient` now applies attached `HttpMiddleware`** (new, opt-in via
-  `BoxedHttpClient::with_middleware`). Behavior without middleware is
-  unchanged. `BoxedHttpClient::ptr_eq` still compares the underlying transport
-  only, so two handles differing only in middleware compare equal.
-- **`AgentRun` gained an append-only entry log** — `rig_agent::run::RunEntry`
-  (`kind`/`turn`/`value`) with `append_entry`, `entries`, `entries_of`, and
-  `last_entry_of` — plus `initial_prompt`, `rewrite_initial_prompt`, and
-  `input_chat_history`. Runs serialized before this release deserialize
-  unchanged (the field defaults to empty). Entries are protocol data like
-  `TurnTools`: never interpreted by the run and never part of a provider
-  request.
-
-New, non-breaking: durable hook state is **event-sourced**. Hooks persist by
-appending entries to the run's record via `HookContext::append_entry` (stamped
-with the current turn, flushed into the `AgentRun` at each step boundary) and
-reconstruct by replaying `HookContext::entries(kind)` — the documented default
-pattern is snapshot + last-wins via `HookContext::last_entry`. State that
-rides the record travels, rewinds, and forks with the record. Also new: the
-`RunStart`/`RunStartAction`/`RunSettled`/`SettledOutcome` hook vocabulary. A
-`RunStartAction::Stop` terminates the run before any provider call with
-`PromptError::PromptCancelled`. (A `Scratchpad::put_durable` /
-`ScratchpadSnapshot` / `AgentRun::hook_state` snapshot API existed briefly
-between two unreleased PRs and was replaced by the entry log before release;
-`Scratchpad` remains as the in-process, non-serialized cross-hook channel.)
-
-### The run protocol is rig-agent's `run` layer; rig-core keeps only the message-model invariants
-
-`AgentRun` — the sans-IO, serializable state machine behind every agent run —
-was briefly its own crate during this cycle (`rig-run`, never released). It is
-not. rig-core is the provider, tool, transport and message contract and knows
-nothing about agents; everything an agent loop *is* lives in one sans-IO layer
-of rig-agent.
-
-- **rig-core keeps two things**, because they are properties of the message
-  model rather than of any loop: `rig_core::transcript::validate_canonical`
-  (+ `TranscriptError` — every assistant tool call answered in the next user
-  message, no orphan results; the shape providers require) and the tool-result
-  constructors `tool_result_output` / `tool_result_message` (a `ToolOutput`
-  becoming user-message content). Nothing else moved into rig-core.
-- **`rig_agent::run`** is the sans-IO layer — data and transitions only, a
-  source-level guard covers every file, all of it `Serialize + Deserialize +
-  Clone`: `AgentRun`, `AgentRunStep`, `ModelTurn`, `ModelTurnOutcome`,
-  `PendingToolCall`, `RunEntry`, `TurnTools`; `run::spec` (`RunSpec`,
-  `RunSpec::DEFAULT_OUTPUT_RETRIES`); `run::prepare` (`prepare_request`,
-  `PreparedRequest`, `PrepareError`); `run::output` (`OutputMode` and the
-  output-policy helpers `resolve_output_mode`, `pick_output_tool_name`,
-  `augment_preamble`, `allowed_tool_names_for_choice`, …); `run::patch`
-  (`RequestPatch`); `run::response` (`PromptResponse`, `CompletionCall`,
-  `PromptError`); `run::policy` (`InvalidToolCallAction`,
-  `InvalidToolCallContext`, `RetryRequest`); `run::streamed` (the streamed-turn
-  assembler); `run::transcript` (history threading, invalid-call feedback,
-  turn classification, plus re-exports of the rig-core invariants). `rig::run`
-  is this module and needs the `agent` feature.
-- **A second driver** (an ECS schedule, a job system) that steps `AgentRun`
-  itself depends on `rig-agent` with default features off: that graph is
-  rig-core plus the futures vocabulary — no async runtime, transport or MCP
-  client, pinned by `rig_agent_carries_no_runtime_or_mcp` — and
-  `tests/fixtures/agent_run_stepper` is that host in miniature. Because there
-  is exactly one `prepare_request`, every such driver sends the same bytes.
-- Every 0.42 path resolves unchanged: `rig_agent::agent::run::*`,
-  `rig_agent::agent::{AgentRun, AgentRunStep, ModelTurn, ModelTurnOutcome,
-  PendingToolCall, OutputMode, PromptResponse, CompletionCall, RunSpec,
-  TurnTools}`, `rig_agent::completion::PromptError`,
-  `rig_agent::agent::hook::{RunEntry, RequestPatch, InvalidToolCallAction,
-  InvalidToolCallContext, RetryRequest}` (pinned by
-  `crates/rig-agent/tests/run_paths_stable.rs`).
-- `PromptError::prompt_cancelled(..)`, `PromptResponse::{with_output_tool_calls,
-  output_tool_calls}` and the `AgentRun` driver methods
-  (`set_output_tool_name`, `output_tool_name`, `accepted_turn_choice`,
-  `ignore_invalid_tool_call`, …) were crate-private to rig-agent and are now
-  public: they are the protocol's driver API.
-- `RunId` (`rig_core::id::RunId`, re-exported from `rig::run` and
-  `rig_agent::agent::hook`) is now a `NonZeroU64` counter id — `Copy + Hash +
-  Ord + Serialize`, `to_raw()`/`from_raw()`, decimal `Display`/`FromStr`,
-  `Option<RunId>` is `u64`-sized — instead of an opaque `String` newtype.
-  `RunId::as_str()` is gone (use `to_string()`); `HookContext::run_id()` returns
-  it by value.
-
-New, additive:
-
-- **`RunSpec`** (`rig_agent::run::spec::RunSpec`): the protocol-facing
-  half of an agent definition as plain `Serialize + Deserialize` data —
-  preamble, static context, sampling params, additional params, turn budget,
-  tool choice, structured-output policy. `AgentRun::from_spec(&spec, prompt,
-  history)`; `Agent::run_spec()` reads it off an agent;
-  `AgentBuilder::apply_spec(&spec)` layers one under imperative builder calls
-  (model, tools, hooks, memory are untouched).
-- **`AgentRun::advertise_tools(turn, Vec<ToolDefinition>)` /
-  `advertised_tools() -> Option<&TurnTools>`**: what the request offered the
-  model, recorded as run data (serialized with the run) so a resumed run or a
-  second driver can re-pair returned calls with the advertised set. rig-agent's
-  driver records it before every model call.
-- **`rig_core::transcript::validate_canonical(&[Message])`** and
-  **`AgentRun::with_validated_history(..)`**: the canonical-transcript rules the
-  protocol produces (no consecutive assistant messages; every assistant tool
-  call answered in the next message; no orphan tool results), as a checkable
-  function for histories that come from outside (memory, a resumed run).
-  `with_history` stays unchecked.
-
-### The erased model and the erased tool set are rig-core; request preparation is rig-agent's `run` layer
-
-The second step of "one protocol, two drivers". The erased handles and the
-tool set are rig-core's; the pure request step is rig-agent's sans-IO `run`
-layer (a driver steps it via runtime-free rig-agent). Every old path still resolves through
-re-exports; behavior is unchanged (the recorded provider suites replay the same
-request bodies, and a golden test pins the driver's requests for a scripted
-tool turn). What moved, and what is new:
-
-- **`ModelHandle`** (`rig_core::completion::ModelHandle`, was
-  `rig_agent::agent::model::ModelHandle`; still at `rig_agent::ModelHandle`,
-  `rig_agent::agent::ModelHandle`, the prelude): unchanged API, same private
-  `ErasedModel`/`ModelDriver` shape, same `compile_fail` pins (not
-  `Serialize`). `ModelHandle::named(label, model)` now takes
-  `impl Into<ModelRef>` — `&str`/`String` still work — and `label()` still
-  returns `Option<&str>`.
-- **`ModelRef`** (new, `rig_core::completion::ModelRef`): the serializable
-  string identity a `RunSpec`, an asset, or a registry names a model by
-  (`Arc<str>`, transparent serde, `Deref<Target = str>`, `Display`,
-  `From<&str>/From<String>`). `ModelHandle::model_ref()` reads the typed label.
-- **The contextual tool API is rig-core's** (`rig_core::tool::{Tool,
-  ToolEmbedding, ErasedTool, ErasedEmbeddingTool, DynamicTool, RegisteredTool,
-  ToolDispatch, dispatch_tool, tool_definition, ToolSet}`, module
-  `rig_core::tool::contextual`; re-exported unchanged at `rig_agent::tool::*`
-  and, with or without the `agent` feature, at `rig::tool::*`). `Tool` and
-  `ToolEmbedding` keep their blanket impls over `PortableTool` /
-  `PortableToolEmbedding`. `#[rig_tool]` now expands contextual tools against
-  `rig_core::tool::{Tool, ToolContext}` too, so a crate that depends on
-  `rig-core` alone can author a `&mut ToolContext` tool — the "contextual tools
-  require `rig`/`rig-agent`" macro error is gone, and a fully qualified
-  `&mut rig_core::tool::ToolContext` is recognised without `#[rig(context)]`.
-- **`ToolCatalog`** (new, `rig_core::tool::ToolCatalog`): the pinned,
-  retrieval-free view of a tool set — provider definitions plus dispatch by
-  name (`definitions`, `names`, `contains`, `execute`, `dispatch`,
-  `retain_names`, `take_definitions`). Build one with `ToolSet::catalog()`
-  (always-exposed tools, registration order) or
-  `ToolCatalog::from_registered(IndexMap<String, RegisteredTool>)`.
-  rig-agent's `ToolRegistrySnapshot` is now `pub type ToolRegistrySnapshot =
-  ToolCatalog` — same methods, same name, so nothing to change. `ToolSet`
-  gained the reads the registry used to get by reaching into its map: `names`,
-  `len`, `is_empty`, `get`, `always_exposed_names`, `add_retrievable_tools`,
-  `move_to_end`, `catalog`. `ToolServer` / `ToolServerHandle` (retrieval
-  indexes, managed remote tool sources, `get_tool_defs(prompt)`, the per-turn
-  snapshot) stay in `rig-agent`, layered over these types.
-- **`rig_agent::run::prepare::prepare_request`** (new): the pure `(RunSpec, ProviderCapabilities,
-  history, tools, committed output tool, RequestPatch) -> PreparedRequest`
-  step — preamble augmentation, static + extra context, output-mode resolution,
-  synthetic output-tool synthesis and naming, `active_tools` narrowing,
-  tool-choice validation — as owned data with `PreparedRequest::apply(builder)`
-  to bind it to any `CompletionRequestBuilder<M>`. `PrepareError` carries the
-  same local, pre-IO messages rig-agent raised before and converts into
-  `CompletionError::RequestError`. rig-agent's driver now does only the IO
-  around it: retrieve the turn's tools, `prepare_request`, bind the selected
-  model's builder.
-- **`RequestPatch`** (`rig_agent::run::patch::RequestPatch`, was
-  `rig_agent::agent::hook::RequestPatch`; still at the old path and
-  `rig_agent::agent::RequestPatch`): plain per-turn data, unchanged fields and
-  builder methods; `is_empty()` and `merge(later)` are now public. The hook
-  that produces it (`CompletionCallAction::patch`) stays in rig-agent.
-
-A host that steps `AgentRun` itself can now erase a model, build a
-`ToolSet`/`ToolCatalog` from `PortableDynamicTool`s, construct a run from a
-`RunSpec`, `prepare_request`, and dispatch a tool by name with `rig-agent`
-(default features off) and `rig-core` alone — the guard
-`tests/core/agent_run_stepper.rs` runs exactly that fixture and checks its
-dependency graph carries no runtime, transport, MCP client or `rig` facade.
-
-### `BoxedHttpClient`: an erased transport, and `Client<Ext>` now means `Client<Ext, BoxedHttpClient>`
-
-`rig_core::http_client::BoxedHttpClient` wraps any `H: HttpClientExt + 'static`
-behind one `Arc<dyn …>` and implements `HttpClientExt` itself, so a client can
-hold a transport without naming it. `Clone` is a reference-count bump; boxing
-an already boxed transport is a clone, not a second layer; `Debug` prints only
-the type name. It is for hosts that *hold* one transport for many providers
-(worker pools, ECS resources, registries built at startup) — keep the generic
-`H` when writing a provider or when you want a monomorphized transport.
-
-- `Client<Ext, H>`'s type default is now `H = BoxedHttpClient` (it was the
-  `Missing` typestate placeholder). In **type** position `Client<Ext>` is
-  "any transport"; nothing changes in expression position, where defaults never
-  applied. The one break: `Client::<Ext>::builder()` no longer resolves —
-  `builder()` lives on `Client<Ext, Missing>`, so spell it
-  `Client::<Ext, Missing>::builder()` (or go through a provider's
-  `ClientBuilder`/the rig-reqwest prelude as before).
-- `ProviderFromEnv::from_env_boxed(http)` / `from_val_boxed(input, http)`
-  return `Client<Self, BoxedHttpClient>`; `Client::boxed(self)` erases a built
-  client's transport; `rig_reqwest::ReqwestClient::boxed()` /
-  `impl From<ReqwestClient> for BoxedHttpClient`.
+A streamed reply that sends nothing for 300 s now fails as the retryable
+`ProviderError::Stalled` instead of waiting forever. Any byte, `: ping`
+comments included, restarts the timer. Opt out per model:
 
 ```rust
-use rig::client::ProviderFromEnv as _;
-use rig::http_client::{BoxedHttpClient, ReqwestClient};
-use rig::providers::openai;
-
-let transport: BoxedHttpClient = ReqwestClient::default().boxed();
-let client: openai::Client<BoxedHttpClient> =
-    openai::OpenAIResponsesExt::from_env_boxed(transport.clone())?;
-// …and the same `transport` for every other provider the host talks to.
+let model = Model::new(wire, http).with_idle_timeout(None);
 ```
 
-### Synchronous, retrieval-free registry reads: `ToolServerHandle::{snapshot, static_tool_defs, toolset}`; `ToolRegistrySnapshot` is public; `ToolSet: Clone`
+#### Provider requests that changed without an API change
 
-Additive. The registry lock has been a `std::sync::RwLock` since 0.41 → next's
-runtime-agnostic work, and registration was already synchronous; the read side
-now is too. Pick the path by what you need:
+- On OpenAI Responses, `CacheRetention::Long` on GPT-5.6 and later asks for
+  the 12 hour prompt cache, whose cache writes OpenAI bills at 2.5x the
+  input rate.
+  Use `Short` for the 30 minute default.
+- On OpenAI's own Responses API, requests that set `cache_points` against
+  GPT-5.6 or later carry `prompt_cache_breakpoint` markers.
+- On MiniMax, Moonshot, Groq and Doubleword Responses, typed options that
+  were refused are now sent, and a `store: false` conversation sends earlier
+  reasoning items back.
+- MiniMax China callers reach `api.minimax.cn`; pin the old
+  `api.minimaxi.com` with `with_base_url` only if your network needs it.
+- On the ChatGPT backend, `Reasoning::Effort` also sends
+  `"summary": "auto"`. Set `additional_params` to
+  `{"reasoning":{"summary":"detailed"}}` for another summary.
+- Tools on Chat Completions are refused for GPT-6.1 Terra at every effort.
+- Catalog facts for the models listed in `crates/rig-core/TYPED_OPTIONS.md`,
+  section 12.0 (Catalog refresh), changed their reasoning and image support. Models models.dev retired
+  follow each provider's rule for an unlisted model.
+- `ProviderId::resolve("ollama")` is `SelectionError::Ambiguous`.
+- DeepSeek requests with strict tools go to its `/beta` endpoint, with
+  schemas rewritten into what strict mode takes.
+- A catalog override file that sets `rig.chat_tools_need_reasoning_off` no
+  longer loads; use `chat_tools` (see
+  [section 3](#3-provider-selection-dialects-and-the-catalog)). Override files
+  may now also set `limit.input`, `provider`, `experimental`, `interleaved`,
+  `cost.tiers` and `cost.context_over_200k`, and a misspelled key inside them
+  is reported.
 
-- **The registry as it stands** (no dynamic-tool selection): the new sync
-  `ToolServerHandle::snapshot() -> ToolRegistrySnapshot` and
-  `static_tool_defs() -> Vec<ToolDefinition>` — plain `fn`s, no executor, safe
-  to call from a frame/tick loop or a plain `#[test]`. Callers of
-  `get_tool_defs(None)` can switch to `static_tool_defs()` and drop the
-  `.await` (the async form stays and returns the same definitions).
-- **Dynamic-tool selection for a prompt** (vector-store retrieval): the async
-  `get_tool_defs(Some(prompt))`, unchanged.
+#### Costs, telemetry and error bodies
 
-`ToolRegistrySnapshot` — the per-turn pinned view the agent loop already uses —
-is now public (`rig_agent::tool::server::ToolRegistrySnapshot`): `definitions()`,
-`names()`, `len()`/`is_empty()`, and `execute(name, args, &mut ToolContext)`,
-which runs the implementation pinned at snapshot time regardless of later
-registry changes. `ToolServerHandle::toolset() -> ToolSet` forks the registry,
-and `ToolSet` now derives `Clone` (shallow: shared `Arc` implementations, copied
-names/order/exposure). All read paths retire disconnected remote tools first.
+- Native Anthropic completion cost estimates use the response's cache TTL
+  split. Nonzero writes with missing details give an incomplete estimate
+  (`Cost::is_complete()` is false); provider-reported costs still win.
+- Agents with `record_content_telemetry(true)` also export each completion's
+  tool names, descriptions and parameter schemas on
+  `gen_ai.tool.definitions`. Use `record_content_telemetry(false)` to keep
+  them out.
+- rig-reqwest keeps at most 64 KiB of a non-success response body in the
+  error, with a truncation notice. Use a custom transport if you need more.
+- `Observe::event` is called for every streamed item, and `Recorder::event`
+  also for a stream's first, even when `keep_events()` is false. An existing
+  observer that stores everything it is given now stores those items too; check
+  `keep_events()` in it (see [agent runs](#4-agent-runs-observers-and-effect-records)).
 
-### `AgentRunner::run_channel` / `Agent::run_channel`: a future plus an event feed
+#### Stored data
 
-Additive. Beside `run()` (fold to a `PromptResponse`) and `stream()` (a
-`Stream` of `MultiTurnStreamItem`), the agent loop now has a third, runtime-
-agnostic shape: `AgentRunner::run_channel(self)` (also on `Agent` and a
-configured `StreamingPromptRequest`) returns `(impl Future<Output =
-Result<PromptResponse, PromptError>>, RunEvents)`. Spawn the future on any
-executor — tokio, `bevy_tasks`, a thread — and consume `RunEvents` wherever the
-events are needed: it implements `Stream` and offers a non-blocking
-`try_next()` / `is_done()` for tick-driven hosts. The feed is bounded
-(`RUN_EVENTS_CAPACITY`, back-pressure rather than drops), and dropping it
-does not cancel the run. `rig_agent::agent::{RunEvents, RUN_EVENTS_CAPACITY}`;
-`RunEvents` is also in the rig-agent and `rig` preludes. See
-`examples/agent_no_tokio` for a `bevy_tasks` host.
+- Sessions saved before 0.46 load, but their reasoning blocks record no blob
+  slot: `Native::reasoning_blob()` returns `None` for them.
+- A saved session's stop note with the 0.45 wording of
+  `conversation::STOPPED` is no longer recognized and draws as a plain rig
+  message.
+- `MemoryStore::read_log` on an invalid log name returns `InvalidInput`, not
+  `NotFound`.
+- `SummaryState::track` counts only calls whose paired result is not an
+  error. Calls with an error result or no result no longer count, so a summary
+  lists only files whose read, edit or write succeeded.
+- Two exhaustive enums gained variants in the middle, so their numeric values
+  moved: `rig_basics::compaction::Recovering::Compacted` is 2 (was 1), and
+  `rig_ecs::stage::PrepareSystems::Fit` is 5 (was 3). Code that stores or
+  compares `as` casts of them maps the variants explicitly instead.
 
-### MCP tool support moves from rig-agent's `rmcp` feature to the `rig-rmcp` crate
+#### The coding agent
 
-rig-agent no longer has an `rmcp` feature or an rmcp dependency; MCP lives in
-the new **`rig-rmcp`** crate, which depends on **rig-core only**. The
-dependency graph is `rig-core ← rig-rmcp` and `rig-core ← rig-agent`, with the
-`rig` facade gluing them behind its `rmcp` feature. Through the facade,
-`rig::tool::rmcp::*` (`McpClientHandler`, `McpTool`, `Meta`, …) keeps resolving
-and `McpClientHandler::new(client_info, tool_server_handle.clone())` works
-unchanged. What changes:
+- The shell tool has no default timeout and no quiet limit: a command runs
+  until it ends, unless the call sets `timeout_secs` or the user interrupts.
+  A remote command stops when its transport's stdin closes, so a transport
+  must forward stdin (`ssh`, `koh exec`); `ssh -n` stops every command at once.
+- `read` returns PNG, JPEG, GIF and WebP files as an image (up to 3840 KB)
+  and refuses a file that is not UTF-8. A third call of one missing tool name
+  in a turn fails that turn. One Ctrl+D on an empty input quits.
+- A tool path whose first component is `~` is the home directory. A session
+  whose history wrote into a project folder named `~` reaches the home
+  directory when the same call runs again.
+- Compaction measures against the model's input limit, not its context
+  window, so it starts earlier (for the GPT-6 models, about 906K tokens
+  instead of about 1,034K). After an overflow the older messages are summarized instead of
+  asking for notes. A request with no output limit asks for at most 64,000
+  tokens plus any thinking budget and 1,024, never above the catalog's output
+  limit, instead of the whole window left; a model with no known window or
+  output limit keeps the server's default.
+- A reply stopped with Esc is sent back to the model as the text it had
+  written. Quitting mid-turn stops the turn as Esc does, and resuming after a
+  quit or a crash runs nothing until you send a message.
+- The prompt history moved to the project's
+  `$RIG_HOME/projects/<name>-<key>/tui/history.jsonl`; earlier prompts in
+  `$RIG_HOME/data/tui/history.jsonl` are not carried over.
+- A session that only changed settings is not saved and not listed in
+  `/resume`.
+- SIGTERM always stops the agent cleanly; SIGINT and SIGHUP do unless rig was
+  started with them ignored. The launcher kills tool process groups that a
+  dead agent left behind.
+- The default system prompt no longer forces a short status line at the end
+  of each turn, and an explicit request in the conversation beats a
+  conflicting `AGENTS.md` rule.
+- Headless exit codes and closing lines changed; see
+  [headless drivers](#9-headless-drivers-rig--p-rig--p---json-and-rig---json).
 
-- **The registry contract is a rig-core abstraction.** `rig_core::tool::ManagedToolSink`
-  (`add_managed_tools` / `reconcile_managed_tools`, generation-tokened,
-  last-registration-wins, retire-on-disconnect) with `ManagedToolToken`; rig-agent's
-  `ToolServerHandle` implements it, and `McpClientHandler<S: ManagedToolSink>` refreshes
-  into any sink. `PortableDynamicTool` gained `with_liveness` / `is_live` so a sink can
-  retire tools whose remote backing disconnected; rig-agent's `DynamicTool::from_portable`
-  forwards it.
-- **MCP tools are rig-core portable tools.** `McpTool` converts `From<McpTool> for
-  rig_core::tool::PortableDynamicTool` (`rig_rmcp::tools_from_server` for a whole list).
-  Register them wherever portable tools go: `builder.portable_dynamic_tool(tool.into())`,
-  `ToolServer::new().portable_dynamic_tool(..)`, `ToolServerHandle::add_portable_dynamic_tool`.
-  The `rmcp_tool` / `rmcp_tools` / `…_with_timeout` builder methods on `AgentBuilder` and
-  `ToolServer` are **removed** — no replacement method; use the portable registration above
-  (nothing is lost: the portable adapter is context-aware).
-- **`ToolContext` lives in rig-core, and portable dynamic tools can receive it.**
-  `rig_core::tool::{ToolContext, MissingToolContext}` (module `rig_core::tool::context`,
-  which also exposes the `TypeMap` primitive and the dispatch helpers `for_dispatch` /
-  `accept_dispatch_result` / `clear_dispatch_result` any runtime needs); `rig_agent::tool::ToolContext`
-  and `rig::tool::ToolContext` are re-exports, so existing paths and `#[rig(context)]` keep
-  working. `PortableDynamicTool::new` stays context-free; `new_with_context` /
-  `execute_with` give a dynamic tool the per-call context, and rig-agent's
-  `DynamicTool::from_portable` now threads the agent's context through instead of
-  discarding it. MCP `_meta` passthrough (an `rmcp::model::Meta` placed in the context)
-  and result preservation (`structuredContent`, response `Meta`, raw `CallToolResult`
-  on `context.result::<T>()`) therefore work through the portable path exactly as before.
-- **Direct rig-agent users** depend on `rig-rmcp`; runtimes other than rig-agent implement
-  `ManagedToolSink` for their registry to get live refresh.
-- rig-agent's registry support for externally managed tools is public and ungated:
-  `ErasedTool` (and `is_live`), `ToolSet::add_erased`, `ToolServer::erased_tool`,
-  `AgentBuilder::erased_tool`, `ToolServerHandle::{add_managed_erased_tools,
-  reconcile_managed_erased_tools}`, `Agent::tool_server_handle()`. rig-agent's `tokio` is
-  optional, enabled only by `test-utils`.
+---
 
-### rig-core has no default transport; the bundled reqwest transport is the new `rig-reqwest` crate
+## 0.45 → 0.46
 
-`rig-core` no longer depends on `reqwest` or `tokio` and no longer names a
-default HTTP transport anywhere: every `H` type parameter that used to default
-to `reqwest::Client` (provider `Client`/`CompletionModel`/`EmbeddingModel`/…
-aliases, `Capabilities<H>`, `ModelLister<H>`, `Client<Ext, H>`) now has no
-default, and the reqwest-pinned constructors (`Client::new`, the default
-`ClientBuilder::build`, the per-provider `ProviderClient` impls) are gone from
-rig-core. The transport lives in **`rig-reqwest`**:
+0.46 is mostly a coding-agent release. Its plugin extension points become
+ordinary Bevy data and systems, the TUI draws through render systems, and the
+headless JSON protocol, the shell and file tools, compaction and session
+restore all change behavior. Four crates are new: `rig-mcp-client`,
+`rig-acp`, `rig-traffic` and `rig-claude-cloak`. The library changes are
+smaller: rig-core stops forcing two serde_json features, a few message,
+provider-dialect and catalog types gain or lose fields, and some constants
+move. Rust **1.97.1** and Bevy **`=0.20.0`** are unchanged.
 
-- `rig_reqwest::ReqwestClient` — a newtype over `reqwest::Client` implementing
-  `HttpClientExt` (a newtype because the orphan rule forbids implementing
-  rig-core's trait for reqwest's type from a third crate; it derefs to the
-  inner client and converts `From<reqwest::Client>`). `ReqwestMiddlewareClient`
-  wraps `reqwest_middleware::ClientWithMiddleware` behind `reqwest-middleware`.
-- `rig_reqwest::client::DefaultTransportClient` / `DefaultTransportBuilder` —
-  the traits that give every rig-core provider client `new(api_key)`,
-  `from_env()`, `from_val(input)` and `builder().…build()` over the bundled
-  transport. They are implemented exactly once, for `Client<Ext, ReqwestClient>`,
-  which is what lets `openai::Client::from_env()` infer `H`.
-- `rig_reqwest::providers::*` — the familiar provider module tree with every
-  transport-generic type aliased to `…<ReqwestClient>` for type position
-  (`Agent<openai::CompletionModel>`, `let c: openai::Client = …`).
-- It works without a tokio runtime (Bevy task pools, smol, `futures::executor`):
-  reqwest futures are driven on a lazily started fallback runtime and the
-  caller only ever polls runtime-agnostic futures.
+The examples below are **source-checked migration sketches, not compiled
+standalone programs**. Most are transcribed from the pull requests that made
+the change. They describe the final 0.46 API. If you tried `0.46.0-rc.1`,
+everything here still applies; the one rc-only change is that the
+unpublished `claude-cloak` path crate became the published
+`rig-claude-cloak` (see [section 8](#8-the-coding-agents-pluginstoml-and-settings)).
 
-**Through the `rig` facade nothing changes for the common path** — the default
-`reqwest` feature re-exports all of the above, so with `use rig::prelude::*`
-these keep working unchanged:
+### 1. serde_json features are yours to choose
 
-```rust
-use rig::prelude::*;
-let client = rig::providers::openai::Client::from_env()?;
-let client = rig::providers::openai::Client::new("key")?;
-let client = rig::providers::openai::Client::builder().api_key("key").build()?;
-let agent: Agent<rig::providers::openai::CompletionModel> = client.agent("gpt-4o").build();
+rig-core no longer forces serde_json's `preserve_order` and `float_roundtrip`
+features. Without them, schema properties use sorted keys, JSON text inside
+prompts, embeddings and tool results can change order, and parsed floats can
+differ in their low bits. To keep the 0.45 behavior, add a direct dependency:
+
+```toml
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 ```
 
-What does change:
+Some rig builds still enable them: `rig-cassette` with `traffic`, `http` or
+`bedrock` (and so `rig-traffic`) enables both, `rig-claude-cloak`,
+`rig-mcp-client` and so `rig-acp` enable `preserve_order`, and `rig-mongodb`
+enables it through BSON.
 
-- Code that imported `rig::client::ProviderClient` (or `rig_core::client::ProviderClient`)
-  to call `from_env()` on a **core** provider client must import the new traits
-  instead: `use rig::client::{DefaultTransportClient, DefaultTransportBuilder};`
-  (or just `use rig::prelude::*;`). `ProviderClient` itself stays in rig-core
-  for companion crates' own client types (rig-bedrock, rig-vertexai,
-  rig-gemini-grpc), which still implement it.
-- Direct `rig-core` users (no facade) must name the transport:
-  `Client::new_with(key, http)`, `<OpenAIResponsesExt as ProviderFromEnv>::from_env_with(http)`
-  / `from_val_with(input, http)`, or `Client::builder().api_key(..).http_client(http).build()`,
-  with any `HttpClientExt` implementation (e.g. `rig_reqwest::ReqwestClient::default()`).
-  `llamacpp::Client::from_url(url)` is `from_url_with(url, http)`.
-- `impl Capabilities for X` / `impl ModelLister for X` relied on the trait
-  defaults and must spell `Capabilities<H>` / `ModelLister<H>`.
-- Type annotations that named the nested generic aliases without `H`
-  (`openai::responses_api::ResponsesCompletionModel`) use the facade's
-  top-level aliases (`rig::providers::openai::ResponsesCompletionModel`) or
-  spell `<ReqwestClient>`.
-- `rig::http_client::ReqwestClient` / `from_reqwest` still resolve (re-exported
-  from `rig-reqwest`); `Error::instance(err)` is the public constructor for a
-  transport's response-less failures and `Error::non_success_with_details`
-  for status-bearing ones.
-- The `websocket*`, `rustls`, `native-tls`, `socks`, `reqwest-middleware*`
-  features on the `rig` facade now forward to `rig-reqwest`; rig-core has none
-  of them. rig-core's default features are just `["derive"]`.
-- `Client::http_client()` borrows a client's transport; `ProviderFromEnv` on
-  the provider extension types replaces the per-client `ProviderClient` impls
-  for anyone who implemented `ProviderClient` for a core `Client`.
+### 2. Message data: `Native`, reasoning blobs and images
 
-### `AuthError::Http` carries `http_client::Error`, and `Authenticator::auth_context` takes the transport
-
-`rig::providers::copilot::auth::AuthError` / `rig::providers::chatgpt::auth::AuthError`
-(`providers::internal::auth::AuthError`) wrapped a raw `reqwest::Error`. The
-OAuth/device-code flows now run through the client's own `HttpClientExt`
-transport instead of an ad-hoc `reqwest::Client`, so the variant carries the
-transport-agnostic `http_client::Error`: a non-success response is one of its
-status-bearing variants, a response-less failure is `Instance`.
+`Native` has three new public fields: `blob_slot`, `baseline` and `edited`.
+Prefer `AssistantContent::with_native(item)` over a struct literal. It records
+a tool call's `baseline` and leaves `edited` false and `blob_slot` unset:
 
 ```rust
 // before
-Err(AuthError::Http(e)) => e.status()
-
+Native { item, fingerprint }
 // after
-Err(AuthError::Http(e)) => match e {
-    http_client::Error::InvalidStatusCode(status)
-    | http_client::Error::InvalidStatusCodeWithMessage(status, _)
-    | http_client::Error::InvalidStatusCodeWithDetails { status, .. } => Some(status),
-    _ => None,
+Native { item, fingerprint, baseline: None, edited: false, blob_slot: None }
+```
+
+`Native::reasoning_blob` takes no `Api`; it reads `blob_slot`, which the
+reply fold records from the wire's `ReplayTarget::blob_slots`. `Blob::key` is
+now `&'a str`. A custom completion wire whose items carry a reasoning blob
+declares where:
+
+```rust
+// before
+let blob = native.reasoning_blob(&origin.api);
+// after
+let blob = native.reasoning_blob();
+
+impl ReplayTarget for MyWire {
+    // ...
+    fn blob_slots(&self) -> &'static [&'static str] {
+        &["/signature"]
+    }
 }
 ```
 
-`Authenticator::auth_context()` accordingly takes the transport to use:
-`auth.auth_context(client.http_client()).await`. The provider clients'
-`authorize()` helpers are unchanged. `Client::http_client()` is new: it
-borrows the transport a `Client<Ext, H>` sends through.
+`Native` equality includes `blob_slot`, so a test comparing a decoded block
+with one built by `with_native` must set the wire's pointer.
 
-### `http_client::ReqwestClient` / `from_reqwest` live in a reqwest-only module
-
-Both still resolve at `rig::http_client::ReqwestClient` and
-`rig::http_client::from_reqwest`; they are re-exported from the bundled
-reqwest transport module, which is now the only place rig-core names a reqwest
-type. `http_client::Error::non_success_with_details(status, headers, body)` is
-the new transport-agnostic constructor for the headers-preserving non-success
-error — custom `HttpClientExt` implementations should build their errors with
-it so `non_success_headers()` keeps working for retry policies.
-
-### `VectorStoreError::ReqwestError` is now `VectorStoreError::Http(http_client::Error)`
-
-The variant carried a raw `reqwest::Error`, which tied rig-core's public
-error surface to one HTTP backend. It now carries the transport-agnostic
-[`rig::http_client::Error`]: a non-success response arrives as one of its
-status-bearing variants (so the status code is still inspectable), and a
-response-less transport failure (connect, decode, timeout) arrives as
-`http_client::Error::Instance`.
+`history::IMAGE_OMITTED` replaces `USER_IMAGE_OMITTED` and
+`ASSISTANT_IMAGE_OMITTED`. `ImageDetail` no longer implements `FromStr`:
 
 ```rust
 // before
-Err(VectorStoreError::ReqwestError(e)) => {
-    if let Some(status) = e.status() { /* … */ }
-}
-
+let detail: ImageDetail = "low".parse()?;
 // after
-Err(VectorStoreError::Http(e)) => match e {
-    http_client::Error::InvalidStatusCode(status)
-    | http_client::Error::InvalidStatusCodeWithMessage(status, _)
-    | http_client::Error::InvalidStatusCodeWithDetails { status, .. } => { /* … */ }
-    http_client::Error::Instance(source) => { /* transport failure */ }
-    _ => { /* … */ }
-},
+let detail: ImageDetail = serde_json::from_value(serde_json::json!("low"))?;
 ```
 
-Code that relied on `?` converting a `reqwest::Error` straight into
-`VectorStoreError` must map it first; `rig::http_client::from_reqwest`
-applies the routing above:
+`rig_tools::attach::attached_file` moved to
+`rig_core::conversation::attached_file`, where the `FILE_OPEN` and
+`FILE_CLOSE` markers are now public. `Conversation::resume` is removed.
 
-```rust
-let res = client.send().await.map_err(http_client::from_reqwest)?;
-```
+### 3. Provider selection, dialects and the catalog
 
-### `ClientBuilderError` is removed
-
-The enum (`HttpError(reqwest::Error)` / `InvalidProperty`) had no remaining
-constructor or match site in the workspace — `Client::builder()`/`build()`
-return `http_client::Result` — so it is deleted rather than ported off
-reqwest. Nothing to migrate unless you named the type yourself; use
-`http_client::Error` in its place.
-
-### `ToolServerHandle` registration methods are now synchronous
-
-`add_tool`, `add_dynamic_tool`, `add_portable_dynamic_tool`, `append_toolset`,
-and `remove_tool` only ever took a short registry lock that is never held
-across an await; the lock is now a `std::sync::RwLock` and the methods are
-plain `fn`. Drop the `.await`:
-
-```rust
-// before
-handle.add_tool(MyTool).await;
-
-// after
-handle.add_tool(MyTool);
-```
-
-Execution and snapshot paths (`execute`, `get_tool_defs`) are unchanged and
-remain async. This removes the last `tokio::sync` primitive from the
-tool-server hot path; streaming pause/resume and the copilot/chatgpt auth
-caches likewise moved off tokio primitives (no API change), so neither
-rig-core nor rig-agent needs a tokio runtime for these paths.
-
-### Telemetry getters borrow: `ProviderResponseExt::get_response_id` / `get_response_model_name` return `Option<&str>`
-
-Both getters exist to hand a value to `tracing::Span::record`, which takes
-`&str`; the owning return forced every one of the sixteen provider impls to
-clone a `String` per completion turn just to have it read once and dropped.
-They now return `Option<&str>`. `get_text_response` and `get_usage` are
+Ollama is registered in two families, so the bare selection `ollama` is
+ambiguous. Model references such as `ollama/qwen3:4b` and serialized ids are
 unchanged.
 
 ```rust
 // before
-fn get_response_id(&self) -> Option<String> { Some(self.id.clone()) }
-
+ProviderId::resolve("ollama")?          // ollama/openai
 // after
-fn get_response_id(&self) -> Option<&str> { Some(self.id.as_str()) }
+ProviderId::resolve("ollama/openai")?   // "ollama" is SelectionError::Ambiguous
 ```
 
-Callers that need an owned value add `.map(str::to_owned)`.
+A custom OpenAI-compatible dialect that set `Identity::session_ids` names the
+header on its quirks instead. `openai::wire::Quirks` also gains
+`catalog_priced` and `short_lived_key`; it is `#[non_exhaustive]`, so start
+from a shipped constant:
 
-### `ReasoningSummary::text()` returns `&str`
+```rust
+let mut quirks = Quirks::openai();
+// before
+quirks.identity = Some(Identity { originator, originator_env, user_agent_env, session_ids: true });
+// after
+quirks.identity = Some(Identity { originator, originator_env, user_agent_env });
+quirks.session_header = Some("session-id");
+```
 
-The one-variant enum's accessor cloned the summary text; it now borrows.
-Callers that need ownership add `.to_owned()`.
-
-### Request assembly accessors that need the history by value now consume the request
-
-`rig_vertexai::types::completion_request::VertexCompletionRequest::contents`
-and `rig_bedrock::types::completion_request::AwsCompletionRequest::messages`
-took `&self` and cloned the entire chat history per request. Each now takes
-`self`. Every other accessor on both types still borrows — call the borrowing
-accessors first and the consuming one last, which is the order the completion
-paths already used.
+`MessagesDecoder::new` takes the dialect's quirks:
 
 ```rust
 // before
-let contents = vertex_request.contents()?;          // cloned the history
-let system_instruction = vertex_request.system_instruction();
-
+MessagesDecoder::new(false)
+MessagesDecoder::new(true) // a dialect that takes unsigned thinking back
 // after
-let system_instruction = vertex_request.system_instruction();
-let contents = vertex_request.contents()?;          // moves the history
+MessagesDecoder::new(anthropic::wire::Quirks::anthropic())
+MessagesDecoder::new(anthropic::wire::MOONSHOT.quirks) // or your dialect's quirks
 ```
 
-### `TextToImageGeneration::width`/`height` are chainable builders
+`Quirks::anthropic()` also prices cache writes by their TTL split.
 
-The two setters took `&mut self` and returned `&Self`, which chained with
-nothing else in the tree; every other rig builder is `mut self -> Self`. They
-now follow the house idiom.
+Catalog pricing is decided per wire through `ReplayTarget::catalog_priced`
+and the dialects' `Quirks::catalog_priced`, not a list of provider names.
+
+`Compat::chat_tools_need_reasoning_off: bool` becomes
+`Compat::chat_tools: Option<ChatTools>` (`Any`, `Never` or `ReasoningOff`).
+In a JSON override file's `rig` object, `"chat_tools_need_reasoning_off": true`
+becomes `"chat_tools": "reasoning_off"` (the same rule) or `"never"` (stricter:
+no tools on Chat Completions at any effort), and `false` becomes `"any"`. The
+old key is rejected. `ContextUse::window` is renamed `limit` and holds
+the model's input limit:
 
 ```rust
 // before
-let mut request = TextToImageGeneration::new(prompt);
-request.width(1024);
-request.height(1024);
-
+ContextUse { tokens, window: spec.context_window }
 // after
-let request = TextToImageGeneration::new(prompt).width(1024).height(1024);
+ContextUse { tokens, limit: spec.input_limit() }
 ```
 
-### `rig-s3vectors`: `set_bucket_name` / `set_index_name` removed
+`xiaomimimo::MIMO_V2_FLASH`, `MIMO_V2_OMNI` and `MIMO_V2_PRO` are removed
+because Xiaomi retired them; use `MIMO_V2_6_FLASH`, `MIMO_V2_6_PRO` or
+`MIMO_V2_6_PRO_ULTRASPEED`.
+`ModelSpec` and `ProviderError` are `#[non_exhaustive]`, so their new
+`max_input_tokens`, `details` and `Stalled` need no code change. The
+`test-utils` scripted error is exhaustive, though:
+`rig_core::test_utils::MockError` gains `Stalled(Duration)`, so a `match` on
+it adds an arm:
 
-Both setters had zero callers anywhere in the workspace and re-allocated from
-`&str`. Construct the store with the right names instead; the read accessors
-(`bucket_name()`, `index_name()`) are unchanged.
+```rust
+match error {
+    MockError::Provider(_) | MockError::Request(_) | MockError::ProviderResponse(_) => {}
+    MockError::Stalled(_) => {} // new in 0.46
+}
+```
 
-### Vector-store filter constructors take `impl Into<String>` keys
+### 4. Agent runs, observers and effect records
 
-`MongoDbSearchFilter`, `SqliteSearchFilter`, `ScyllaSearchFilter`,
-`S3VectorsSearchFilter`, and `PgSearchFilter` constructors that took
-`key: String` now take `key: impl Into<String>`, matching the rest of the
-workspace (and the other parameter of the same functions, which already did).
-`filter::gte("price".to_string(), v)` still compiles; `filter::gte("price", v)`
-now also does. The only source break is a caller passing `"key".into()`, which
-becomes ambiguous — pass the literal.
+`RunSpec` and `PreparedRequest` have a new `provider_tools` field, the
+provider-hosted tools `AgentBuilder::provider_tool` adds. A struct literal
+adds it:
 
-### Loosened bounds (no action needed)
+```rust
+// unchanged: a literal that fills the rest from `RunSpec::new()`
+RunSpec { preamble: Some(preamble), max_turns: Some(8), ..RunSpec::new() }
+// before: a literal that lists every field
+PreparedRequest { chat_history, documents, tools, temperature, max_tokens, additional_params, /* ... */ }
+// after
+PreparedRequest { chat_history, documents, tools, temperature, max_tokens, additional_params, provider_tools: Vec::new(), /* ... */ }
+```
 
-These accept strictly more code than before:
+`Observe::event` is called for every streamed item and `Recorder::event` also
+for a stream's first, even when `keep_events()` is false. An implementation
+that stores what it is given checks `keep_events()` itself. `EffectRecord`
+has a new `first_item_ms: Option<u64>`; build records with
+`EffectRecord::new(..)`.
 
-- Transport/HTTP-client generic chains across the providers no longer demand
-  `Default` or `Debug` (`mistral`/`openrouter` transcription, `hyperbolic`,
-  `voyageai`, `ollama`, `gemini` image-generation and Interactions API,
-  `anthropic`, `copilot`, `chatgpt`, `openai` completions/responses/websocket).
-  Nothing constructed or formatted the client; the minimal chain is
-  `HttpClientExt + Clone (+ WasmCompatSend/WasmCompatSync) + 'static`.
-- `GenericCompletionModel::new` (and `with_strict_tools`,
-  `with_tool_result_array_content`) no longer bound `Client<Ext, H>` or `Ext`
-  at all.
-- `TypeMap`/`ToolContext` read-side methods (`get`, `get_mut`, `remove`,
-  `contains`, `require`, `result`, `require_result`) need only `T: 'static`
-  (pure `Any` lookups); the write side keeps
-  `Clone + WasmCompatSend + WasmCompatSync + 'static`.
-- `SqliteVectorStore<T>`/`SqliteVectorIndex<T>` struct declarations no longer
-  carry `T: SqliteVectorStoreTable + 'static`; the `'static` survives only on
-  the impl blocks whose `conn.call` closures actually need it.
-  `EmbeddingsBuilder`, `InMemoryVectorStoreBuilder`,
-  `TranscriptionRequestBuilder`, and `ImageGenerationRequestBuilder` likewise
-  drop their struct-level where clauses.
-- `HelixDBVectorStore::new`/`client()` require no bounds; the store impls no
-  longer restate `C::Err: std::error::Error` (declared on the trait).
-- The `VectorStoreIndexDyn` blanket impl no longer restates `WasmCompatSend +
-  WasmCompatSync + 'static` on the filter type (implied by
-  `VectorStoreIndex::Filter`).
-- `ToolSchema::try_from` and gemini's `ConstructEmbeddingModel` impl drop a
-  `'static` neither uses.
-- Extractor/vector-store generics spell `DeserializeOwned` instead of the
-  equivalent `for<'de> Deserialize<'de>`.
+`TurnEnd::Stopped` has two new fields, `at: Option<MessageId>` and
+`calls: Vec<CallId>`. Use `at: None, calls: Vec::new()` for a turn your code
+ends itself, or `..` in patterns. `conversation::STOPPED` is reworded.
 
-### Provider usage types are `Copy`
+### 5. Memory and compaction
 
-The scalar-only usage payloads (`openai` chat + responses, `anthropic`,
-`deepseek`, `openrouter`, `cohere`, gemini `InteractionUsage`, and their
-detail structs) now derive `Copy`. Mistral's `Usage` is not `Copy` — it
-carries `service_tier: Option<String>`.
-
-
-### `providers::llamafile` is now `providers::llamacpp`
-
-The provider named after Mozilla's single-file distribution is gone; the one
-named after the upstream everyone actually runs replaces it. `llamafile` the
-project serves the same OpenAI-compatible API from the same llama.cpp core, so
-one provider genuinely covers both: point `llamacpp::Client` at a running
-`.llamafile` and everything works exactly as it did.
+`Summarizer::request` takes the compaction's reason instead of a focus
+string, and `Summarizer::instruction` takes the token budget:
 
 ```rust
 // before
-let client = rig::providers::llamafile::Client::from_url("http://localhost:8080")?;
-
+summarizer.request(older, previous, "keep the tests", &spec)?;
+summarizer.request(older, previous, "", &spec)?;
+let text = summarizer.instruction("keep the tests");
 // after
-let client = rig::providers::llamacpp::Client::from_url("http://localhost:8080")?;
+let asked = CompactReason::Asked { focus: "keep the tests".to_owned() };
+summarizer.request(older, previous, &asked, &spec)?;
+summarizer.request(older, previous, &CompactReason::Threshold, &spec)?;
+let text = summarizer.instruction("keep the tests", tokens);
 ```
 
-Every type moves with it: `llamafile::CompletionModel` → `llamacpp::CompletionModel`,
-`llamafile::EmbeddingModel` → `llamacpp::EmbeddingModel`,
-`llamafile::LlamafileExt` → `llamacpp::LlamacppExt`,
-`llamafile::LLAMA_CPP` → `llamacpp::LLAMA_CPP`. There is no deprecated alias:
-the old module is deleted, so this is a compile error rather than a silent
-change.
+`rig_memory::output_room` is removed; output fitting lives in rig-basics'
+compaction. `SummaryLimits::DEFAULT.summary_tokens` is 32,000 (was 12,000).
+`SummaryError` has a new `Failed(String)` variant and rig-basics'
+`compaction::Recovering` a new `NotSummarized`; `Recovering` is exhaustive, so
+a `match` on it adds an arm.
 
-Six things behave differently, and none of them is a rename:
+`MemoryStore::read_log` (and `read_log_async`) on a name that is no log name,
+such as `"a/b"` or `"../x"`, returns `io::ErrorKind::InvalidInput` instead of
+`NotFound`. Files under `rig/kept/` in a session's store are reserved for the
+copies `rig_memory::migration` keeps.
 
-1. **An API key is now possible.** `llamafile`'s `ApiKey` type was `Nothing`,
-   which cannot produce an `Authorization` header at all, so a
-   `llama-server --api-key <key>` deployment was unreachable. `llamacpp` takes
-   an optional key and sends `Authorization: Bearer <key>` when one is set —
-   and still sends no header at all when none is, so an unsecured local server
-   keeps working unchanged.
+New and optional: `SqliteSessionStore` and `PostgresSessionStore` behind each
+crate's `memory` feature (the facade's `memory` feature enables them with
+`sqlite` or `postgres`), and `rig_memory::conformance::check_store` behind
+`test-utils` for testing your own store.
 
-   ```rust
-   let secured = rig::providers::llamacpp::Client::builder()
-       .api_key("hunter2")
-       .base_url("http://localhost:8080")
-       .build()?;
-   ```
-
-2. **`from_env` no longer requires a base URL.** `LLAMAFILE_API_BASE_URL` was
-   mandatory; `LLAMACPP_API_BASE_URL` is optional and defaults to
-   `http://localhost:8080`. `LLAMACPP_API_KEY` is read when present.
-
-3. **A base URL ending in `/v1` is no longer doubled.** `llamafile` appended
-   `/v1` unconditionally, so passing the URL from its own doc line
-   (`http://localhost:8080/v1`) produced `/v1/v1/chat/completions` and a 404.
-   `llamacpp` adds the prefix only when the base URL lacks it. llama.cpp's
-   own operational routes (`/props`, `/health`, `/slots`, `/tokenize`, …) live
-   outside the `/v1` namespace and are addressed there from either spelling.
-
-4. **A specific-function `tool_choice` is now refused instead of silently
-   ignored.** `llama-server` reads `tool_choice` as a *string* and understands
-   only `auto`, `none` and `required`; an OpenAI-shaped
-   `{"type": "function", "function": {"name": "…"}}` type-mismatches that read
-   and is served as `auto`, so the model returns whichever tool it liked.
-   `ToolChoice::Specific` now returns a `CompletionError::ProviderError` naming
-   the tool and pointing at `ToolChoice::Required`. If you were relying on the
-   old behaviour you were not getting the tool you asked for; advertise only
-   that tool in `tools` to force it.
-
-5. **`verify()` targets `/props` instead of `/models`.** `GET /v1/models` and
-   `/health` are the only two routes `llama-server` serves *without* its
-   API-key check, so verifying against `/models` returned `Ok(())` for a wrong
-   key — or no key — against a server that would reject every real request.
-   `/props` is behind the check and is served by every configuration. If your
-   deployment is behind a proxy that only forwards `/v1/*` — a common nginx
-   `location /v1/` — `verify()` will now 404 where it used to succeed, and you
-   need to forward `/props` as well. Note that llama.cpp serves its
-   operational routes off the server root, *not* under `/v1`.
-
-6. **`embedding_model_with_ndims` can now fail.** See the standalone section
-   below; it applies to every OpenAI-compatible provider, not only this one.
-
-`llamacpp` additionally declares two capability slots `llamafile` did not:
-`model_listing` (`GET /v1/models`) and `rerank` (`POST /v1/rerank`, which needs
-a server started with `--reranking` and a cross-encoder loaded).
-
-### `llamacpp::raw_completion` returns a llama.cpp response type, not OpenAI's
-
-`llamafile`'s `OpenAICompatibleProvider::Response` was
-`openai::CompletionResponse`, so `raw_completion` returned that. `llamacpp`'s
-is `llamacpp::CompletionResponse`: the same OpenAI payload `#[serde(flatten)]`ed
-under a public `openai` field, plus llama.cpp's own `timings` — the server-side
-latency accounting (`prompt_ms`, `predicted_per_second`, `cache_n`) that the
-OpenAI type has nowhere to put and was therefore dropping.
+### 6. Cassette recording
 
 ```rust
 // before
-let raw: openai::CompletionResponse = model.raw_completion(request).await?;
-let id = raw.id;
-
+let http = DirectRecordingHttpClient::new(cassette.direct_recorder());
 // after
-let raw: llamacpp::CompletionResponse = model.raw_completion(request).await?;
-let id = raw.openai.id;
-let tokens_per_second = raw.predicted_tokens_per_second();
+let http = cassette.direct_http();
+// a recorder for a transport that bypasses the proxy, such as Bedrock's
+recorder.record_http_interaction(request, response); // was `.await`ed
 ```
 
-The normalized `CompletionModel::completion` surface is unchanged, and so is
-the streaming path — `raw_stream` already preserved `timings` under
-`additional_params`, because the shared streaming chunk type carries a
-catch-all and the blocking one does not.
+Proxy recording now goes through the traffic recorder. A recording is refused
+when a reply is never read, its body fails while it is read, a stream fails
+midway or stops partway through a frame (a stop at a frame boundary is kept),
+a request gets no reply, or an exchange is still open 5 s after `finish`.
 
-### A declared embedding width the provider ignores is now an error
+### 7. Coding-agent plugin API
 
-**This is not llama.cpp-specific.** It affects every provider on the shared
-OpenAI-compatible embeddings path — openai, azure, together, openrouter,
-venice, doubleword, mistral and llamacpp.
+These matter if you write plugins for `rig-harness`.
 
-`ndims()` is what a vector store sizes its index from. When a caller declared a
-width *explicitly* and the provider returned vectors of a different one, rig
-kept reporting the declared number, so the disagreement surfaced far from the
-call that caused it — as an index that could not hold its own vectors. The
-providers where this happens are the ones that **ignore** `dimensions` rather
-than rejecting it, so nothing in the response says anything is wrong.
+**Model-call adapters are systems.** `Adapter`, `Adapters` and `ModelStarts`
+are removed. Change the call's `Adapted(Connection)` in
+`PrepareSystems::Adapt` (or `AdaptOutermost`):
 
 ```rust
-// before: Ok, with 1536-wide vectors and ndims() == 512
-// after:  Err(EmbeddingError::MismatchedDimensions { requested: 512, returned: 1536, .. })
-let model = client.embedding_model_with_ndims("text-embedding-ada-002", 512);
-let embeddings = model.embed_texts(["hello"]).await?;
+// before
+fn tools_as_text(mut calls: Query<&mut Adapters, (Added<Admitted>, With<TurnCall>)>) {
+    for mut adapters in &mut calls {
+        adapters.0.push(Adapter::new("text-tools", |mut connection: Connection| {
+            connection.handler = Handler(connection.handler.0.map_stream("text-tools", pass_on));
+            connection
+        }));
+    }
+}
+app.add_systems(AgentPass, tools_as_text.in_set(PrepareSystems::Edit));
+// after
+fn tools_as_text(mut calls: Query<&mut Adapted, (Added<Admitted>, With<TurnCall>)>) {
+    for mut adapted in &mut calls {
+        let handler = adapted.0.handler.0.clone().map_stream("text-tools", pass_on);
+        adapted.0.handler = Handler(handler);
+    }
+}
+app.add_systems(AgentPass, tools_as_text.in_set(PrepareSystems::Adapt));
 ```
 
-The check applies only to a width that was **set explicitly** — through
-`EmbeddingsClient::embedding_model_with_ndims` or
-`openai::embedding::GenericEmbeddingModel::new` / `with_model` /
-`with_encoding_format`. A handle built with `embedding_model` reports whatever
-the provider's own table says and is untouched.
+What `ModelStarts::sent` and `dropped` gave is `adapted.sent(model)` (the
+request) and `adapted.dropped(model)` (the refused options), neither in a
+`Result`; the connection is `adapted.0` and the prompt is `model.prompt`.
+After Start, read `SentTo`. A call's connection is
+chosen once, after `PrepareSystems::Edit`, so route in `Edit` or before.
+`PrepareSystems` is exhaustive, so a `match` on it adds the `Adapt` and
+`AdaptOutermost` arms.
 
-A width of **zero is unaffected**: zero is rig's sentinel for *unknown* — it is
-what `default_ndims` returning `None` produces — not a declaration, so
-`GenericEmbeddingModel::new(client, model, 0)` behaves exactly as before.
+**Per-call tools implement `PerCallTool`.** `add_tool_per_call` and
+`add_live_tool_per_call` take the tool and its options, with no closure:
 
-If you hit this, you were already getting vectors of a width `ndims()` did not
-describe. Either drop to `embedding_model` and let the provider's width stand,
-or pass the width the model actually returns.
+```rust
+// before
+app.add_tool_per_call(Read::default(), ToolOptions::default(), move |place| Read {
+    workspace: place.workspace,
+    base: Some(place.base),
+    confine: place.confine,
+    seen: seen.clone(),
+});
+// after (rig-tools' file tools and Shell implement PerCallTool)
+app.add_tool_per_call(Read { seen, ..Read::default() }, ToolOptions::default());
 
-### `RerankResult::relevance_score` is no longer documented as 0..1
+// a tool of your own: PerCallTool needs Tool + Clone + 'static
+#[derive(Clone)]
+struct WordCount { workspace: Arc<dyn Workspace>, base: Option<PathBuf>, confine: bool }
 
-No code change; the type is the same `f64`. The doc comment claimed a 0-to-1
-range, which was true of the only implementation that existed and is false of
-llama.cpp's: it returns the cross-encoder's raw logit, so negative scores are
-normal (measured: `0.8225`, `-4.7583`, `-8.3761` for three documents against one
-query). Use the field to *order* results within one response; code that
-thresholded it as a probability was already wrong on any logit-scoring
-provider.
+impl PerCallTool for WordCount {
+    fn at(&self, at: CallPlace) -> Self {
+        WordCount { workspace: at.workspace, base: Some(at.base), confine: at.confine }
+    }
+}
+```
+
+**Retry, failure and restart.** The `Retry` event and
+`Conversation::resume` are removed; after a failed turn the user's message is
+back in the input. To send it again from code:
+
+```rust
+// before
+commands.trigger(Retry { entity: agent });
+// after
+commands.trigger(Deliver::new(agent, text, DeliveryMode::Queue));
+```
+
+The kernel stops every restored turn. A plugin that wants a restored turn to
+go on, or a live turn to survive a quit, puts `rig_ecs::restore::CarryOn` on
+the turn by `Stage::Gate`. `SubagentSystems::StopRestored` is removed; order
+against `GateSystems::After`. `rig_ecs::turn::Exiting(String)` and
+`rig_ecs::restore::RESTARTED` are public. `rig_ecs::agent::ContextStale`
+marks an agent whose last context figure no longer applies.
+
+**rig-tui looks are render systems.** `add_tool_renderer`,
+`add_entry_renderer`, `add_content_renderer`, `add_aside_renderer`,
+`add_call_decorator`, their renderer components (`ToolRenderer`,
+`EntryRenderer`, `ContentRenderer`, `AsideRenderer`, `CallDecorator`,
+`MessageDecorator`), their callback types (`RenderToolCall`, `RenderEntry`,
+`RenderContent`, `RenderAside`, `DecorateMessage`) and `AppToolRenderersExt`
+are removed. `RenderContent` is now an enum: the owned non-text content block a content look gets.
+Write systems in the `TranscriptRender` schedule that fill `RenderBatch`:
+
+```rust
+// before
+app.add_tool_renderer("probe", |call| vec![call.header("Probe", "")])
+    .add_call_decorator("duration", |call| {
+        call.took.map(|t| Line::from(format!("{t:?}"))).into_iter().collect()
+    });
+// after
+use rig_tui::{RenderBatch, RenderSystems, TranscriptRender};
+app.add_systems(TranscriptRender, draw.in_set(RenderSystems::Render))
+    .add_systems(TranscriptRender, duration.in_set(RenderSystems::Decorate));
+fn draw(mut batch: ResMut<RenderBatch>) {
+    for (input, output) in batch.tools_mut("probe") {
+        output.lines = vec![input.view().header("Probe", "").into()];
+    }
+}
+fn duration(mut batch: ResMut<RenderBatch>) {
+    for (input, output) in batch.calls_mut() {
+        output.decorate("duration", input.took.map(|t| Line::from(format!("{t:?}"))).into_iter().collect());
+    }
+}
+```
+
+Entry, content and aside renderers become loops over `entries_mut(plugin)`,
+`contents_mut(kind)` and `asides_mut(kind)`; message decorators loop over
+`messages_mut()`. To replace a shipped look, order after its public set
+(`CodingToolLooks`, `SummaryLooks`, `SubagentLooks`, `WelcomeLooks`,
+`BuildFailedLooks`) instead of disabling its renderer entity.
+`TranscriptLayout` is no longer a system parameter and has no lifetime
+parameters; `lay_out` is an associated function that takes `&mut World`:
+
+```rust
+// before
+let rows = layout.lay_out(view, agent, 80);
+// after
+let rows: Option<DrawnTranscript> = TranscriptLayout::lay_out(world, view, agent, 80);
+```
+
+Looks return `LookLine`s instead of ratatui `Line`s. `highlight::highlight`
+and `ToolCallView::header_spans` are removed; `code_rows`,
+`markdown::render`, `render_marked`, `diff::unified_lines`,
+`ToolCallView::{result_lines, default_lines}` and
+`MessageView::default_lines` return `LookLine`s:
+
+```rust
+// before
+let colored = highlight(&text, Language::File(path)).unwrap_or_default();
+let rows = colored.into_iter().map(|spans| Line::from([vec![Span::from("   ")], spans].concat()));
+// after
+let code = Code::new(&text, Language::File(path));
+let rows = (0..code.len()).map(|index| code.line(index, vec![Span::from("   ")]));
+```
+
+A look that draws no code converts with `LookLine::from`; a panel outside the
+transcript draws `LookLine::colored()`. For `header_spans`, use
+`header(title, detail)` for a plain detail or `header_code(title, &code, index)`
+for a line of code; a header of arbitrary styled spans has no replacement.
+
+**Other plugin-facing changes:**
+
+- `PickItem` gains `more: Option<String>` and `Picker` gains `secret: bool`;
+  literals add them (`Picker` has `Default`).
+- Exhaustive enums with new variants, so a `match` adds arms:
+  `rig_tui::CallState::Stopped`, `rig_tui::InputAction::Exit`,
+  `rig_tui::HistorySystems::Seed` and `rig_basics::activity::ActivityStatus::Writing`.
+- `EntryView` gains `id: Option<MessageId>`.
+- `AppCliExt` gains `refuse_run(why)`, with which a plugin refuses a run. It
+  is a new required method only for a type of your own that implements the
+  trait.
+- `SessionPicker::show` and `SessionItem` are removed: put labels in a
+  `ResumeLabel` or a listed saved value, or relabel the `Picker`'s items in a
+  system after `SessionPickerSystems`. `SessionEntry::label()` no longer holds
+  the directory: use `detail()` for the compact folder or `more()` for the
+  full one.
+- `rig_basics::reload::{SELF_EXTENSION_TAG, self_extension, ReloadAsked,
+  MAX_RELOADS, ORIGIN}` are removed, with nothing replacing them.
+- `rig_basics::coding_tools::ShellSettings` is removed. `rig_tools::Shell`
+  loses `max_timeout` and `quiet`, `Process::run(deadline, quiet, sink)` is
+  `run(deadline, sink)`, and `Ended::Quiet` and `Process::forced` are gone.
+- `rig_tools::Read`'s output is `ToolOutput`, not `String`:
+
+  ```rust
+  // before
+  let shown: String = read.call(&mut context, ReadArgs::new("a.txt")).await?;
+  // after
+  let shown = read.call(&mut context, ReadArgs::new("a.txt")).await?;
+  let text = shown.as_text(); // None for an image read
+  ```
+
+- A custom `Workspace` that should expand `~` overrides `join`, as `Local`
+  does; the trait's default `join` is unchanged.
+- `RunInTerminal`: when a program exits with a failure code on a terminal,
+  `TerminalExit` arrives after the user presses Enter, Ctrl+C or Ctrl+D. Use
+  `exit.failure()` to describe it.
+- The TUI's `Editor`: `clear()` keeps the text in `PromptHistory`, `take`
+  keeps a draft hidden behind a recalled prompt, and `up` on the first line
+  moves the cursor to its start before it browses. A repeated prompt moves to
+  the end of `PromptHistory::entries` instead of being skipped. A filter of
+  `PromptHistory::entries` that should also hide seeded prompts runs in
+  `TuiKeys`:
+
+  ```rust
+  app.add_systems(TuiKeys, scrub.after(HistorySystems::Seed).before(InputSystems::Dispatch));
+  ```
+
+### 8. The coding agent's `plugins.toml` and settings
+
+The launcher does not rewrite an existing `RIG_HOME/plugins.toml`. Until the
+login entry is renamed the agent build fails, because
+`rig_basics::login_chatgpt` no longer exists, and the previous build starts:
+
+```toml
+# before
+plugin = "rig_basics::login_chatgpt::ChatgptLoginPlugin"
+# after
+plugin = "rig_basics::login::LoginPlugin"
+```
+
+Add the new default plugins, then `rig build` or `/reload`:
+
+```sh
+rig plugin add rig_basics::agents_md::AgentsMdPlugin
+rig plugin add rig_basics::skills::SkillsPlugin
+rig plugin add rig_traffic::TrafficPlugin
+```
+
+Without `AgentsMdPlugin` the model is told nothing about `AGENTS.md`, and
+`CLAUDE.md` is no longer read: link `AGENTS.md` to it in a repository that
+only has a `CLAUDE.md`. The MCP client, ACP and Claude Cloak plugins are
+optional (`rig plugin add rig_mcp_client::McpPlugin`,
+`rig plugin add rig_acp::AcpPlugin`,
+`rig plugin add rig_claude_cloak::ClaudeCloakPlugin`; in a fresh
+`plugins.toml` they are listed off, and `rig plugin enable` turns one on).
+Code that reads the login flow's component imports it from the new module:
+
+```rust
+// before
+use rig_basics::login_chatgpt::PendingLogin;
+// after
+use rig_basics::login::PendingLogin;
+```
+
+If you used the
+`claude-cloak` path crate from a 0.46.0-rc.1 checkout, replace its entry with
+`crate = "rig-claude-cloak"` and `plugin = "rig_claude_cloak::ClaudeCloakPlugin"`.
+An agent built with corpus-base's `corpus_base::mcp_client::McpClientPlugin`
+uses `rig_mcp_client::McpPlugin` instead.
+
+In `settings.toml`, `[shell] max_timeout` is no longer read; remove it. The
+OSC 133 mark nonce is opt-in:
+
+```toml
+[tui]
+mark_nonce_env = "FUX_MARK_NONCE"
+```
+
+`/retry` is gone: after a failed turn, the message is back in the input;
+press Enter to send it again. A key saved with `/login <provider>` is used
+before the provider's environment variable, and then the provider's other
+environment variables (such as a base URL) are not read for it. With
+`McpPlugin` on, a project's `.rig/mcp.json` server waits for
+`/mcp approve <name>` once; move a server you always want into
+`$RIG_HOME/mcp.json` to skip that. The model-facing `reload` tool is gone, so
+the model can no longer rebuild the agent, and a `--tools` list that names
+`reload` is refused.
+
+### 9. Headless drivers: `rig -p`, `rig -p --json` and `rig --json`
+
+- Read to EOF. `exit` is the last line of `rig -p --json`, written after the
+  session log, and names its error for every non-zero code. After a signal,
+  the launcher's death or a closed stdin, every cut tool call gets a
+  `tool_result` with `"cancelled": true` and every cut turn a `turn_end`
+  `"stopped"` before it. Every `tool_result` has the `cancelled` and
+  `refused` fields and every line has `ms`; `turn_end` has
+  `first_token_ms`. A refused tool call writes its `tool_call` and a
+  `tool_result` with `"refused": true`.
+- Exit codes: an unknown `--tools` name exits 2 before any model call, also
+  at a terminal. In `rig -p` and `--json`, an unknown `--model` also exits 2
+  (it was 1); at a terminal it shows a notice and picks no model. A turn that
+  ends with no answer text fails (`turn_end` `"outcome": "failed"`, exit 1;
+  it was exit 0 with `"answer": null`). A run whose stdout nobody reads, such
+  as after `| head -1`, stops with 130. A signal also exits 130.
+- `--tools` can name a tool a plugin registers in the background, such as an
+  MCP server's `<server>__<tool>`: the run waits for every `print::Starting`
+  entity first. `--tools` now applies at a terminal too (0.45 ignored it
+  there), and an empty `--tools` permits no tools (0.45 gave every tool).
+- A failed `rig -p` run names the unanswered message on stderr
+  (`rig: not answered: <text>`); `--json` writes it as a `recalled` event.
+- A resumed run no longer replays or finishes a turn an exit cut off.
+  `rig -r <id> -p "<prompt>"` answers the new prompt; with no prompt it exits
+  2. After a crash, the crashed turn's lines come first, ending in `turn_end`
+  stopped "the session restarted".
+- `rig -p` and piped runs keep the agent build's output in
+  `RIG_HOME/build.log`; stderr gets one line when cargo has work to do.
+
+`HeadlessEnded::why` is `Some` for every non-zero code.
+
+---
+
+## 0.44 → 0.45
+
+0.45 changes the classic agent's handler and tool APIs, shares messages behind
+`Arc`, reorganizes conversation storage, and publishes a new Bevy-based coding
+agent. Rust **1.97.1** is the minimum. The new kernel uses **Bevy `=0.20.0`**.
+The `rig` facade still enables `agent` by default at the release tag. If you
+use `default-features = false`, enable `agent` explicitly for the classic
+runtime and `memory` for `rig::memory`.
+
+The examples below are **source-checked migration sketches, not compiled
+standalone programs**. Existing variables stand for your application's model,
+transport, handlers and error conversions. They describe the final 0.45 API,
+not intermediate APIs introduced and removed during development.
+
+### 1. Conversation and transcript paths
+
+`rig::core` and `rig_agent::core` are removed. Import portable contracts from
+`rig` directly or from `rig_core`. `rig_agent::agent::run` becomes
+`rig_agent::run`. `rig::tool::portable` is removed; use `rig::tool`.
+
+The old `rig_core::memory` module is removed. Conversation data now lives at
+`rig_core::conversation`; persistent storage and compaction live in
+`rig_memory` (`rig::memory` with the `memory` feature).
+
+| Before | 0.45 |
+| --- | --- |
+| Policy-backed memory collections | `rig_core::conversation::Conversation` plus a `rig_memory` store |
+| `rig_core::transcript::validate_canonical` | `rig_core::conversation::pairing::validate` |
+| `rig_core::transcript::TranscriptError` | `rig_core::conversation::pairing::PairingError` |
+| `transcript::{tool_result_output, tool_result_message, invalid_arguments_feedback, invalid_call_feedback, not_executed}` | `rig_core::tool::feedback::{…}` |
+| `transcript::is_empty_assistant_turn(content)` | `AssistantMessage::is_empty_turn()` on the turn |
+| `transcript::assistant_text_from_choice(content)` | `AssistantMessage::text()` on the turn |
+
+The old `ConversationMemory`, `InMemoryConversationMemory`, `MessageFilter`,
+`DemotionHook`, `NoopDemotionHook`, `Compactor` and `MemoryError` contracts have
+no compatibility layer. `rig-memory` also replaces `MemoryPolicy`, `IntoFilter`,
+`BoxedFilter`, `NoopMemoryPolicy`, `SlidingWindowMemory`, `TokenWindowMemory`,
+`PolicyMemory`, `DemotingPolicyMemory`, `CompactingMemory`, `TemplateCompactor`
+and `TextSummary`. Use `Recent` for retained windows, `CompactionPolicy` and
+`Summarizer` for compaction, and explicit conversation changes rather than
+wrapping a `ConversationMemory` backend. `TokenCounter`'s
+`count(&Message) -> usize` contract is unchanged. For persistence, use
+`rig_memory::MemoryStore` or `DirStore`, or implement `AsyncStore`.
+The classic agent accepts these stores:
+
+```rust
+let agent = AgentBuilder::new(model)
+    .memory(store)
+    .conversation("customer-42")
+    .build();
+agent.prompt("Remember this").await?;
+// Override the log per call, or bypass memory with .without_memory().
+agent.prompt("Next question").conversation("customer-43").await?;
+```
+
+`AgentBuilder::memory_handler` and the old effect-backed memory path are
+removed. `conversation(ConversationId)` becomes `conversation(log_name)`;
+`rig_core::id::ConversationId` is removed. Read and write failures arrive as
+`PromptError::Memory { error, response }`, not the old tuple variant. A failed
+save can retain the finished response in `response`; a load failure has none.
+`PromptResponse::memory_append`, `with_memory_append` and `MemoryAppend` are
+removed: a failed save makes the run fail instead of attaching an append
+acknowledgment. Handle that error rather than repeating a tool-using run.
+
+### 2. Shared messages, tool definitions, requests and answers
+
+`Conversation::messages`, `Conversation::into_messages`, `Entry::message`,
+`CompletionRequest::chat_history`, `AgentRun::messages` and the `CallModel`
+step's prompt/history now carry `Arc<Message>`. `CompletionRequest::tools`
+carries `Arc<ToolDefinition>`. `EffectKind::Completion::request` is an
+`Arc<CompletionRequest>`. `effect::Outcome` is renamed `Answered`, and
+`Answered::Completion` holds an `Arc<CompletionResponse>`.
+`streaming::Relayed::Done` changes from `Box<CompletionResponse>` to the same
+Arc; use `.into()` to wrap a response and `Arc::unwrap_or_clone` to own it.
+Hook histories (`RunStart`, `CompletionCallEvent`, `ModelSelection`),
+`RunSettled::messages`, `RequestPatch::history`, `PreparedRequest::chat_history`
+and advertised tool definitions share their values too.
+
+```rust
+use std::sync::Arc;
+// before: match request.chat_history.first() { Some(Message::System { .. }) => … }
+match request.chat_history.first().map(Arc::as_ref) {
+    Some(Message::System { content }) => { /* inspect content */ }
+    _ => {}
+}
+// before: request.chat_history.push(Message::user("next"));
+request.chat_history.push(Message::user("next").into());
+request.tools.push(definition.into());
+// before: &mut entry.message
+if let Message::User { content } = Arc::make_mut(&mut entry.message) {
+    /* edit content */
+}
+let request = Arc::unwrap_or_clone(shared_request);
+```
+
+Constructors such as `CompletionRequest::message`/`messages`,
+`Conversation::from_messages`/`extend` and `Entry::new` accept
+`Into<Arc<Message>>`; a plain message still works there. `From<Arc<Message>>
+for Message` is available when you need an owned message. Serde writes the
+contents, not an Arc wrapper, so this change alone does not change JSON.
+
+Memory APIs that work on a window take shared-message slices, including
+`Recent::{start, view}`, `CompactionPolicy::{cut, plan}`, `Summarizer::request`
+and `ClearToolOutputs::clear`. Change custom slice annotations from
+`&[Message]` to `&[Arc<Message>]` where required.
+
+### 3. One contextual tool trait
+
+`PortableTool`, `PortableToolEmbedding`, `ErasedTool` and the portable tool
+module are removed. If skipping from before 0.41, skip its intermediate
+`PortableTool` rename and implement the contextual `Tool` directly, including
+the context parameter:
+
+```rust
+// before: impl PortableTool for Search { async fn call(&self, args: Self::Args) … }
+impl Tool for Search {
+    // Keep your existing associated types, name, description and schema.
+    async fn call(&self, context: &mut ToolContext, args: Self::Args)
+        -> Result<Self::Output, Self::Error>
+    {
+        /* your implementation */
+    }
+}
+```
+
+`#[rig_tool]` emits the current trait. Runtime-defined tools use
+`DynamicTool::new_with_context` with a validated `ToolName`, not `ToolFn::new`.
+`DynamicTool::run`/`run_with` and `ToolAdapter::run`/`run_with` execute them
+without registering an agent. For registry execution:
+
+```rust
+// before: dynamic_tool.execute(arguments).await?
+let result = RegisteredTool::from_dynamic(dynamic_tool)
+    .execute(arguments.to_string(), &mut ToolContext::new())
+    .await
+    .into_result()?;
+// before: handle.execute(name, &args, &mut context).await
+let result = handle.toolset().execute(name, args, &mut context).await;
+// before: catalog.execute(name, &args, &mut context).await
+if let Some(tool) = catalog.get(name) {
+    let result = tool.execute(args, &mut context).await;
+}
+```
+
+`ToolDispatch`, `ToolLease`, `execute_tool`, `ToolSet::documents`,
+`RegisteredTool::descriptor`, `ToolSet::from_dynamic_tools` and
+`DispatchAction::try_rewrite_tool_args` are removed. Add dynamic tools with
+`ToolSet::add_dynamic_tool`. Built-ins live at `rig_core::tool::builtin`, not
+`rig_agent::tool::builtin`. `ToolContext::require_result` and `TypeMap` are
+removed; use the typed context APIs and handle absence explicitly.
+Full `ToolDefinition` literals add `annotations: Default::default()`; prefer
+`ToolDefinition::new` and `.with_annotations`. Tool catalogs, `ToolSet` and
+`ToolServerHandle` now return shared definitions where the old API returned
+owned definitions. `ToolServerHandle::static_tool_defs` is removed; read a
+`snapshot().definitions()` or the `toolset()`'s definitions instead.
+
+### 4. Replace the effect bus with inline handlers
+
+`rig::bus` / `rig_agent::bus` and `Bus::channel` are removed. There is no driver
+task to spawn, dispatcher/registrar pair or bus backpressure. Register handlers
+on `Handlers`; work runs in the calling future or stream:
+
+```rust
+// before
+let (dispatcher, registrar, mut driver) = Bus::channel();
+driver.register(model_key.clone(), model_handler)?;
+tokio::spawn(driver);
+let agent = AgentBuilder::over_bus(dispatcher, registrar, "guest", model_key).build();
+// after
+let handlers = rig::handlers::Handlers::default();
+handlers.register(model_key.clone(), model_handler)?;
+let agent = AgentBuilder::over_handlers(handlers, "guest", model_key).build();
+```
+
+Dropping a dispatch future cancels it. A handler needing a concurrency limit
+or serialized execution must own its semaphore/mutex. Replacing or removing a
+registration affects new dispatches; an in-flight dispatch keeps its handler.
+Tool registrations are pinned for a model turn.
+
+`AgentBuilder` is no longer generic over tool-server state. Write
+`let builder: AgentBuilder = …`, not `AgentBuilder<WithToolServerHandle>`.
+`NoToolConfig`, `WithToolServerHandle`, `WithBuilderTools`, `AgentParts`,
+`Agent::into_parts`, `owns_bus`, `bus_config` and `configure_bus` are removed;
+keep the `Handlers` clone you pass to the builder instead of extracting a bus.
+`ErrorKind::{BusClosed, MemoryBackend, MemoryPolicy}` and the deferred-serving APIs
+`serve::{ServingPolicy, deferred, Resolver}` are removed. So are
+`effect::{Delivery, DeliveryKind}` and recorder delivery-tracking methods.
+Use inline `Serve` handlers and the dispatch recorder instead.
+The memory effect family, `MemoryOp`, `MemoryOutcome`, `memory_key`,
+`serve::MemoryAdapter` and typed `MemoryHandle` are removed; persistence is a
+store operation, not a memory effect dispatched through this table.
+`Family::unwrap` now takes `Answered`.
+
+Interception types `serve::Decision` and `serve::Verdict` become `BeforeServe`
+and `AfterServe`. `serve::Origin` becomes `DispatchContext` (with an optional
+`purpose`). Recorder implementations must use the new outcome type and
+context instead of delivery-tracking callbacks. `streaming::Transcript`
+becomes `StreamRecord`, with the same item-list role. `EffectRecord` literals
+rename `tool_output` to `published` and add review, disposition, timing,
+purpose and turn metadata; prefer `EffectRecord::new` and fill the metadata
+that your recorder actually knows.
+
+### 5. TurnPolicy owns a turn's tool rules
+
+`PreparedRequest` replaces `tool_choice`, `executable_tool_names`,
+`allowed_tool_names` and `output_tool_name` with `policy: TurnPolicy`.
+`AgentRun::with_tool_choice`, `commit_output_tool_name`,
+`ModelTurn::from_response_parts` and `prepare::allowed_tool_names_for_choice`
+are removed.
+
+```rust
+// before: ModelTurn::from_response_parts(&response, executable, allowed)
+let turn = ModelTurn::from_response(&response, &prepared);
+// Or a hand-built turn:
+let policy = TurnPolicy::new(executable, choice, output_tool)?;
+let turn = ModelTurn::new(head, content, usage, policy.clone(), raw);
+let assembler = StreamedTurnAssembler::new(policy);
+```
+
+Read `prepared.policy.executable()`, `.allowed()`, `.tool_choice()` and
+`.output_tool()`. Policy construction rejects impossible Required/Specific
+choices. Deserialization revalidates them. Skip, Repair, invalid-call hooks and
+the output-tool intercept read the effective policy, including hook patches.
+The run pins its first policy-named output tool itself. A call finalizes the
+run only when that turn's policy names the output tool.
+
+`AgentRun::with_output_tool_name` only seeds later preparation; it does not
+make an arbitrary hand-built turn intercept the tool.
+
+### 6. Sans-IO tool answers and restart-safe histories
+
+`AgentRunStep::CallTools` now offers `PendingToolCall::Execute(ExecCall)` or
+`PendingToolCall::Malformed(MalformedCall)`, not public `tool_call` and
+`preresolved_result` fields. `AgentRun::tool_results(Vec<UserContent>)` is
+removed. The run, not the host, constructs the result message:
+
+```rust
+for call in calls {
+    match call {
+        PendingToolCall::Execute(call) => {
+            let result = tools.execute(call.name(), call.arguments().to_string(), &mut context).await;
+            run.answer(call.answer(result))?;
+        }
+        PendingToolCall::Malformed(call) => run.answer(call.answer(None))?,
+        _ => { /* handle future variants without executing them */ }
+    }
+}
+```
+
+Collect `ToolAnswer`s and use `run.answer_all(answers)` for atomic submission.
+An empty answer list leaves the step open. Answers from the wrong turn, slot
+or kind are refused. Already answered calls are not offered again after
+resume. Use `run.malformed_context(&call, streaming)` instead of
+`malformed_tool_call_context(&tool_call, streaming)`; the result is no longer
+an `Option`. `None` on a malformed call asks for default feedback, not
+execution. A skipped or denied executable call can answer with
+`ToolResult::skipped(reason)`.
+
+`PromptError::Cancelled::chat_history` remains `Vec<Message>` at the final
+release tag, but the runtime closes unanswered calls before returning it.
+Build cancellations with `run.cancel_error(reason)`.
+`AgentRun::canonical_history()` returns the closed vector. For external
+history, use `conversation::pairing::validate` to reject malformed input or
+`pairing::repair(history).messages` to repair it. The intermediate
+`CanonicalHistory` wrapper was removed before release; do not migrate to it.
+
+`StreamedResolution::TurnAbandoned` is a unit variant; remove reads of
+`skipped_tool_result`. Read committed results through `run::project`:
+
+```rust
+let cursor = run.projection_start();
+// Advance the run, then project the new committed history.
+for item in rig_agent::run::project(&run.messages()[cursor..]) {
+    /* display CommittedItem::ToolCall or CommittedItem::ToolResult */
+}
+```
+
+Persist the advanced cursor in your driver. Start at `projection_start()`, not
+`messages().len()`, so a mid-batch resume announces pending calls.
+`StreamedTurnAssembler::ingest` now returns one event rather than a vector;
+remove the loop around its return value. Its `aggregated_text`,
+`aggregated_reasoning` and `aggregated_arguments` helpers are removed; track
+stream events in the host or read the completed turn.
+
+`RunEntry` becomes `conversation::Aside`; append with
+`Aside::new(kind, author, value)` rather than constructing `{ kind, turn, value }`.
+An aside is anchored after a `MessageId` and has author/saved metadata, not a
+model-call index. `AgentRun` and hook entry accessors return asides.
+`RunSpec::output_schema` is `Option<schemars::Schema>`, not `Option<Value>`;
+convert validated schema input rather than assigning arbitrary JSON.
+`HookContext` binding methods now return the inline `handlers::Handle` types,
+not lifetime-scoped `RunHandle`s; use the returned handle directly.
+
+**Persisted runs use `RUN_FORMAT = 5`**, not 0.44's format. Finish parked runs,
+including durable approvals, on the old version or discard them. There is no
+old-run upgrade shim. If skipping development versions, skip formats 3 and 4
+and migrate directly to 5.
+
+### 7. Catalog lookup, references and connection
+
+A connected model carries its catalog facts. Configure your catalog before
+connecting; do not attach a separate spec to an agent.
+
+```rust
+// before: Catalog::from_json(&json)?; builtin.clone().merge(overrides)
+let base = Catalog::builtin();
+let overrides = Catalog::from_overrides(&json, base)?;
+let catalog = base.with_overrides(&overrides);
+// A models.dev document is a different, lenient input:
+let (fetched, skipped) = Catalog::from_models_dev(&json)?;
+let refreshed = catalog.with_models_dev(&fetched);
+```
+
+`from_overrides` is strict about unknown fields/vendors, values and incomplete
+new rows. `from_models_dev` reports skipped rows. `Catalog::from_json`,
+`Catalog::merge` and `CatalogError::Format` are gone. `Catalog` shares its rows;
+`ModelSpec::new`, `Pricing::new`, `CacheSupport::new`, the supported setters and
+`Catalog::insert` build custom rows. Do not copy a full `ModelSpec` literal.
+
+```rust
+// before: catalog.resolve(reference) -> Option<&ModelSpec>
+let spec = catalog.resolve("anthropic/claude-sonnet-4-5")?.spec;
+// before: catalog.find(provider, model)
+let spec = catalog.get(provider, model).map(|resolved| resolved.spec);
+let exact = catalog.get_exact(provider, model); // strict, no dated fallback
+```
+
+`get` and `resolve` recognize dated snapshots of listed ids and return
+`Resolved`; `resolve` returns `Result<_, NotFound>` with suggestions.
+`Catalog::find`, `find_vendor`, `lookup_snapshot`, `catalog::undated` and
+Anthropic's `claude_spec` are removed.
+
+References use **`vendor/model`**, not `vendor:model`. The old
+`vendor/format:model` spelling still reads. Choose a non-row format with
+`ConnectOptions::format`, rather than persisting an old `ProviderRef` value.
+`ModelSelector::provider_ref` and `ProviderRef::parse` are removed; pass
+reference text directly to catalog lookup/connection.
+
+```rust
+// before: connect(spec, key)?; connect_with(spec, key, http)?
+let model = catalog.connect("deepseek/deepseek-chat")?; // environment credentials
+let model = catalog.connect_with(
+    "deepseek/deepseek-chat",
+    ConnectOptions::new().api_key(key).http(http),
+)?;
+```
+
+The old free `registry::connect`/`connect_with`, `ProviderRef`, `Provider` and
+`RefError` are removed; use the catalog and `ModelSelector`.
+`ProviderId::api_key_env()` becomes `api_key_envs()`, an ordered list.
+`ConnectError` has `NotFound`, `MissingKey`, `Env` and `NoHttpClient` cases and
+is no longer `Clone`/`PartialEq`; inspect variants instead of comparing values.
+
+`ReasoningSupport` is an enum (`None`, `Unknown { default }`,
+`Listed { levels, budget, can_disable, default }`). Replace field reads with
+`.supported()`, `.levels()`, `.budget()`, `.can_disable()` and
+`.default_effort()`. The latter accessors distinguish unknown from unsupported.
+
+Remove `AgentBuilder::model_spec(spec)`. The model checks the request using its
+own facts; `Model::check`/`DynModel::check` dry-run encoding and return
+`CheckError`. A refusal arrives as `PromptError::Report` with kind `Request`,
+not `PromptError::Provider(ProviderError::UnsupportedOption(..))`.
+
+Provider wire literals need `facts: Default::default()` or their `with_facts`
+builder. Anthropic `Dialect::default_max_tokens` takes facts;
+`rig_bedrock::completion::spec(model)` becomes `converse.spec(model)`.
+`gemini::AutoCache::for_model(id)` becomes `AutoCache::for_spec(spec)`.
+
+### 8. Document text is not a media source
+
+`DocumentSourceKind::String` and `.string()` are removed. Binary text buffers
+holding base64 must use `DocumentSourceKind::Base64`. A document now holds
+`DocumentData::{Text(String), File(DocumentSourceKind)}`:
+
+```rust
+// before: Document { data: DocumentSourceKind::String(text), … }
+let content = UserContent::document_text(text, media_type);
+// For a file source in a Document literal:
+let document = Document { data: source.into(), media_type, /* other fields */ };
+// before: match document.data { DocumentSourceKind::Base64(data) => … }
+match document.data {
+    DocumentData::Text(text) => { /* plain text */ }
+    DocumentData::File(source) => { /* URL, base64, file id, bytes, unknown */ }
+}
+```
+
+`DocumentData` deliberately has no `Display` or `try_into_inner`.
+`DocumentSourceKind::try_into_inner` is also removed; match the variant.
+The unused `ContentFormat` enum is removed without replacement.
+`completion::history::NO_RESULT_PROVIDED` moves to
+`conversation::pairing::NO_RESULT_PROVIDED`. See the
+[0.45 silent changes](#045) before loading old JSON.
+
+### 9. Wire, decoder and observation implementors
+
+`Wire` has a new `Event` associated type. Its reassembler implements
+`Reassemble<Self::Event>`, not `Reassemble<Self::Frame>`; `absorb` receives the
+decoder's already-classified event. Whole-document wires can use
+`wire::DocumentDecoder`. Prefer `<MyWire as Wire>::Decoder<'_>` to naming a
+removed provider-specific decoder. `operation::Turn` is renamed `ReplyFold`;
+`Completion::Fold` names it too. Anthropic's reassembler is now
+`streaming::MessagesDocument`, not the old `streaming::document::Message`.
+Provider extension implementors should also update the public, doc-hidden
+helpers: `WireIds` now carries a history lifetime, and `classify_or_untagged`
+takes a tag predicate and typed-event conversion instead of two classifiers.
+Prefer the wire's associated types rather than copying internal helper types.
+
+`CompletionRequest` gains defaulted `foreign_reasoning` and `cache_points`
+settings; its non-exhaustive constructor API needs no migration for those
+additions. Full `Accepts` literals add `foreign_reasoning: false`.
+The `Operation::observed_usage` hook has a default, so existing operation
+implementations need no extra method unless they expose
+normalized usage.
+
+`Observe::outcome` takes `Result<Answered, ErrorReport>` by value, and
+`Observe::stream_item` takes `Option<Result<…>>` instead of borrowing it.
+`ObservationSink::emit` is removed: use `sink.error(error)` for an error
+envelope. Delete projector usage emission; the normalized decoder result owns
+usage observation. The unused observation actions/stages are removed; only
+`Action::Adapter` and `Action::Host` remain. Use
+`Reason::with_detail(code, detail)` instead of `Reason::from_report`, `.code`
+or `.unknown`. `Emitter::{unknown, is_unknown}` are removed; name the emitter
+with `Emitter::named` or `versioned`. `observe::LARGEST_PAYLOAD_BYTES` is removed;
+keep application-specific observation limits in your sink.
+
+`wire::Descriptor` literals add `prepared: None`. `Model` has private state;
+construct it with `Model::new(wire, transport)`, not a struct literal.
+`ResponsesEvent::Frame::raw` is `Option<String>` and is retained only for
+`response.failed`; handle `None` rather than assuming every frame has raw text.
+`ReplyFold::snapshot`, `serve::OpenRecord` and the unused `json_utils`
+serde helpers are removed. Use `serde_json::Value::to_string()` instead of
+`json_utils::serialize_json_value`.
+
+Custom option mappings must account for `GenerationOptions::cache_key`, the
+new `OptionFields`/`OptionMap` field. Use `Mapping::unrouted(cache_key)` on a
+wire that has no such option. `AnthropicConfig` literals add
+`addressing: Addressing::Body`; `Addressing::Url` supports platforms that move
+the model into their URL. `Messages::encode_with` exposes the shared body and
+beta-header encoding for those platforms.
+
+### 10. Authentication and provider construction
+
+ChatGPT and Copilot `Authenticator::new` take a `TokenStore`, not credential
+file paths:
+
+```rust
+// ChatGPT: before the second argument was Some(dir.join("chatgpt.json")).
+let auth = chatgpt::auth::Authenticator::new(
+    chatgpt::auth::AuthSource::OAuth,
+    FileTokenStore::new(&dir),
+    DeviceCodeHandler::default(),
+    true,
+);
+// Copilot: the two optional path arguments become one store argument.
+let auth = copilot::auth::Authenticator::new(
+    copilot::auth::AuthSource::OAuth,
+    FileTokenStore::new(&dir),
+    DeviceCodeHandler::default(),
+    true,
+);
+```
+
+Use `MemoryTokenStore::default()` for nonpersistent credentials, or implement
+`TokenStore::{load, save, delete}`. Store failures are `AuthError::Store`.
+`TokenStore::lock` has a default no-op; implement it when clients share a
+refreshable record. `StoreLock::new(guard)` releases your guard on drop;
+`StoreLock::default()` is removed (`StoreLock::new(())` is an unlocked guard).
+`copilot::auth::default_token_dir` is removed. ChatGPT's
+`AuthContext::access_token` becomes `api_key`; its shared context adds
+`api_base`, and Copilot's context is the shared ChatGPT context (with optional
+`account_id`). Update full literals and credential field reads.
+
+`CopilotConfig`, `CopilotWire`, `CopilotIntent` and its intent setters are
+removed: use `OpenAIConfig::with_key(&copilot::DIALECT, token).connect(http)`.
+The shared dialect supplies the editor envelope; there is no per-wire
+panel/edits intent selector.
+The old OpenAI client's `.authenticate(&auth)` path is replaced by
+`client::signed_in::SignedInModel::new(spec, auth, http)?`; it refreshes
+credentials per call. This type is generic over the credential source.
+Config `.with_http(http)` becomes `.connect(http)`. TypeSafe's
+`Jev::new(token).with_http(http)` becomes `JevConfig::new(token).connect(http)`.
+
+### 11. Provider response and option changes
+
+- **Embeddings:** OpenAI `EmbeddingData::embedding`, Cohere
+  `EmbeddingResponse::embeddings` / `FloatEmbeddings::values` and Gemini
+  `EmbeddingValues::values` are `Vec<f64>`, not JSON numbers. Remove
+  `Number::as_f64` conversions; serialization may write `1.0` rather than `1`.
+- **Transcription:** full literals of `TranscriptionResponse` and
+  `openai::TranscriptionResponse` need the new language, duration, confidence,
+  segments and words fields. Prefer their constructors. Provider-specific
+  metadata is optional; do not assume every provider supplies it.
+- **Image generation:** `ImageGenerationRequest` literals add
+  `images: Vec::new()`. Wires without reference-image support refuse nonempty
+  lists; the builder needs no change.
+- **Gemini:** `AgentConfig::DeepResearch { thinking_summaries }` becomes
+  `DeepResearchConfig::new().thinking_summaries(value).into()`.
+  `InteractionsOptions::speech(InteractionSpeech::voice("Kore"))` becomes
+  `.speech_config(InteractionSpeechConfig::voice(InteractionSpeech::voice("Kore")))`.
+  Speech types live in `providers::gemini::interactions_api`.
+  `InteractionsGenerationConfig::speech_config` is now an
+  `Option<InteractionSpeechConfig>`, not `Vec<InteractionSpeech>`.
+  `ImageConfig::image_size("2K")` becomes `.image_size(ImageSize::TwoK)`.
+  `GEMINI_2_5_FLASH_IMAGE` moves from `gemini::completion` to
+  `gemini::image_generation` and remains available at `gemini::`.
+- **Venice images:** the provider-specific `ImageGenerationResponse` and
+  `ImageGenerationTiming` structs are removed. Read the portable image response
+  and its `raw` JSON for Venice's request echo and timing fields.
+- **Bedrock images:** `TextToImageResponse::normalize` is an inherent method;
+  remove the `NormalizeImageGenerationResponse` trait import.
+- **gRPC Gemini:** `ApiKeyInterceptor` is private; use `GeminiGrpc`'s public
+  `connect`/`with_channel` entry points. The `zstd` and `gzip` features are
+  removed. The facade's `gemini-grpc` feature remains available.
+  The old `rig_gemini_grpc::streaming::GrpcAdapter` module is removed;
+  both it and Vertex AI now use Gemini's `GenerateContentDecoder` and
+  `GenerateContentChunk`. Their transport `send` methods and wire `Frame`
+  associated types return REST-shaped chunks rather than protobuf responses.
+  `completion::rest_chunk` converts a protobuf response when you need it.
+- **Vertex AI:** `VertexAiClientError` adds `Credentials` and `NoCredentials`;
+  update exhaustive matches. Claude support uses `VertexAi::anthropic` and the
+  new `anthropic::RawPredict` wire without changing the Gemini entry points.
+- **Dialect enums:** `openai::wire::{ImageBody, SpeechBody}` add `MiniMax`.
+  Update exhaustive matches in custom dialect plumbing. Gemini interaction
+  status adds `Queued`; treat it as not yet complete.
+
+Removed model constants have no aliases. Pick a current catalog model (for
+example `minimax::MINIMAX_M3` instead of `MINIMAX_M2_1`) or use a literal only
+if the provider still serves that exact id:
+
+| Provider | Removed constants |
+| --- | --- |
+| OpenAI | `GPT_4_5_PREVIEW`, `GPT_4_5_PREVIEW_2025_02_27`, `GPT_4O_2024_05_13`, `GPT_4_TURBO_2024_04_09`, `GPT_4_TURBO_PREVIEW`, `GPT_4_0125_PREVIEW`, `GPT_4_1106_PREVIEW`, `GPT_4_VISION_PREVIEW`, `GPT_4_1106_VISION_PREVIEW`, `GPT_4_0613`, `O4_MINI_2025_04_16`, `O3_MINI_2025_01_31`, `O1_PRO`, `O1_2024_12_17`, `O1_PREVIEW_2024_09_12`, `O1_MINI_2024_09_12`, `GPT_IMAGE_1` |
+| Azure | `GPT_35_TURBO`, `GPT_35_TURBO_INSTRUCT` |
+| ChatGPT | `GPT_5_3_CHAT_LATEST` |
+| Gemini | `GEMINI_2_5_PRO_PREVIEW_05_06`, `GEMINI_2_5_PRO_PREVIEW_03_25`, `GEMINI_2_5_FLASH_PREVIEW_04_17`, `GEMINI_2_0_FLASH_LITE` |
+| MiniMax | `MINIMAX_M2`, `MINIMAX_M2_1`, `MINIMAX_M2_1_HIGHSPEED` |
+| xAI | `GROK_2_1212`, `GROK_2_VISION_1212`, `GROK_3_FAST`, `GROK_3_MINI_FAST` |
+
+### 12. MCP connections own their lifetime
+
+`rig-rmcp` now uses **rmcp 3.5**. `McpConnection` replaces externally managed
+`RunningService` ownership:
+
+```rust
+// before: tools_from_server(definitions, service.peer())
+let connection = McpConnection::new(ClientConfig::default().serve(transport).await?);
+let tools = connection.tools().await?;
+let tool = McpTool::new(definition, &connection);
+```
+
+`McpTool::from_mcp_server` and `tools_from_server` are removed. Tools retain
+the connection. `McpClientHandler::connect` returns it; use
+`connection.close().await` instead of `service.cancel().await`.
+`McpClientError::{ToolFetch, ToolFetchTimeout}` become `{Request, Timeout}`.
+
+`McpMeta` wraps `rmcp::model::RequestMetaObject`; the `Meta` re-export is gone.
+Read response metadata and structured content through
+`context.result::<McpCallToolResult>()?`, not `McpResponseMeta` /
+`McpStructuredContent`. Handle `Some(result)` before reading `result.0.meta`
+or `result.0.structured_content`.
+`McpTool::execute_mcp` and `preserve_mcp_result` are removed; call through
+`DynamicTool`/`RegisteredTool` and inspect `McpCallToolResult` in the context
+for the original MCP result. rmcp itself renames
+`ClientInfo`/`ServerInfo` to `ClientConfig`/`ServerConfig`, and server handlers
+return `CallToolResponse` / `ReadResourceResponse`.
+
+### 13. Persistent storage and replay
+
+`rig_memory::Store::append_log` and `replace_log` take an expected length and
+return `LogWriteError`. Implement optimistic concurrency checks; a conflicting
+save must not overwrite another writer. `AsyncStore` exposes
+`read_log_async`, `append_log_async(name, expected_len, bytes)`,
+`replace_log_async`, `read_file_async`, `write_file_async`; old `logs`/`files`
+methods are absent. Local `Store` implementations also implement `AsyncStore`.
+`Arc<dyn Store>` and `Box<dyn Store>` forward the store contract.
+
+`Store` no longer has `remove_log`, `put_blob`, `blob`, `blobs` or `remove_blob`.
+Image blobs are files under `blobs/`; use `rig_memory::{store_images,
+load_images}`. `rig_memory::upgrade`, `Upgraded`, saved-value upgrades and
+rename aliases are removed. **The session format is `rig-session/4`; older
+sessions are refused without modification. Start a new session.**
+`session.get::<T>(key, &upgrades)` becomes `session.value::<T>(key)`.
+Live session rewrite is removed; `rewrite_stopped` remains.
+
+Compaction configuration no longer takes named `CutRule`s or per-agent
+`CompactionKnobs`/`Follows`. `CompactionPolicy::plan` loses the cuts argument;
+`Summarizer::instruction(kept, focus)` becomes `.instruction(focus)`.
+`SummaryCut::upto` is removed. Full literals need the new `near_window`,
+`SummaryPrompts::{in_place, notes}` and `ClearToolOutputs::keep_under` fields;
+prefer constructors/defaults.
+
+Effect-log checkpoints now use **`CHECKPOINT_FORMAT = 7`** and add
+`Checkpoint::last`; recreate old checkpoints. On a by-id resume,
+`Handlers::resume_ids_after` advances dispatch identity past the checkpoint.
+The old `rig-cassette` `ecs` feature and `rig_cassette::ecs` adapter are removed;
+`effect_log` remains available for effect logs whose effects still exist.
+`LogHeader::{bus, deliveries, delivery_limitations}` and recorder
+`begin_delivery_tracking`, `delivery`, `unsupported_delivery` are removed;
+stop populating them. `RequestCheck::Skip` is added for unchecked payload replay.
+`jsonl::Writer::on(files, name)`
+appends to a `Files` store, replacing the development path-based writer:
+
+```rust
+let files = Arc::new(rig_memory::DirFiles::new(dir));
+let writer = jsonl::Writer::on(files.clone(), jsonl::SESSION_EFFECT_LOG);
+let log = jsonl::read_session(&*files)?; // or jsonl::read_from(bytes)
+```
+
+With `rig-cassette`'s `agent` feature, replay `register_all` and
+`register_all_checking` take the inline `Handlers` table instead of a bus
+registrar/driver; pass the same table used by `AgentBuilder::over_handlers`.
+`RequestCheck` is non-exhaustive. Replay by dispatch id, `RequestCheck::Hash`,
+program identities, checkpoint helpers and refusal reporting are present in
+0.45, despite intermediate PR notes announcing their removal.
+
+### 14. HTTP and smaller removals
+
+`rig_reqwest::runtime()` becomes `rig_http::runtime::handle()` with
+`rig-http`'s `tokio` feature. SSE event names are `Cow<'static, str>` rather
+than `String`; use `.into_owned()` if ownership is required.
+`rig_http::http_client::Error` gains `Unbuilt` and is non-exhaustive. A client
+that could not be built fails immediately; this error is not retryable.
+`RecordingHttpClient::set_response` under `test-utils` is removed; construct a
+new recording client instead.
+
+`HttpMiddleware::{before_request_headers, before_request_body, after_response}`
+replace their separate method/URI arguments with `Exchange<'a>`. Read
+`exchange.method`, `.uri` and `.extensions`; the latter carries dispatch
+metadata such as `serve::Serving`. For example, a signature fragment
+`(&self, method: &Method, uri: &Uri, headers: &mut HeaderMap)` becomes
+`(&self, exchange: Exchange<'_>, headers: &mut HeaderMap)` (preserving the
+trait's named future lifetime).
+`http_client::{make_auth_header, bearer_auth_header}` are removed; construct a
+validated `HeaderValue` and insert `AUTHORIZATION` with the `Bearer ` prefix.
+`LazyBytes` is removed; use `LazyBody<Bytes>`.
+
+`GenAiOperation::{ChatStreaming, Interactions, InteractionsStreaming}` are
+removed; use `Chat` and `SpanBuilder::streaming(true)` for streaming telemetry.
+`ToolCall::error_result` is removed; use `call.answer(&tool_result)` to build
+a message result that retains the tool result's status.
+Also removed without direct replacement: `DocumentMediaType::is_code`,
+`Text::clear_citations`, `KeyParts::to_key`,
+`Native::without_reasoning_blob`, `ToolSchema::try_from`, unused `WireEvent`
+constructors and obsolete test mocks. Use tool feedback/results, match media
+types, or construct the surviving public types as appropriate. Full literals
+of Cohere/Voyage response types must stop setting removed unused fields
+(`texts`, `response_type`, `api_version`, `warnings`, `object`, `index`, where
+formerly exposed); Cohere's standalone `ApiVersion` type is removed too.
+
+Under `test-utils`, replace `history_conformance::decode` with
+`wire::decode_reply`. Removed public fixtures include `MockTextDocument`,
+`MockMultiTextDocument`, `CountingMemory`, `FailingMemory`, `AppendFailingMemory`,
+`MockStringOutputTool`, `MockImageOutputTool`, `MockBarrierTool`,
+`MockControlledTool` and `BarrierMockToolIndex`; define test-local fixtures for
+the contracts you need. `MockTurn::with_raw`,
+`MockStreamEvent::text_additional_params`, the mock model's `stream_script`,
+`CapturedSpan::recorded_texts` and
+`validate_result_redaction` are also removed; inspect the raw response,
+recorded effects or captured telemetry directly.
+
+The vector-store builder, LSH strategy, all `VectorDistance` metrics,
+`ToolResultContent::deserialize_json`, TypeSafe `Response: Serialize`,
+`TokenCounter` forwarding through Arc/Box and websocket timeout-disabling
+builders remain in the final release. Do not remove them solely because an
+intermediate PR's notes say they are gone. `InMemoryVectorStore::iter()` now
+yields `(id, document, embeddings)` rather than `(id, (document, embeddings))`;
+the index's `iter()` changes the same way. `LSHIndex::query` returns borrowed
+`&str` ids rather than owned `String`s. The builder's explicit type path is now
+`vector_store::in_memory_store::InMemoryVectorStoreBuilder`, not
+`vector_store::builder`, and requires `D: Serialize`.
+
+### 15. The new rig-ecs is a replacement, not an upgrade
+
+`rig-ecs` 0.45 is a new Bevy kernel. It shares **no API** with the unrelated
+0.43–0.44 implementation. Its agents, turns and tool calls are entities, its
+hooks and slash commands are entities, and its session log saves reflected
+components. There is no mechanical mapping from the old world/driver/plugin
+surface to this one.
+
+Either keep the old dependency set pinned, including
+`rig-ecs = "0.44"` and `rig-cassette = { version = "0.44", features = ["ecs"] }`,
+or port to the new kernel/harness. A non-Bevy host can instead drive
+`rig_agent::run::AgentRun`; see [the stepper fixture](tests/fixtures/agent_run_stepper).
+Do not try to restore an old ECS checkpoint into the new kernel. Its old
+`assets`/`reflect` Cargo feature configuration also has no equivalent on the
+new package; remove those feature requests when porting (not when pinning).
+
+New published packages are `rig-harness`, `rig-tools`, `rig-harness-protocol`
+and the plugins `rig-basics`, `rig-tui`, `rig-inspect`, `rig-steel`.
+The launcher is installed with `cargo install rig`; the plugin guide is
+[crates/rig-harness/PLUGINS.md](crates/rig-harness/PLUGINS.md).
+`rig::harness_protocol` is not a facade export: depend on
+`rig-harness-protocol` directly, or use `rig_harness::harness_protocol` inside
+a harness plugin.
+
+### 16. Plugins written against pre-release harness builds
+
+These names were never a stable 0.44 harness API. They matter if you adopted
+the coding agent before the tag. Ten plugin crates are now modules of
+`rig-basics`. Update Cargo dependencies and `plugins.toml`, not only imports:
+
+```toml
+# before
+[[plugin]]
+crate = "rig-compaction"
+plugin = "rig_compaction::CompactionPlugin"
+# after
+[[plugin]]
+crate = "rig-basics"
+plugin = "rig_basics::compaction::CompactionPlugin"
+```
+
+| Old crate/path | Final 0.45 module in `rig_basics` |
+| --- | --- |
+| `rig_activity` | `activity` |
+| `rig_coding_tools` | `coding_tools` (remote configuration in `coding_tools::remote`) |
+| `rig_compaction` | `compaction` |
+| `rig_login_chatgpt` | `login_chatgpt` |
+| `rig_models::ModelsPlugin`, `DefaultsPlugin` | `models::ModelsPlugin`, `models::defaults::DefaultsPlugin` |
+| `rig_print`, `rig_harness` headless APIs | `print` |
+| `rig_reload::ReloadPlugin`, `PluginsPlugin` | `reload::ReloadPlugin`, `reload::plugins::PluginsPlugin` |
+| `rig_sessions::SessionsPlugin`, `AgentsPlugin` | `sessions::SessionsPlugin`, `sessions::agents::AgentsPlugin` |
+| `rig_subagents` | `subagents` |
+| `rig_telemetry` | `telemetry::{usage, effect_log, diagnostics}` |
+| harness `ApprovalPlugin`, `NeedsApproval`, `PreviewPlugin`, `CheckpointPlugin` | `approval::{ApprovalPlugin, NeedsApproval}`, `preview::PreviewPlugin`, `checkpoint::CheckpointPlugin` |
+| harness session picker | `session_picker::{SessionPicker, SessionPickerPlugin}` |
+| `rig_basics::DefaultPromptPlugin` | `prompt::DefaultPromptPlugin` |
+
+The launcher no longer rewrites old `rig_<crate>::` paths. Run
+`rig plugin check` and update each entry. There is no `rig-splits`; remove it
+and use `/fork`, `/agents` and rewind. The session picker is opt-in in the final
+default template. Approval, preview and checkpoint are opt-in too.
+
+Other source changes for early plugins:
+
+- `Home::auth(provider)` becomes `Home::auth().join(format!("{provider}.json"))`.
+- `PerCall` and `per_call::{per_call, base}` are removed; use `PerCallTools`.
+  `AppPerCallExt` and `CallPlace` remain in the harness prelude.
+- `ToolOptions::rules` is removed. Put guidance in the tool description.
+  `[context]`, `/context`, `ContextEntry`, `ContextLimits` and
+  `RefreshProjectContext` are gone; use `PromptSection` or a note.
+- `Writer::flush` / `SessionLog::flush` return `Result<(), SessionError>`;
+  a changing call is refused if its recovery mark cannot be saved.
+- Saved-value upgrade registries, `RewriteSession` and `SessionRewritten` are
+  removed. `LastUsage` holds an `Anchor`; session UI columns live in
+  `rig_basics::sessions::agents`.
+- `ESSENTIAL_PLUGINS`, `RESERVED_COMMANDS`, `env::AGENT_ONLY` are slices.
+  `StartReason` is non-exhaustive. Attribution names are `subagents`, `print`
+  and `reload`, not their former crate names.
+- `subagents::Request` loses `batch`; `SpawnSubagent` adds
+  `environment: Option<String>`. A message to a requester is not a report;
+  only the final answer completes the request.
+- `AppHeadlessExt`, `KeepRunning`, `HeadlessEnded`, `HeadlessTurnEnded` live in
+  `rig_basics::print`. `HeadlessEnded` has `code: u8`;
+  `HeadlessTurnEnded` has no `failed` field. `print::Request`, `JsonIn` and
+  `JsonOut` are private.
+
+### 17. Tool, terminal and driver integrations
+
+`rig-tools` is new in 0.45. For plugins built against its early versions:
+
+- `Read`, `Edit` and `Write` literals add `seen: Seen` (share the same value
+  to cache whole-file reads/writes); `Shell` adds `quiet: Duration`.
+- `Process::run(deadline, sink)` becomes `run(deadline, quiet, sink)`; pass
+  `None` for no quiet timeout. Handle `Ended::Quiet`. Process state also
+  records `through`, `remote`, `forced`.
+- `numbered` / `read_lines` become `show_lines`; tool text has no line-number
+  prefix. Read `LinesShown` and `FilesChanged` for structured facts rather
+  than parsing tool replies. `workspace::Excerpt` adds `whole`; use
+  `Excerpt::of` or set `whole: None` when unavailable.
+- `rig_core::tool::KeptEnd::End` becomes `KeptEnd::Ends`.
+- Configure remote hosts with `[remote.hosts] NAME = ["ssh", "user@host"]`.
+  The transport takes a shell line as its last argument; with koh use
+  `["koh", "exec", "HOST", "--sh"]`, not `"--"`.
+
+The old corpus JSON-stream protocol is replaced by built-in `rig --json`.
+Every input line needs `"v":1`; use `send`, `stop`, `answer` (choice ids) and
+`state`, not `prompt`, `interrupt`, `set_model` or index-based answers.
+The output event vocabulary also changes. `rig -p --json` is one-shot;
+`rig --json` ends on stdin EOF. Use `rig help-agents` for the versioned
+protocol. `help-agents` is reserved; rename a conflicting plugin command.
+
+For `rig-tui` integrations, `markdown::render(text)` becomes
+`render(text, &theme, None)` (or `Some(width)`), and `render_marked` takes
+`(text, marks, &theme, width)`. Hand-built `MessageView`s add `width` and
+`theme`. Draw panels with `theme.panel(title)` / `theme.raised(title)`,
+selections with `theme.selection()`, and tool output prefixes with
+`OUTPUT_INDENT`. The default `StatusLine` now belongs to `tui:input`, not a
+`tui:status` panel. `ToolCallView::failed` includes nonzero process exits.
+
+---
+
+## 0.43 → 0.44
+
+0.44 had 68 merged PRs, not counting the release PR. Five themes account for most of the breaking changes:
+
+- **Typed generation options.** Reasoning, caching, service tier and the other common knobs are now typed and portable. Every provider wire either maps each one or refuses it.
+- **Assistant history keeps provenance.** Each assistant turn records where it came from and how it stopped.
+- **Unknown finish reasons fail the run** instead of being silently dropped.
+- **Tool-call arguments stream again.** They arrive in fragments, as the provider sends them.
+- **The typed provider request and reply structs are gone**, replaced by typed `extension` options and extras.
+
+Several items changed more than once between 0.43.0 and 0.44.0, for example the malformed-call limit and the setters for accepting unknown finish reasons. This section describes only the move from the 0.43.0 form to the 0.44.0 form. Unless marked as transcribed, every 0.44 code block was compiled against `v0.44.0` with the default `rig` features; inline forms for rig-bedrock, rig-gemini-grpc, rig-ecs and the vector-store crates were checked against the source.
+
+### Upgrading at a Glance
+
+| 0.43 | 0.44 |
+|---|---|
+| `agent.prompt(p).await?.output` | `agent.prompt(p).await?.output()` (an owned `String`) |
+| `history.extend(response.messages.unwrap_or_default())` | `history.extend(response.messages)` |
+| `Err(StreamingError::…)` from a streamed run | `Err(PromptError::…)`, the same error an awaited run returns |
+| `PromptError::{CompletionError, MemoryError, MaxTurnsError, PromptCancelled}` | `PromptError::{Provider, Memory, MaxTurns, Cancelled}` (and add a `_` arm) |
+| `MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult { tool_result })` | `MultiTurnStreamItem::ToolResult { tool_result }` |
+| one `StreamEvent::Arguments` holding a call's whole JSON | one `Arguments` fragment per provider delta; join them per part, or take the call from its `End` |
+| `Message::Assistant { id, content }` | `Message::Assistant(AssistantMessage { content, origin, stop, .. })`; build with `Message::assistant(text)` |
+| `CompletionRequest { model, chat_history, … }` | `CompletionRequest::new(prompt)` with its setters |
+| `Usage { input_tokens: Some(3), ..Usage::default() }` | `Usage::new().input_tokens(3)` |
+| Anthropic `with_automatic_caching()`; OpenAI Chat / Bedrock `with_prompt_caching()` | `.cache(CacheRetention::Short)` on the request or agent |
+| typed provider structs (`openai::completion::Message`, `responses_api::*`, `gemini_api_types::*`, …) | `providers::<p>::extension::{…Options, …Extras}` with `provider_option(..)` and `extras_lossy::<P>()` |
+| `streamed.raw["response_id"]` | `streamed.raw["id"]`: a streamed `raw` is now the unary document |
+| `ToolDefinition { name: "add".to_string(), .. }` | `ToolDefinition { name: ToolName::new("add")?, .. }` |
+| `agent.into_tool()` / `DynamicTool::from(mcp_tool)` | `agent.into_tool()?` / `DynamicTool::try_from(mcp_tool)?` |
+| `UserContent::audio` / `video` / `document` | `UserContent::audio_base64` / `video_base64` / `document_text` (`document_base64` for PDFs) |
+| `for (score, id, doc) in index.top_n(req).await?` | `for result in index.top_n(req).await?` (`result.score`, `.id`, `.document`) |
+| `Ollama::completion(m)` (native `/api/chat`) | `Ollama::native_completion(m)`; `completion(m)` now targets `/v1` |
+| `AnthropicConfig::with_dialect(key, &dialect)` | `AnthropicConfig::with_key(&dialect, key)` |
+| `GeminiGrpc::from_env()` / `from_val(key)` | `GeminiGrpc::from_env().await?` / `GeminiGrpc::new(key).await?` |
+| `response.provider` / `.model` / `.message_id` | `response.provider()` / `.model()` / `.response_id()` |
+| `reasoning.display_text()` | `reasoning.text` |
+| persisted `AgentRun` (format 1) | not loadable: `RUN_FORMAT` is 2 |
+
+### Breaking Changes and Migration Guide
+
+Ordered roughly by how many users each change affects.
+
+#### Prompting an agent: results and errors
+
+**`PromptResponse::output` is a method** ([#2690](https://github.com/0xPlaygrounds/rig/pull/2690)). It returns an owned `String` derived from `content`, so the text and the content can't disagree, and the serialized response no longer has an `output` key.
+
+```rust
+// 0.43
+let text = agent.prompt("hi").await?.output;
+history.extend(response.messages.unwrap_or_default());
+
+// 0.44
+let response = agent.prompt("hi").await?;
+let text: String = response.output();
+history.extend(response.messages);
+```
+
+If you also move other fields out of the response, such as `messages`, call `output()` first.
+
+**`PromptResponse::messages` is a `Vec<Message>`** that every run fills, and `messages()` returns `&[Message]` ([#2686](https://github.com/0xPlaygrounds/rig/pull/2686)). A hand-built `PromptResponse` now has empty `messages` rather than `None`. A serialized response with `"messages": null` no longer deserializes; omit the field instead.
+
+**`PromptResponse::with_content` is removed**, and `with_output_tool_calls` is no longer public. Set the public `content` field instead: `let mut r = PromptResponse::new("", usage); r.content = parts;`.
+
+**`TypedPromptResponse` carries the accepted attempt's transcript** in `messages`, so typed and extractor runs can be continued.
+
+**`stream_to_stdout` returns the run's error.** It now returns `StreamToStdoutError` instead of printing the error and returning an empty response.
+
+**One error type for both run paths** ([#2644](https://github.com/0xPlaygrounds/rig/pull/2644)). `StreamingError` is removed: streamed runs (`StreamingResult`, `AgentRunner::stream`) now fail with `PromptError`. Its variants have dropped their stutter, and it is `#[non_exhaustive]` ([#2735](https://github.com/0xPlaygrounds/rig/pull/2735)):
+
+```rust
+// 0.43
+match item {
+    Err(StreamingError::Completion(e)) | Err(StreamingError::Prompt(PromptError::CompletionError(e))) => {}
+    Err(StreamingError::Prompt(PromptError::MaxTurnsError { .. })) => {}
+    // ...
+}
+
+// 0.44 (the same arms match a streamed item)
+match agent.prompt("hi").await {
+    Ok(_) => {}
+    Err(PromptError::Provider(error)) => eprintln!("provider: {error}"),
+    Err(PromptError::MaxTurns { .. }) => eprintln!("out of turns"),
+    Err(PromptError::Cancelled { .. }) => eprintln!("cancelled"),
+    Err(other) => eprintln!("{other}"),
+}
+```
+
+- Renames: `CompletionError` → `Provider`, `MemoryError` → `Memory`, `MaxTurnsError` → `MaxTurns`, `PromptCancelled` → `Cancelled`, and `PromptError::prompt_cancelled(..)` → `cancelled(..)`.
+- On an awaited run, a provider failure relayed over the effect bus is now `PromptError::Report(report)`, as it already was on streamed runs, instead of `CompletionError(ProviderError::Relayed(report))`.
+- Structured output: `StructuredOutputError::PromptError` → `Prompt`, and `DeserializationError(error)` → `Deserialization { output, error }`, which keeps the model output that failed to parse.
+- Messages no longer repeat themselves or carry type-name prefixes such as `CompletionError:`. A cancellation reads `the run was cancelled: <reason>`, and an exhausted budget reads `reached the max turns limit of <n>`. Match on variants, not on display text.
+
+**Output-tool runs:** in output-tool mode, `content` (and so `output()`) holds only the serialized structured output; read the model's prose from `messages`.
+
+**Typed runs and extractors** ([#2670](https://github.com/0xPlaygrounds/rig/pull/2670), [#2690](https://github.com/0xPlaygrounds/rig/pull/2690)):
+
+- `TypedRun<T>` is now an alias for `AgentRunner<TypedOutput<T>>`, and `AgentRunner` is `AgentRunner<O = ()>`. Code that names either type keeps compiling. A trait implemented for both `AgentRunner` and `TypedRun<T>` must now be implemented for `AgentRunner<O>`.
+- `ExtractorBuilder::tool_choice` is removed. Extraction always forces the `submit` tool.
+- `TypedRun::retries` and `ExtractorBuilder::retries` take `usize` instead of `u64`.
+- `From<serde_json::Error> for StructuredOutputError` is removed, so `?` on a `serde_json::Error` no longer converts. Map it: `.map_err(|error| StructuredOutputError::Deserialization { output: text.into(), error })?`.
+- `TypedPromptResponse` gains the public `messages` field, which breaks struct literals in test fakes; add `messages: vec![]`.
+
+#### A turn with an unknown finish reason fails the run
+
+[#2726](https://github.com/0xPlaygrounds/rig/pull/2726), [#2733](https://github.com/0xPlaygrounds/rig/pull/2733), [#2734](https://github.com/0xPlaygrounds/rig/pull/2734).
+
+In 0.43, a text answer with an unknown finish reason was returned as a success. The next turn then silently dropped it from history. In 0.44, a turn that ends in `StopReason::Error` fails the run with an error naming the raw reason, even when it holds text. That covers an unknown finish reason, text cut by a content filter, and a reported failure.
+
+To accept unknown reasons as a normal stop, opt in at whichever level fits:
+
+```rust
+let agent = AgentBuilder::new(model).accept_unknown_finish_reasons(true).build();
+// per run:      agent.prompt("..").accept_unknown_finish_reasons(true)
+// per request:  CompletionRequest::new("..").accept_unknown_finish_reasons(true)
+// rig-ecs:      world.entity_mut(agent).insert(AcceptUnknownFinishReasons(true));   (transcribed)
+```
+
+`CompletionRequest`, `RunSpec`, `PreparedRequest` and `rig_ecs::policy::RequestGraph` each gain a public `accept_unknown_finish_reasons` field. `CompletionResponse::accepts_unknown_finish_reasons()` reports the choice. An unknown reason is also logged with `tracing::warn!`.
+
+#### Streaming: tool-call arguments and tool results
+
+**Tool-call arguments stream as they arrive** ([#2721](https://github.com/0xPlaygrounds/rig/pull/2721)). This reverses 0.43's "tool calls stream whole".
+
+- A call's `StreamEvent::Arguments` is now one fragment per provider delta. Joined together, a call's fragments are its argument JSON.
+- `End` still carries the final call and its id.
+- `StreamEvent::Start` gains `name: Option<ToolName>`: `Some(tool)` for `PartKind::ToolCall`, `None` for other kinds.
+
+```rust
+// 0.43: one Arguments per call, holding the whole JSON.
+StreamEvent::Arguments { json, .. } => show(json),
+
+// 0.44 (illustrative; `finish` is yours): fragments, joined per part; parse_partial_arguments renders the incomplete JSON.
+StreamEvent::Start { part, kind: PartKind::ToolCall, name } => {
+    calls.insert(part.index(), String::new());
+}
+StreamEvent::Arguments { part, json } => {
+    let text = calls.entry(part.index()).or_default();
+    text.push_str(&json);
+    println!("so far: {:?}", parse_partial_arguments(text));
+}
+StreamEvent::End { content: AssistantContent::ToolCall(call), .. } => finish(call),
+```
+
+- **Hooks:** `on_tool_call_delta` fires once per fragment. `ToolCallDelta` drops `call_id` and gains `aggregated`, the argument text so far. Correlate calls by `part`, and take the id from the call's `End` or from `MultiTurnStreamItem::ToolCall`.
+- **Exhaustive matches:** code that matches `StreamedTurnEvent` exhaustively must handle the new `EmitToolCallDelta`. `HoldToolCall` now applies only to calls naming a tool the turn doesn't allow.
+- **Building events by hand:** code that builds `StreamEvent::Start` (test fixtures, relays) must add `name`. Serialized transcripts with a nameless tool-call start no longer parse.
+- **Anthropic:** tool definitions now carry `eager_input_streaming: true`. For an Anthropic-compatible gateway that rejects that field, set `model.wire = model.wire.with_tool_input_streaming(ToolInputStreaming::BetaHeader)` (or `Off`). Struct literals of `anthropic::Messages` need the new `tool_input_streaming` field (`Quirks` was already `#[non_exhaustive]`).
+
+**Streamed tool results** ([#2686](https://github.com/0xPlaygrounds/rig/pull/2686)):
+
+```rust
+// 0.43
+MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult { tool_result }) => { .. }
+// 0.44
+MultiTurnStreamItem::ToolResult { tool_result } => { .. }
+```
+
+`StreamedUserContent` is removed. The serialized item changes from `{"type":"streamUserItem",…}` to `{"type":"toolResult",…}`. `MultiTurnStreamItem` is `#[non_exhaustive]`, so matches need a `_` arm.
+
+#### Assistant history and messages
+
+[#2713](https://github.com/0xPlaygrounds/rig/pull/2713), [#2750](https://github.com/0xPlaygrounds/rig/pull/2750). Assistant history is now item-shaped.
+
+- **Assistant messages.** `Message::Assistant { id, content }` is now `Message::Assistant(AssistantMessage)`.
+  - `AssistantMessage` holds `content`, the turn's `origin` (which provider and model wrote it) and its `stop`.
+  - Each block keeps the provider item it came from. Content with no canonical slot is kept as `AssistantContent::Opaque` instead of failing the reply or vanishing.
+- **Building and reading turns.**
+  - Build a turn with `Message::assistant(text)`, or `AssistantMessage::new(content).with_origin(o).with_stop(s)`.
+  - Read a reply's turn with `CompletionResponse::message()`. `message_id` is now `response_id()`.
+- **Persisted history.** Assistant turns stored by 0.43 that hold tool calls or reasoning don't load; plain text turns still do (the old `id` is ignored).
+- **Blocks.**
+  - `Reasoning { text, redacted, native }` replaces `ReasoningContent`, and a block's provider data is `native_item()`.
+  - `AdditionalParams` on assistant blocks is gone.
+  - A provider call id serializes as `{"provider": "<id>"}` instead of `{"provider": {"call_id": …, "item_id": …}}`.
+- **Tool-call arguments are always a JSON object.**
+  - `ToolFunction::arguments` is a `serde_json::Map`. Use `arguments_value()`, `ToolFunction::new` or `ToolFunction::parse`.
+  - Any other text is kept in `invalid_arguments`, and such a call is answered with an error result.
+  - `ToolResult` gains `is_error`, so struct literals need the field.
+- **Stops.** `FinishReason::Other` and `ContentFilter` end a turn in `StopReason::Error`. `CompletionResponse` gains `error` and `aborted` (and `origin`, see below).
+- **Removed:** `IfMalformed`, `MalformedToolInput`, `ErrorDetail`, `DuplicateCallId` and the `require_non_empty*` helpers.
+- **Rollbacks.** Runtimes build rollback turns with `AssistantMessage::rolled_back` or `::aborted`, and fold recorded events with `streaming::delivered`.
+- **Request documents.** `Operation::prepare` (replacing `validate`) folds request documents into the first user message.
+
+#### Core types are built with constructors
+
+[#2735](https://github.com/0xPlaygrounds/rig/pull/2735), [#2750](https://github.com/0xPlaygrounds/rig/pull/2750).
+
+Outside rig-core, these types can no longer be built with a struct literal or `..base`:
+
+| 0.43 | 0.44 |
+|---|---|
+| `CompletionRequest { model: None, chat_history, tools, max_tokens: Some(64), … }` | `CompletionRequest::from(chat_history).tools(tools).max_tokens(64)`; `model: Some(m)` → `.model(m)` |
+| `CompletionRequest { tools: vec![], ..base }` | `let mut r = base; r.tools = vec![];` |
+| `Usage { input_tokens: Some(3), output_tokens: Some(2), ..Usage::default() }` | `Usage::new().input_tokens(3).output_tokens(2)` |
+| `Text { text, additional_params: None }` | `Text::new(text)` |
+
+- Patterns on these types need `..`, for example `Text { text, .. }`.
+- These enums are `#[non_exhaustive]`, so a `match` on any of them needs a `_` arm:
+  - rig-core: `FinishReason`, `message::StopReason`, `AssistantContent`, `ProviderError` and `providers::openai::wire::BodyRewrite`.
+  - rig-agent: `PromptError`, `MultiTurnStreamItem`, `StreamedTurnEvent` and `InvalidToolCallAction`.
+- `ProviderError` also gains the `UnsupportedOption(_)` variant (see the next section).
+- `Usage` (and `rig_ecs::agent::Usage`) no longer implements `Eq`, because `Usage::cost` holds `f64`. Drop `Eq` from any type that derived it through `Usage`.
+
+```rust
+let request = CompletionRequest::new("hi").max_tokens(64);
+let usage = Usage::new().input_tokens(3).output_tokens(2);
+let text = Text::new("hello");
+let message = Message::assistant("hello");
+```
+
+#### Responses, reasoning and content blocks
+
+[#2713](https://github.com/0xPlaygrounds/rig/pull/2713).
+
+- **`CompletionResponse` fields.** `provider`, `model`, `response_id` and `message_id` are gone; the new `origin: Origin` field carries them. Use `response.provider()`, `response.model()` and `response.response_id()` (both `message_id` and `response_id` map to `response_id()`). `CompletionResponse::new` takes an `Origin` as its third argument instead of a provider string.
+- **`Reasoning` helpers.** `Reasoning::{new_with_signature, sealed, with_id, multi, redacted, encrypted, summaries, display_text, first_text, first_signature, encrypted_content}` and the `Issuer` and `Sealed<T>` types are removed. `AssistantContent::Reasoning` holds a `Reasoning` directly. Read the text from `reasoning.text`; signatures and encrypted payloads live in the provider item (`AssistantContent::native_item()`). `AssistantContent::reasoning(issuer, text)` is now `AssistantContent::reasoning(text)`.
+- **`additional_params` on content blocks.** The field is removed from `Image`, `Audio`, `Text` and `ToolCall`, which are user blocks as well as assistant blocks. On `Document` and `Video` it is now `Option<serde_json::Value>`. The `AdditionalParams` type is removed.
+- **New fields on literal-built structs.** `Image::native`, `ToolCall::native` and `ToolFunction::invalid_arguments` break struct literals: add `native: None` / `invalid_arguments: None`, or use `ToolCall::new`, `ToolFunction::new` / `parse` and the `UserContent::image_*` constructors.
+- **Tool-call identity.** `ToolCall::{signature, with_signature, with_additional_params, from_dual_wire}`, `AssistantContent::tool_call_with_call_id` and `CallId::from_dual_wire` are removed. Build calls with `ToolCall::new(call_id, function)`, and put provider data in `native`, for example `AssistantContent::ToolCall(ToolCall::new(call_id, function)).with_native(json)`. `ProviderCallId` is an opaque newtype: `ProviderCallId::new(id)` and `.as_str()` replace the `call_id` / `item_id` fields, and `with_item_id` is removed.
+- **Smaller removals.** `ErrorReport::detail` and `with_detail`; `message::{EMPTY_RESPONSE_ERROR, canonical_streamed_choice, keys_lost_in_round_trip, non_empty, optional_additional_params, ordered_assistant_content}`; `Message::replays_to` and `CompletionRequest::replayable_to` (replay is `history::adapt`). `transcript::tool_result_output` takes `&rig_core::tool::ToolResult` (instead of `ToolOutput`) as its third argument. `streaming::PartKind` gains `Opaque`, so exhaustive matches need an arm.
+
+#### Removed model constants
+
+[#2713](https://github.com/0xPlaygrounds/rig/pull/2713). Retired model ids are gone; pass the id as a string literal if you still need one.
+
+- **Together:** 91 of 99 constants are removed. The kept ones are `LLAMA_3_8B_CHAT_HF`, `LLAMA_3_8B_INSTRUCT`, `LLAMA_3_70B_INSTRUCT`, `LLAMA_2_70B_CHAT_TOGETHER`, `MIXTRAL_8X7B_INSTRUCT_V0_1`, `LLAMA_3_1_8B_INSTRUCT_TURBO`, `LLAMA_3_1_70B_INSTRUCT_TURBO` and `QWEN2_5_72B_INSTRUCT_TURBO`.
+- **Vertex AI:** `completion::{GEMINI_1_5_PRO, GEMINI_1_5_FLASH, GEMINI_1_5_PRO_LATEST, GEMINI_1_5_FLASH_LATEST, GEMINI_2_0_FLASH_EXP, GEMINI_2_5_FLASH_LITE, GEMINI_2_5_PRO}` are removed; only `GEMINI_2_5_FLASH` remains. Use `"gemini-2.5-pro"` and so on.
+- **Bedrock:** 16 non-completion constants leave `completion::`. Image models such as `AMAZON_NOVA_CANVAS` and `STABILITY_*` are in `image::`. Embedding models remain in `embedding::` (`AMAZON_TITAN_EMBED_TEXT_V1`, `AMAZON_TITAN_EMBED_IMAGE_V1`, `AMAZON_TITAN_EMBED_TEXT_V2_0`, `COHERE_EMBED_*_V3`), where 0.43 already re-exported them; only the `completion::` spellings are gone. `AMAZON_NOVA_REEL_V1_0`/`V1_1`, `AMAZON_NOVA_SONIC`, `AMAZON_RERANK_1_0`, `COHERE_RERANK_V3_5`, `LUMA_RAY_V2_0` and `TWELVELABS_PEGASUS_V1_2` have no replacement constant.
+
+#### Generation options replace provider caching setters
+
+[#2750](https://github.com/0xPlaygrounds/rig/pull/2750).
+
+**New: typed, portable options.** `GenerationOptions` holds `reasoning`, `cache`, `service_tier`, `verbosity`, `parallel_tool_calls`, `top_p`, `seed`, `stop` and `on_unsupported`.
+
+- `CompletionRequest`, `AgentBuilder` and `AgentRunner` have a setter for each of them, such as `.reasoning(Effort::High)`, `.cache(CacheRetention::Long)` or `.seed(1)`, beside `options(..)`.
+- Every completion wire maps each option to its provider's JSON, or refuses it.
+- Under the default policy (`OnUnsupported::Error`), a refusal is `ProviderError::UnsupportedOption` and nothing is sent. `.on_unsupported(OnUnsupported::Ignore)` skips the option with one warning instead.
+- A request that sets no option at all is not checked: it is sent as built, and the provider decides.
+
+**Removed caching setters:**
+
+| Removed | Use |
+|---|---|
+| Anthropic `Messages::with_automatic_caching()` and the `automatic_caching` field | `.cache(CacheRetention::Short)` on the request, or `AgentBuilder::cache(..)` |
+| Anthropic `with_automatic_caching_1h()` and `automatic_caching_ttl` | `.cache(CacheRetention::Long)` |
+| `openai::wire::Chat::with_prompt_caching()`, its `prompt_caching` field, and `OpenAiWire::with_prompt_caching()` | `.cache(CacheRetention::Short)`; on a dialect that can't cache on request, where the setter did nothing, this is now `UnsupportedOption` |
+| Bedrock `Converse::with_prompt_caching()` and its `prompt_caching` field | `.cache(CacheRetention::Short)`, or `Long` for a 1 h TTL; a checkpoint that can't follow a reasoning turn is now `UnsupportedOption` (add `.on_unsupported(OnUnsupported::Ignore)` to skip it, as the setter did silently) |
+
+Anthropic's `with_prompt_caching()` and `with_static_prefix_cache_ttl(..)` are unchanged.
+
+**Request bodies merge in one order:** the wire's encoding, then mapped options, then provider options, then `additional_params`.
+
+- Objects merge key by key, other values replace, and a `null` is sent (except a top-level `generationConfig: null` on Gemini, which is still ignored).
+- `additional_params.tools` is appended to Rig's tools.
+- So `additional_params` now overrides typed fields on Gemini, Interactions and OpenAI Responses, and an object in it merges into the wire's object instead of replacing it. See [Behavior Changes](#behavior-changes) for the per-provider list.
+
+```rust
+use rig::completion::{CacheRetention, Effort, OnUnsupported};
+
+let agent = AgentBuilder::new(model)
+    .reasoning(Effort::High)
+    .cache(CacheRetention::Long)
+    .on_unsupported(OnUnsupported::Ignore)
+    .build();
+```
+
+#### Typed provider types are replaced by extensions
+
+[#2713](https://github.com/0xPlaygrounds/rig/pull/2713), [#2750](https://github.com/0xPlaygrounds/rig/pull/2750).
+
+Every wire now builds requests and reads replies as JSON, so the typed provider request and reply structs are removed. That includes:
+
+- OpenAI Chat readback types and `ToolChoice`, and the Responses parameter types.
+- Anthropic's typed replies and `CacheControl`.
+- Gemini and Interactions API types, plus `gemini::completion::gemini_api_types::{tool_parameters_to_schema, flatten_schema}`.
+- The OpenRouter and Venice parameter types.
+- Bedrock's `ConverseRequest` fields.
+
+What replaces them:
+
+- **Sending provider fields:** typed `Options` types in `providers::<p>::extension` (and `rig_bedrock::extension`, `rig_vertexai::extension`, `rig_gemini_grpc::extension`, `rig_candle::extension`). Set them with `request.provider_option(options)`, `AgentBuilder::provider_option` or `AgentRunner::provider_option`. Each wire sends only its own provider's entry. Raw JSON in `additional_params` still works.
+- **Reading provider reply fields:** use `response.extras::<P>()` (an `Option<Result<P::Extras, _>>`) or `extras_lossy::<P>()`, where `P` is the provider's marker (`OpenAiExt`, `AnthropicExt`, `OpenRouterExt`, …). Both read the same fields from unary and streamed replies, instead of indexing `raw`.
+- **Coming from 0.43's typed builders:** the builders on OpenRouter, Anthropic, Responses, Venice, Ollama, Cohere and Bedrock come back as serialize-only `Options` types. For example, `ProviderPreferences` becomes `OpenRouterOptions::provider`, and `VeniceParameters` becomes `VeniceOptions::venice_parameters`. Its `disable_thinking` flag is now `Reasoning::Off`.
+- **Provider keys** (`"gcp.gemini"`, `"aws_bedrock"`, `"azure.openai"`, …) are stable API from 0.44.
+
+```rust
+use rig::providers::openrouter::extension::{ModelFallbacks, OpenRouterExt, OpenRouterOptions};
+
+let fallbacks = ModelFallbacks::new(["openai/gpt-5.5", "google/gemini-3.8-flash"])?;
+let request = CompletionRequest::new("Name three Rust web frameworks.")
+    .provider_option(OpenRouterOptions::new().models(fallbacks));
+let response = model.call(request).await?;
+let extras = response.extras_lossy::<OpenRouterExt>();
+println!("served by {:?} for {:?} credits", extras.provider, extras.cost);
+```
+
+**Bedrock guardrail:** `Converse::with_guardrail` and the `Converse::guardrail` field are removed. The guardrail is now sent on streamed requests too, where it used to be dropped silently. `GuardrailTrace` is now rig's own `rig_bedrock::extension::GuardrailTrace`, not the AWS SDK type.
+
+```rust
+// transcribed from #2750
+// 0.43
+let wire = Converse::new(model).with_guardrail("g1", "DRAFT", GuardrailTrace::Enabled);
+// 0.44
+use rig_bedrock::extension::{BedrockOptions, Guardrail, GuardrailTrace};
+let guardrail = Guardrail::new("g1", "DRAFT").trace(GuardrailTrace::Enabled);
+let request = request.provider_option(BedrockOptions::default().guardrail(guardrail));
+```
+
+**Header options:** Anthropic betas and the Copilot intent have no typed channel yet; they stay on `AnthropicConfig::with_beta` and `CopilotWire::with_intent`. ChatGPT still sends a fresh `session_id` per request. On Bedrock, Anthropic betas are a typed body option, `BedrockOptions::anthropic_beta`.
+
+**Typed reply types are removed.** 0.43's typed reply structs are gone, with no replacement type: `deepseek`, `mistral`, `openrouter`, `llamacpp` and `venice` `CompletionResponse`/`Usage`/`Choice`, the `openai::completion` and `responses_api` reply types, Anthropic's `CompletionResponse` and `Usage`, and Gemini's `GenerateContentResponse`. Code that deserialized `CompletionResponse::raw` into one of them should read the fields through `extras::<P>()` (for example `DeepSeekExt`, `MistralExt`, `OpenRouterExt`, `LlamaCppExt` for `Timings`, `VeniceExt` for `VeniceCost`), or index `raw` as JSON. ([#2661](https://github.com/0xPlaygrounds/rig/pull/2661) and [#2664](https://github.com/0xPlaygrounds/rig/pull/2664) reshaped the DeepSeek, Mistral and OpenRouter types after 0.43; [#2713](https://github.com/0xPlaygrounds/rig/pull/2713) then removed them, so skip those intermediate forms.)
+
+#### A streamed reply's `raw` is the unary document
+
+[#2750](https://github.com/0xPlaygrounds/rig/pull/2750).
+
+In 0.43, each provider wrote its own summary as a streamed reply's `raw`. In 0.44, a streamed `raw` is the API's unary response document, rebuilt from the stream. A unary `raw` is unchanged, except that ChatGPT's `output` is now filled.
+
+| API | 0.43 streamed `raw` | 0.44 streamed `raw` |
+|---|---|---|
+| OpenAI Chat and every dialect | `{usage, finish_reason, response_id, model, logprobs, additional_params}` | the `chat.completion` body: `raw["id"]`, `raw["choices"][0]["finish_reason"]`, `raw["choices"][0]["message"]`, `raw["usage"]` |
+| Anthropic Messages and dialects | `{usage, stop_reason, stop_sequence, message_id, model}` | the `Message`: `raw["id"]` (was `message_id`), `raw["content"]`, `raw["stop_reason"]`, `raw["usage"]` |
+| Gemini GenerateContent (REST, gRPC) | a snake_case summary (REST), the last chunk (gRPC) | the `GenerateContentResponse`: `raw["usageMetadata"]`, `raw["candidates"][0]["finishReason"]`, `raw["modelVersion"]`, `raw["responseId"]` |
+| Gemini Interactions | `{usage, interaction, model_version}` | the interaction resource, with `steps` rebuilt |
+| OpenAI Responses | the terminal `response` | the same, except that ChatGPT's `output` is filled and Copilot's `copilot_usage` sits at the top level |
+| Cohere native | the `message-end` event | the chat response: `raw["id"]`, `raw["message"]`, `raw["finish_reason"]`, `raw["usage"]` |
+| Ollama native | the final `done` record | the `/api/chat` body, with content, thinking and tool calls joined |
+| Bedrock Converse | `{messageStart, messageStop, metadata}` | the `ConverseOutput`: `raw["output"]["message"]`, `raw["stopReason"]`, `raw["usage"]`, `raw["metrics"]` |
+
+A stream that fails, or that runs out of frames before the provider ends it, now records the document rebuilt so far as `raw`, where 0.43 recorded `Null`. To know whether the provider ended the reply, check the finish reason, not whether `raw` is non-null.
+
+#### Tools and MCP
+
+**Tool names are `ToolName`** ([#2689](https://github.com/0xPlaygrounds/rig/pull/2689)). Declared tool names are now validated like tool-call names, and deserializing an empty name fails.
+
+```rust
+// 0.43
+ToolDefinition { name: "add".to_string(), description, parameters }
+ToolChoice::Specific { function_names: vec![Add::NAME.to_string()] }
+DynamicTool::new("echo", "Echo", schema, callback)
+builder.dynamic_tool(agent.into_tool())
+let tool: DynamicTool = mcp_tool.into();
+
+// 0.44
+ToolDefinition { name: ToolName::new("add")?, description, parameters }
+ToolChoice::Specific { function_names: vec![tool_name::<Add>()] }     // transcribed
+DynamicTool::new(ToolName::new("echo")?, "Echo", schema, callback)   // transcribed
+builder.dynamic_tool(agent.into_tool()?)                              // transcribed
+let tool: DynamicTool = mcp_tool.try_into()?;                         // transcribed
+```
+
+`DynamicTool::new_with_context` takes a `ToolName` too. `ToolName` compares equal to `str` and `String`. To get a string, use `name.as_str()`, `name.to_string()` or `String::from(name)`. `McpClientHandler` skips a nameless server tool with a warning.
+
+**Tool and MCP failures keep their structure** ([#2687](https://github.com/0xPlaygrounds/rig/pull/2687)):
+
+- A tool call that fails at dispatch, rather than inside the tool, now reports a mapped `ToolErrorKind` (for example `Timeout`, `NotFound` or `Network`) instead of `Other`, and keeps the report's `retryable()`, `code()`, `http_status()` and `is_refusal()` values, which used to be lost. `ToolExecutionError` implements `From<ErrorReport>`.
+- `ToolContextError::{Encode, Decode}` carry `source: serde_json::Error` instead of `message: String`. `ToolContextError` no longer implements `Clone`, `PartialEq` or `Eq`, so compare with `.unwrap()` instead of `assert_eq!(…, Ok(..))`.
+- `McpClientError::ConnectionError(String)` → `McpClientError::Connection(rmcp::service::ClientInitializeError)`, and `ToolFetchError` → `ToolFetch`.
+
+#### Invalid and malformed tool calls
+
+[#2727](https://github.com/0xPlaygrounds/rig/pull/2727), [#2733](https://github.com/0xPlaygrounds/rig/pull/2733).
+
+The invalid-call hook now also sees tool calls whose arguments aren't a JSON object, before they are answered.
+
+- `InvalidToolCallReason` gains `DisallowedByToolChoice`, which takes the calls `UnknownTool` used to cover when the tool choice disallowed them. It is `#[non_exhaustive]` and no longer implements `Default` (write `InvalidToolCallReason::UnknownTool`).
+- `InvalidToolCallContext` is `#[non_exhaustive]`, so it can no longer be built with a struct literal; contexts come from the run. `StreamedInvalidToolCall::reason` is removed: read `InvalidToolCallContext::reason`.
+- A hook written for unknown names should check the reason before it acts. An unconditional `Repair` now fails a run that sends malformed arguments:
+
+```rust
+// transcribed from #2727
+if matches!(context.reason, InvalidToolCallReason::MalformedArguments { .. }) {
+    return None; // keep the default feedback
+}
+```
+
+- **Optional limit:** `max_consecutive_malformed_tool_calls(n)` on `AgentRunner` or `AgentRun`, or `RunSpec::max_consecutive_malformed_tool_calls = Some(n)`. When set, a run fails after `n` consecutive turns with a malformed call; `None` clears the limit. Without it, malformed calls are answered until `max_turns`, as in 0.43.
+
+#### Run specs and persisted runs
+
+- **Persisted runs:** an `AgentRun` persisted by 0.43 is refused: "resume refused: the run is format 1, this rig reads format 2".
+- **New fields:** `RunSpec` gains `accept_unknown_finish_reasons`, `max_consecutive_malformed_tool_calls`, `options` and `provider_options`, and `PreparedRequest` gains the same option fields. A literal that ends in `..RunSpec::new()` or `..Default::default()` is unaffected. A literal that lists every field needs `accept_unknown_finish_reasons: false`, `max_consecutive_malformed_tool_calls: None`, `options: GenerationOptions::new()` and `provider_options: ProviderOptions::new()`.
+- **`RunSpec::default()` now equals `RunSpec::new()`**, including `augment_output_preamble: true` (0.43's default gave `false`). A spec deserialized without that key also gets `true`. To keep the old value, write `RunSpec { augment_output_preamble: false, ..RunSpec::default() }`.
+- **Effect logs:** logs recorded under 0.43 are refused by `check_replayable`, because the stable hash of `RunSpec` changed. Record them again.
+
+#### Media content constructors
+
+[#2685](https://github.com/0xPlaygrounds/rig/pull/2685).
+
+```rust
+// 0.43
+UserContent::audio(b64, None);
+UserContent::document(text, Some(DocumentMediaType::TXT));
+// 0.44
+UserContent::audio_base64(b64, None);
+UserContent::document_text(text, Some(DocumentMediaType::TXT));
+UserContent::document_base64(b64, Some(DocumentMediaType::PDF)); // new: base64 documents
+```
+
+`UserContent::video` → `video_base64`. If you passed base64 to `UserContent::document`, for example a PDF, switch to `document_base64`: the old call built a text source, which providers handled inconsistently. `DocumentSourceKind::{url, base64, file_id, string}` now take `impl Into<String>`.
+
+#### Vector stores
+
+**Named search results** ([#2688](https://github.com/0xPlaygrounds/rig/pull/2688)):
+
+```rust
+// 0.43
+for (score, id, doc) in index.top_n::<Doc>(req).await? { /* ... */ }
+let first_id = &index.top_n_ids(req).await?[0].1;
+
+// 0.44
+for result in index.top_n::<serde_json::Value>(req.clone()).await? {
+    println!("{} {} {}", result.score, result.id, result.document);
+}
+let first = &index.top_n_ids(req).await?[0].id;
+```
+
+- A custom `VectorStoreIndex` returns `VectorSearchResult { score, id, document }` and `VectorSearchIdResult { score, id }`.
+- `VectorStoreOutput` becomes `VectorSearchResult<serde_json::Value>`, which has the same JSON shape.
+- `SearchResult::into_result` (rig-postgres, rig-surrealdb) and agent retrievals return the new types.
+
+**`VectorSearchRequest`** ([#2683](https://github.com/0xPlaygrounds/rig/pull/2683)):
+
+- `additional_params` is removed. No backend ever read it, so delete the call and its `?`.
+- `filter()` returns `Option<&F>`. Drop `.as_ref()`, and use `.cloned()` for an owned copy.
+- `VectorStoreError::BuilderError(String)` → `SamplesOutOfRange { requested, max }`.
+
+**Companion crates** ([#2662](https://github.com/0xPlaygrounds/rig/pull/2662), [#2698](https://github.com/0xPlaygrounds/rig/pull/2698)):
+
+- **HelixDB:** `HelixDBVectorStore` is no longer generic, and the `HelixDBClient` trait is removed. Write `HelixDBVectorStore` instead of `HelixDBVectorStore<HelixDB>`, and customise transport with `HelixDB::with_client`.
+- **MongoDB, SurrealDB, Milvus, ScyllaDB:** the `From`/`TryFrom<Filter<serde_json::Value>>` impls are removed. Use `DynamicSearchFilter::from_dynamic_filter(filter)?`.
+- **Postgres:** `PgSearchFilter::like` and `similar_to` take a runtime pattern and bind it as a parameter. **Remove the SQL quotes you used to include.** A pattern that keeps them, like `"'glarb%'"`, still compiles but now matches the quote characters literally, so it finds nothing. `between` binds both bounds and accepts any `T: Into<serde_json::Value>`, floats included.
+
+```rust
+// 0.43
+PgSearchFilter::like("document->>'name'", "'glarb%'");
+// 0.44   (transcribed)
+PgSearchFilter::like("document->>'name'", "glarb%");
+PgSearchFilter::like("document->>'name'", format!("{prefix}%"));
+```
+
+#### Providers
+
+- **Ollama** ([#2730](https://github.com/0xPlaygrounds/rig/pull/2730)). In 0.43, `Ollama::completion` used the daemon's native `/api/chat`. In 0.44 it returns `Model<openai::wire::Chat>` at `{base}/v1`, and the native route is `Ollama::native_completion`. If you send `think`, `keep_alive` or model `options` such as `num_ctx`, move to `native_completion`. On `/v1`, `num_ctx` and `options` are a request error instead of being silently ignored. Set reasoning with `.reasoning(..)` on either route.
+- **Cohere** ([#2729](https://github.com/0xPlaygrounds/rig/pull/2729)). In 0.43, `Cohere::completion` returned the native `/v2/chat` wire. In 0.44 it returns `Model<CohereChat>`, which by default sends requests to Cohere's OpenAI Compatibility API. To keep documents, citations and `tool_plan`, opt back in with `model.wire = model.wire.with_route(cohere::ChatRoute::Native)`, or `ChatRoute::Auto` to go native only for requests that carry documents. Chat-only options live on `model.wire.compatibility_api`.
+- **Anthropic dialects** ([#2691](https://github.com/0xPlaygrounds/rig/pull/2691), [#2738](https://github.com/0xPlaygrounds/rig/pull/2738)).
+  - `AnthropicConfig::with_dialect(api_key, &dialect)` → `AnthropicConfig::with_key(&dialect, api_key)`, matching `OpenAIConfig::with_key`.
+  - `xiaomimimo::ANTHROPIC_API_BASE_URL` and the `XIAOMIMIMO` dialect's `base_url` drop their trailing `/v1`. Code that joined paths onto the constant must add `/v1` itself.
+  - `with_key` now trims a custom dialect's trailing `/`, `/v1`, `/messages` or `/v1/messages`.
+- **Bedrock** ([#2691](https://github.com/0xPlaygrounds/rig/pull/2691), [#2713](https://github.com/0xPlaygrounds/rig/pull/2713)).
+  - `client::Builder` is owned, accepts both `region` and `profile_name`, and `build()` is synchronous.
+  - `BedrockRuntime::with_profile_name` and `DEFAULT_AWS_REGION` are removed. Use `BedrockRuntime::builder().profile_name("bedrock").region("eu-west-1").build()`.
+  - **An unset region now follows the AWS SDK provider chain instead of defaulting to `us-east-1`.** Call `.region("us-east-1")` to keep the old behavior.
+  - `types::assistant_content` (`RigAssistantContent`, `map_stop_reason`) and `types::converse_output` (about 45 mirror types) are removed with no replacement. Read Converse replies from `raw` (the `ConverseOutput` JSON) or `extras::<BedrockExt>()`. `streaming::BedrockStreamingResponse` is removed too.
+- **Vertex AI** ([#2691](https://github.com/0xPlaygrounds/rig/pull/2691)). `VertexAiClientError` keeps the underlying SDK errors as typed `Arc` sources instead of strings. A client-initialization failure during a completion is now `ProviderError::Request` wrapping the `VertexAiClientError`, not `ProviderError::Provider(String)`.
+- **Gemini gRPC** ([#2684](https://github.com/0xPlaygrounds/rig/pull/2684), [#2750](https://github.com/0xPlaygrounds/rig/pull/2750)).
+  - `GeminiGrpc::from_env()` is `async` and returns `GeminiGrpcError`. 0.43's version panicked on current-thread runtimes.
+  - `GeminiGrpc::new` takes `impl Into<Secret>` and returns `GeminiGrpcError`, and `from_val` is removed.
+  - The proto now uses `prost_types::{Struct, Value}` for JSON fields (`FunctionCall::args`, `FunctionResponse::response`, `Part::part_metadata`, …), so add `prost-types = "0.14"` if you build them; `proto::{Struct, Value, ListValue, NullValue}` are removed. About a dozen messages gained fields (`Candidate::grounding_metadata` among them), so end struct literals with `..Default::default()`. `CodeExecutionResult::outcome` and `ExecutableCode::language` are enum `i32`s, `GenerateContentRequest::cached_content` is an `Option<String>`, and `GenerationConfig::response_mime_type` is a `String` (empty when unset).
+- **Gemini** ([#2663](https://github.com/0xPlaygrounds/rig/pull/2663), [#2713](https://github.com/0xPlaygrounds/rig/pull/2713)).
+  - `operation::ContextCache` moved to `providers::gemini::cached_content::ContextCache`, and `operation::CachedContentFold` is removed. Calls through `Gemini::cached_contents()` are unchanged.
+  - Tool schemas go to Gemini unchanged as `parametersJsonSchema`, so the schema converter is gone.
+- **Candle** ([#2713](https://github.com/0xPlaygrounds/rig/pull/2713), [#2750](https://github.com/0xPlaygrounds/rig/pull/2750)). The payload of `Generation` is `CandleRequest { request, params }`, and `top_p` and `seed` are now options. `Generation` itself is a struct with `model` and `protocol` fields instead of a unit struct, and loses `Default` and `Copy`; get it from `candle.completion()`.
+- **Vertex AI requests.** `completion::VertexRequest` is removed: a custom `Transport<GenerateContent>` takes the SDK's `google_cloud_aiplatform_v1::model::GenerateContentRequest`. `VERTEX_TEXT_EXTRAS_KEY` is removed; read extras with `extras::<VertexExt>()`.
+- **Moved wire types.** `ollama::wire::{Chat, Embeddings, Models}` are now `ollama::chat::Chat` (what `native_completion` returns), `ollama::embedding::Embeddings` and `ollama::model_listing::{Models, ListModelEntry}`. `cohere::wire::{Embeddings, ImageEmbeddings}` are `cohere::embeddings::*`, and the native chat wire is `cohere::chat::NativeChat`. `anthropic::wire::{Models, Verify}` are re-exported as `anthropic::{Models, Verify}`, and `copilot::wire::Models` is `copilot::model_listing::Models`.
+
+#### Telemetry
+
+[#2724](https://github.com/0xPlaygrounds/rig/pull/2724), thanks to @mateobelanger. This change compiles silently, so check anything keyed on span names or `gen_ai.operation.name`:
+
+- `chat_streaming` → `chat` with `gen_ai.request.stream = true`. Gemini streams report `generate_content` with the same flag.
+- `interactions` / `interactions_streaming` → `chat`.
+- The agent's streaming `rig::agent_chat` span is named `chat`.
+- `GenAiOperation::{ChatStreaming, Interactions, InteractionsStreaming}` are deprecated. Use `SpanBuilder::new(provider, model, GenAiOperation::Chat).streaming(true)`.
+
+#### rig-ecs
+
+- `rig_ecs::policy::text` and its duplicated helpers moved to `rig_core::structured_output` and `rig_core::transcript` ([#2660](https://github.com/0xPlaygrounds/rig/pull/2660)). For example, `policy::turn_is_empty` → `transcript::is_empty_assistant_turn`, `policy::answer_text` → `transcript::assistant_text_from_choice`, `policy::output_tool_name(&granted)` → `structured_output::output_tool_name(|name| granted.contains(&name))`, and `policy::invalid_peer_results` → `transcript::invalid_call_feedback`.
+- Request assembly is one system, `systems::fold_turn`. `gather_turn` and `AssemblyInputs` are removed, so order against `fold_turn` or `RigSet::Assemble`. `recording.delivery(batch, id, kind)` → `recording.delivery(Delivery { batch, id, kind })`, `Recording::keep_events` as a path becomes `|r| r.keep_events()`, and `policy::user_text(text)` → `Message::user(text)` ([#2672](https://github.com/0xPlaygrounds/rig/pull/2672)).
+- `save_world`, `load_world` and `Checkpoint::{validate, requirements, to_json, from_json}` return `checkpoint::CheckpointError` instead of `ErrorReport`. Match `DescriptorChanged { key }`, `MissingHandler { key }` and the other variants instead of message text. There is no `From<CheckpointError> for ErrorReport`, so change the error type of functions that `?` these calls. The tool-turn hold error `agent::checkpoint::CheckpointError` is renamed `TurnHoldError` ([#2692](https://github.com/0xPlaygrounds/rig/pull/2692)).
+- `policy::RequestGraph` gains `accept_unknown_finish_reasons`, `options` and `provider_options` (borrowed: `&GenerationOptions::new()`). There are new `Options`, `ProviderOptions` and `AcceptUnknownFinishReasons` components ([#2726](https://github.com/0xPlaygrounds/rig/pull/2726), [#2750](https://github.com/0xPlaygrounds/rig/pull/2750)).
+- A tool dispatch report marked as a refusal is recorded as `ToolResultStatus::Refused` instead of `Error`.
+
+#### Cargo features and dependencies
+
+- rig-core now enables serde_json's `preserve_order` and `float_roundtrip` ([#2713](https://github.com/0xPlaygrounds/rig/pull/2713)). Cargo unifies features, so every crate in a binary with rig-core gets insertion-ordered JSON maps and exact float round trips.
+- rig-gemini-grpc exposes `prost-types` 0.14 in its public API (see Providers).
+- MSRV (1.95.0), edition and default features are unchanged.
+
+#### Implementing a provider or a custom wire
+
+[#2713](https://github.com/0xPlaygrounds/rig/pull/2713), [#2750](https://github.com/0xPlaygrounds/rig/pull/2750). These changes are transcribed from the PRs. `crates/rig-core/TYPED_OPTIONS.md` is the design contract.
+
+- **`Operation::prepare`** replaces `validate`. Implement `ReplayTarget`: `api`, `provider`, `model`, `accepts` and `map_options` are required, and the rest have defaults. Pass the wire to `Descriptor::replay`.
+- **Options mapping:** a `ReplayTarget` must implement `fn map_options(&self, request: &CompletionRequest, fields: OptionFields<'_>) -> OptionMap`. It answers each option with a `Mapping`, for example `top_p: Mapping::of(top_p, |v| Mapping::Send(json!({"top_p": v})))`.
+- **Reassembler:** every `Wire` names `type Reassembler`. A non-completion wire uses `wire::document::Unreassembled`. A completion wire implements `Reassemble<Self::Frame>` and `Serves<Completion>` for its document, or reuses one of Rig's (for example `providers::openai::wire::OpenAiReassembler`).
+- **Raw and citations:** `out.raw(..)` on `Out<'_, Completion>` no longer compiles; the driver records what the reassembler rebuilds. Set citations through `Out::cite` / `Out::set_citations`.
+- **Writer:** 0.43's part methods on `Out<'_, Completion>` (`text`, `push_text`, `close_text`, `reasoning`, `call`, `push_arguments`, `tool_call`, `message_id`, `issued_by`, the `pending_*` family, …) are removed. Write parts with `open`, `push`, `edit`, `finish`, `close`, `whole`, `fragment`, `announce`, `fresh_index`, `finish_open`, `run`, `end_run`, `order_by_index`, `lead` and `restate`. For deltas, apply `operation::merge` inside an `edit`.
+- **Serving replies:** `Reply::written` takes the reply's `Origin`, `StreamWriter::finish` takes only the `Finish`, and `EffectRecord` gains `stream_origin`. `serve::Recorder` and `serve::Observe` have a new required `origin` method. `operation::Finish` drops `message_id` and gains `error`.
+- **Decoders and runtime turns:** decoder types lose their `'id` lifetime (`MessagesDecoder`, `GenerateContentDecoder`, `ResponsesDecoder`, `OpenAiDecoder`, …), and the Chat decoder types sit in a crate-private module (name them as `<Chat as Wire>::Decoder`). `BodyRewrite::{GroqCompoundTools, Hyperbolic}` are removed. In rig-agent, `ModelTurn::new` and `transcript::assistant_message` take an `AssistantMessage` (`response.head()`) instead of a message id; `ModelTurn`/`StreamedTurn` carry `head: AssistantMessage` instead of `message_id`, `PartialStreamedTurn` holds `{head, content}`, `CompletionCall::message_id` and `surface_malformed_input` are removed, and `StreamedTurnAssembler::finish` and `partial_turn` take only the response. In rig-core, `operation::Turn::origin()` replaces `message_id()`/`provider()`. In rig-ecs, `MessageParts::assistant` takes an `AssistantMessage`, and `Outputs`/`TurnRead` expose `head` instead of `message_id`.
+- **Unwind safety:** `wire::Descriptor` and `rig_vertexai::client::VertexAiClientError` are no longer `UnwindSafe`; wrap them in `AssertUnwindSafe` where needed.
+- **Registry:** `ProviderId::format()`, `config()` and `api_key_env()` return `Option<_>`, which is `None` only for the catalog-only vendors. `ProviderRef::provider()` returns `Provider` by value.
+
+#### Smaller removals and renames
+
+- `effect::RerankRequest` → `operation::RerankRequest` ([#2656](https://github.com/0xPlaygrounds/rig/pull/2656)).
+- `embeddings::ImageEmbeddingResponse` → `EmbeddingResponse`. The Cohere and VoyageAI error-envelope types (`cohere::wire::EmbedReply`, `voyageai::wire::RerankReply`, `voyageai::RerankErrorEnvelope`) are removed ([#2666](https://github.com/0xPlaygrounds/rig/pull/2666)).
+- `transcription::NormalizeTranscriptionResponse` is removed. Drop the import: OpenAI's `TranscriptionResponse::normalize()` is an inherent method. Gemini's typed `GenerateContentResponse`, and its transcript normalizer, are removed with no replacement ([#2680](https://github.com/0xPlaygrounds/rig/pull/2680), [#2713](https://github.com/0xPlaygrounds/rig/pull/2713)).
+- Test utilities (`test-utils` feature): `MockStreamEvent::MessageId`, `MockStreamEvent::message_id` and `MockTurn::with_message_id` are removed, and `MockStreamEvent::Reasoning`'s `content` is `text`.
+- `rig_cassette::http::DirectHeader` is removed. `record_http_interaction` takes any iterator of `(impl AsRef<str>, impl AsRef<str>)` pairs ([#2680](https://github.com/0xPlaygrounds/rig/pull/2680)).
+
+### Other API Additions
+
+- **Model catalog:** `rig_core::catalog`, with `Catalog::{builtin, get, find, resolve, iter, from_json, merge}`, `ModelSpec::validate` and `Pricing::cost`. It holds 1,492 models across 28 vendors.
+- **Connecting from the catalog:** `providers::registry::{connect, connect_with}` connect from a catalog row or a `vendor/model` reference. `AgentBuilder::model_spec` checks every call's options against the catalog.
+- **Citations:** `Text::citations()`, `Text::cited(..)` and `message::{Citation, Span, Source, SourceLocation, DocumentRange}`.
+- **Cost:** `Usage::cost` and `Cost`, in USD.
+- **Streaming arguments:** `rig::streaming::parse_partial_arguments` reads incomplete argument JSON into a best-effort object.
+- **Provider configuration:** `ProviderConfig::{base_url, with_base_url}`.
+- **Tools:** `tool_name::<T>()`.
+- **Gemini caching:** `AutoCache::for_model(model)` takes the cached-read price ratio from the catalog.
+- **Model constants:** `gemini::completion::GEMINI_3_8_FLASH` and `deepseek::DEEPSEEK_FLASH`.
+- **OpenAI-compatible gateways:** `openai::wire::Quirks::done_without_finish_reason`.
+- **Cassettes:** `ProviderCassette::{try_start_at, try_finish}`, shape-matched replay (`CassetteSpec::shape_matched()`) and request snapshots.
+- **Structured output and transcripts:** `rig_core::structured_output`, and `transcript::{invalid_call_feedback, is_empty_assistant_turn, assistant_text_from_choice}`.
+- **SQL filters:** `SqlCondition::{range, between, render_placeholders}`.
+- **Test utilities:** `rig_core::test_utils::TraceCapture`.
+- **In-memory vector stores** accept documents without `Eq` or `Default`, and closures as id generators.
+
+### Behavior Changes
+
+These compile as before but act differently:
+
+- **Unknown finish reasons and filtered text fail the run** (see above).
+- **Ollama `completion` targets `/v1`, and Cohere `completion` defaults to the Compatibility API** (see Providers).
+- **Bedrock's builder resolves the region from the AWS SDK chain** instead of defaulting to `us-east-1`.
+- **`RunSpec::default()`** sets `augment_output_preamble: true`.
+- **Streamed `raw`** is the unary document, and a failed stream's `raw` is the partial document instead of `Null`.
+- **`additional_params` overrides typed fields** on Gemini GenerateContent, Interactions and OpenAI Responses, and objects in it merge key by key into the wire's object on every wire.
+  - Chat Completions: a raw `response_format` merges over the output schema's.
+  - Responses: a raw `text` merges with the structured-output format.
+  - Anthropic, Chat Completions, Responses and Cohere: a raw `tools: null` means no tools.
+  - ChatGPT: the backend no longer strips `temperature`, `top_p`, `metadata`, `user`, `background` or `max_output_tokens` from `additional_params`.
+  - Anthropic: `additional_params.cache_control` is sent as written.
+  - A non-object `additional_params` is now an error on every wire (`` `additional_params` must be a JSON object ``). Bedrock merges `additional_params` into `additionalModelRequestFields`.
+  - Vertex AI and Gemini gRPC let `additional_params.model` (and Vertex `.contents`) override the request's own.
+  - Gemini Interactions: `additional_params.tools` must be an array, and `InteractionResume` refuses a request that sets options or raw tools.
+  - Ollama native sends a raw `think` as written, without lowercasing or validating it.
+- **Model facts come from the catalog** for models it lists:
+  - OpenAI Chat decides between `max_tokens` and `max_completion_tokens` from the catalog's `reasoning` field.
+  - Claude Opus 4 and 4.1 default to 32,000 output tokens.
+  - A listed model without image input gets the text `(image omitted: model does not support images)` instead of the image. Fifteen rows that got the text now get the image.
+- **`Usage::cost` is `Some` for most replies**, so a serialized `Usage` gains a `"cost"` object. A catalog-priced cost is a list-price estimate, not the bill.
+- **A cited `Text` serializes a `citations` key**, and no longer equals `Text::new(same text)`. Compare `text.text` instead.
+- **Telemetry span names** follow `gen_ai.operation.name` with `gen_ai.request.stream` (see Telemetry).
+- **A dispatch-level tool failure** reports a specific `ToolErrorKind` instead of `Other`.
+- **Anthropic sends `eager_input_streaming: true`** on every tool. Claude models that bind thinking to the request context get `thinking.block_binding` and the `thinking-binding-controls-2026-08-01` beta in adaptive thinking.
+- **Postgres `like` / `similar_to` patterns are bound parameters**, so leftover SQL quotes now match literally.
+- **`AgentRunner::stream()` on a resumed run** uses the run's persisted unhandled-tool-call policy, not the runner's.
+- **A turn that ends in an error runs none of its tool calls.** A malformed output-tool call is reprompted or fails the run instead of becoming the output.
+- **Groq built-in tools** such as `browser_search` go in `tools`, where Groq reads them. **Mistral** sends a forced tool choice as `required`, and **DeepSeek** honors a forced tool choice on `deepseek-chat`.
+- **A broken replay fixture** (undecodable body, invalid header or status) now fails `ProviderCassette::start_at` (or `try_start_at` with `CassetteError::InvalidInteraction`) up front, not when that interaction is served.
+- **Bedrock `InvokeModel` errors** carry the AWS request id. A mid-stream Bedrock exception with no message reads `Bedrock event stream failed (<ExceptionType>)`.
+
+### Bug Fixes
+
+- **Answers dropped from history.** A text answer with an unknown finish reason was returned and then silently dropped from history on the next turn ([#2726](https://github.com/0xPlaygrounds/rig/pull/2726)).
+- **Provider replay bugs.** Item-shaped history closes a long tail of them ([#2713](https://github.com/0xPlaygrounds/rig/pull/2713)):
+  - turns replayed without their partner item after a rollback ([#2647](https://github.com/0xPlaygrounds/rig/issues/2647));
+  - colliding call ids ([#1508](https://github.com/0xPlaygrounds/rig/issues/1508), [#1962](https://github.com/0xPlaygrounds/rig/issues/1962));
+  - replies that failed to decode on unexpected fields ([#2668](https://github.com/0xPlaygrounds/rig/issues/2668), [#1426](https://github.com/0xPlaygrounds/rig/issues/1426), [#2591](https://github.com/0xPlaygrounds/rig/issues/2591), [#1984](https://github.com/0xPlaygrounds/rig/issues/1984));
+  - lost array-mode tool results on Chat ([#2201](https://github.com/0xPlaygrounds/rig/issues/2201));
+  - a resumed run that appended to memory twice ([#2244](https://github.com/0xPlaygrounds/rig/issues/2244));
+  - Claude thinking turns that could not replay after a tool or system change ([#2703](https://github.com/0xPlaygrounds/rig/issues/2703)).
+- **Wrong Postgres parameters.** A `$` inside a key or pattern shifted every later placeholder onto the wrong value ([#2698](https://github.com/0xPlaygrounds/rig/pull/2698)).
+- **Long Gemini streams lost their usage and output** after exhausting OpenTelemetry's per-span attribute limit ([#2732](https://github.com/0xPlaygrounds/rig/pull/2732)).
+- **Xiaomi MiMo's Messages preset** posted to `/v1/v1/messages` ([#2738](https://github.com/0xPlaygrounds/rig/pull/2738)).
+- **Streams could not be decoded item by item.** `StreamEvent` and `MultiTurnStreamItem` lost `Deserialize` before 0.44; they have it again ([#2723](https://github.com/0xPlaygrounds/rig/pull/2723)).
+- **Gemini gRPC media.** gRPC rejected documents, audio, video and assistant images ([#2658](https://github.com/0xPlaygrounds/rig/pull/2658)).
+- **Bedrock guardrails** were dropped on streamed requests ([#2750](https://github.com/0xPlaygrounds/rig/pull/2750)).
+- **Cohere thinking.** `Reasoning::Off` on Command A Plus and North Mini Code, which think by default, was dropped silently ([#2750](https://github.com/0xPlaygrounds/rig/pull/2750)).
+- **Errored 200s.** A Cohere 200 reply carrying an error envelope folded to an empty answer ([#2729](https://github.com/0xPlaygrounds/rig/pull/2729)).
+- **Interleaved tool calls.** Streamed calls replayed or dropped each other's held items ([#2721](https://github.com/0xPlaygrounds/rig/pull/2721)).
+- **Debug output.** Streaming printed a `PARTIAL ...` debug line to stderr when a streamed tool call was rejected ([#2680](https://github.com/0xPlaygrounds/rig/pull/2680)).
+
+### Performance, Packaging, Docs and DX
+
+- **Less duplicated code.** The provider layer lost its hand-kept typed mirrors of provider JSON, Bedrock dropped its `Rig*` newtype layer, and every reply now decodes and folds through one step and one EOF rule.
+- **Docs and examples.** `crates/rig-core/TYPED_OPTIONS.md` documents typed options, the catalog, extensions, the `raw` shape, citations and cost. The new `agent_tool_call_streaming` example shows argument fragments streaming into a hook.
+- **Tooling.** `cargo xtask catalog sync` / `check` keeps the catalog in step with models.dev. The cassette suite gained shape-matched replay, request snapshots and a coverage gate.
+
+---
+
+## 0.42 → 0.43
+
+### Upgrading at a Glance
+
+| 0.42 | 0.43 |
+|---|---|
+| `openai::Client::from_env()?` | `OpenAI::from_env()?` (`use rig::providers::openai::{self, OpenAI}`) |
+| `client.agent(m)` / `client.extractor::<T>(m)` | `AgentBuilder::new(client.completion(m))` / `ExtractorBuilder::<T>::new(client.completion(m))` |
+| `client.completion_model(m)` | `client.completion(m)` |
+| `client.embedding_model(m)` / `embedding_model_with_ndims(m, n)` | `client.embedding(m, None)` / `client.embedding(m, Some(n))` |
+| `deepseek::Client::from_env()?` (and other OpenAI-compatible vendors) | `deepseek::from_env()?` |
+| `Client::builder().api_key(k).http_client(h).build()?` | `Anthropic::new(k).with_http(h)` (same on every client) |
+| `agent.prompt(p).await?` → `String` | `agent.prompt(p).await?.output` |
+| `agent.stream_prompt(p).await` / `agent.stream_chat(p, &h).await` | `agent.prompt(p).stream()` / `agent.prompt(p).history(&h).stream()` |
+| `use rig::completion::{Prompt, Chat, TypedPrompt}` | delete the import: the methods are inherent on `Agent` |
+| `extractor.extract(t).await?` → `T` | `extractor.extract(t).await?.output` |
+| `extractor.extract_with_usage(t)` | `extractor.extract(t).await?` (a `TypedPromptResponse` with `output`, `usage`, `completion_calls`) |
+| `model.completion_request(p)….send().await?` | `model.call(CompletionRequest::new(p)…).await?` |
+| `CompletionError`, `EmbeddingError`, … | `ProviderError` |
+| `usage.input_tokens` (`u64`) | `usage.input_tokens` (`Option<u64>`) |
+| `StreamedAssistantContent::Text(t)` | `Item::Event(StreamEvent::Text { text, .. })` |
+| `InMemoryVectorIndex<openai::EmbeddingModel, D>` | `InMemoryVectorIndex<D>` |
+| `DynamicTool::new(.., \|_ctx, args\| ..)` | `DynamicTool::new(.., \|args\| ..)` (or `new_with_context`) |
+| `#[rig::tool_macro]` | `#[rig::rig_tool]` |
+| `rig-core` standalone (reqwest on by default) | `rig-core = { features = ["reqwest"] }` (the `rig` facade enables it by default) |
+
+### Breaking Changes and Migration Guide
+
+Ordered roughly by how many users each change affects. Every "0.42" snippet compiles against `v0.42.0` and every "0.43" snippet against `v0.43.0`.
+
+#### Constructing providers and agents
+
+The generic `Client<Ext, H>`, `ClientBuilder`, `ProviderClient`, the `*Client` capability traits (`CompletionClient`, `EmbeddingsClient`, …) and `AgentClientExt`/`AgentModelExt` are gone. A provider client is a concrete type that owns its transport, and an agent wraps a model.
+
+```rust
+// 0.42
+use rig::prelude::*;
+use rig::providers::openai;
+
+#[tokio::main]
+async fn main() -> Result<(), anyhow::Error> {
+    let client = openai::Client::from_env()?;
+    let comedian_agent = client
+        .agent(openai::GPT_5_2)
+        .preamble("You are a comedian here to entertain the user using humour and jokes.")
+        .build();
+
+    let response: String = comedian_agent.prompt("Entertain me!").await?;
+    println!("{response}");
+    Ok(())
+}
+```
+
+```rust
+// 0.43
+use rig::prelude::*;
+use rig::providers::openai::{self, OpenAI};
+
+#[tokio::main]
+async fn main() -> Result<(), anyhow::Error> {
+    // The client reads `OPENAI_API_KEY` and builds the models it serves.
+    let model = OpenAI::from_env()?.completion(openai::GPT_5_2);
+    let comedian_agent = AgentBuilder::new(model)
+        .preamble("You are a comedian here to entertain the user using humour and jokes.")
+        .build();
+
+    let response = comedian_agent.prompt("Entertain me!").await?;
+    println!("{}", response.output);
+    Ok(())
+}
+```
+
+The renames, row by row:
+
+- `completion_model(m)` → `completion(m)`
+- `embedding_model(m)` → `embedding(m, None)`
+- `embedding_model_with_ndims(m, n)` → `embedding(m, Some(n))`
+- `transcription_model` / `image_generation_model` / `audio_generation_model` → `transcription` / `image_generation` / `audio_generation`
+- `list_models()` stays on the client; `verify()` is on the client.
+- **OpenAI-compatible vendors:** `deepseek::Client::from_env()?` → `deepseek::from_env()?`. The same goes for Azure, ChatGPT, Doubleword, Groq, Hugging Face, Hyperbolic, llama.cpp, MiniMax, Mira, Mistral, Moonshot, OpenRouter, Perplexity, Together, Venice, xAI, Xiaomi MiMo and Z.ai, with `anthropic_from_env()`/`anthropic_new()` for the four Messages-format vendors.
+- **Settings:** `openai::OpenAIConfig`, `AnthropicConfig`, `GeminiConfig`, … hold them (`from_env()`, `with_route(..)`, `connect(http)`, `client()`). The old stateful builders (`AnthropicBuilder`, `AzureExtBuilder`, …) are gone. Stored configs reject unknown fields.
+- **Custom HTTP client:** `Client::builder().http_client(h).api_key(k).build()?` → `Anthropic::new(k).with_http(h)` (the same on every client), which takes any `HttpClientExt`.
+
+```rust
+// 0.42
+use rig::prelude::*;
+use rig::providers::anthropic;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let http_client = rig::http_client::ReqwestClient::new();
+    let client = anthropic::Client::builder()
+        .http_client(http_client)
+        .api_key(std::env::var("ANTHROPIC_API_KEY")?)
+        .build()?;
+    let agent = client.agent(anthropic::completion::CLAUDE_SONNET_4_6).build();
+    println!("{}", agent.prompt("What is 2 + 2?").await?);
+    Ok(())
+}
+```
+
+```rust
+// 0.43
+use rig::http_client::ReqwestClient;
+use rig::prelude::*;
+use rig::providers::anthropic::{self, Anthropic};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Any `HttpClientExt` works; here a configured reqwest client in rig-reqwest's newtype.
+    let http_client = ReqwestClient::from(rig::rig_reqwest::reqwest::Client::new());
+    let model = Anthropic::new(std::env::var("ANTHROPIC_API_KEY")?)
+        .with_http(http_client)
+        .completion(anthropic::CLAUDE_SONNET_4_6);
+    let agent = AgentBuilder::new(model).build();
+    println!("{}", agent.prompt("What is 2 + 2?").await?.output);
+    Ok(())
+}
+```
+
+- **SDK-backed companions:**
+  - `rig_bedrock::client::Client` → `BedrockRuntime`
+  - `rig_vertexai::client::Client` → `VertexAi` (builder `VertexAiBuilder`)
+  - `rig_gemini_grpc::client::Client` → `GeminiGrpc`
+  - `rig_fastembed::{Client, EmbeddingModel}` → `Fastembed::load(&m)?.embedding(&m, n)?`
+  - Candle models build with `candle.completion()`.
+  - `Client::get_inner` → `inner`.
+
+```rust
+// 0.42
+use rig::bedrock::client::Client;
+use rig::bedrock::completion::AMAZON_NOVA_LITE;
+use rig::prelude::*;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let agent = Client::from_env()?.agent(AMAZON_NOVA_LITE).build();
+    println!("{}", agent.prompt("Hello!").await?);
+    Ok(())
+}
+```
+
+```rust
+// 0.43
+use rig::bedrock::client::BedrockRuntime;
+use rig::bedrock::completion::AMAZON_NOVA_LITE;
+use rig::prelude::*;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // SDK-backed runtimes build their own models, like the HTTP clients do.
+    let model = BedrockRuntime::from_env().completion(AMAZON_NOVA_LITE);
+    let agent = AgentBuilder::new(model).build();
+    println!("{}", agent.prompt("Hello!").await?.output);
+    Ok(())
+}
+```
+
+- **Model traits are gone.** Code generic over `M: CompletionModel` (or `EmbeddingModel`, …) should take a `DynModel<Completion>` or a `Model<W, T>`. `rig::agent::ModelHandle` is replaced by `DynModel<Completion>` for values and by a `ModelRef` label for routing (see *Choosing models at runtime*).
+
+#### Prompting an agent: results, traits and streaming
+
+- `agent.prompt(p).await?` now returns a `PromptResponse`; read `.output` for the text. `extended_details()` is gone, because you always get the details.
+- `agent.chat(p, &mut history).await?` returns a `PromptResponse` too.
+- `Prompt`, `Chat`, `TypedPrompt`, `StreamingPrompt` and `StreamingChat` are removed; delete the imports, since the methods are inherent on `Agent`. If you implemented `Prompt` for your own type, give it an inherent `async fn prompt`.
+- `PromptRequest`, `StreamingPromptRequest`, `TypedPromptRequest`, `Agent::runner` and the `Standard`/`Extended` markers are removed. `AgentRunner` has every setter.
+- `agent.stream_prompt(p).await` → `agent.prompt(p).stream()`, and `agent.stream_chat(p, &history).await` → `agent.prompt(p).history(&history).stream()`.
+- Stream items carry `Item<StreamEvent>` instead of `StreamedAssistantContent` (see *Low-level streams*).
+
+```rust
+// 0.42
+    let mut stream = agent.stream_chat("Another one!", &history).await;
+    while let Some(item) = stream.next().await {
+        match item? {
+            MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text)) => print!("{}", text.text),
+            MultiTurnStreamItem::FinalResponse(response) => println!("\n\n{}", response.output()),
+            _ => {}
+        }
+    }
+```
+
+```rust
+// 0.43
+    let mut stream = agent.prompt("Another one!").history(&history).stream();
+    while let Some(item) = stream.next().await {
+        match item? {
+            MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::Text { text, .. })) => {
+                print!("{text}");
+            }
+            MultiTurnStreamItem::FinalResponse(response) => println!("\n\n{}", response.output()),
+            _ => {}
+        }
+    }
+```
+
+- `MultiTurnStreamItem::ToolExecutionCommitted` lost `internal_call_id`, since tool calls are correlated by `CallId`. `MultiTurnStreamItem::ToolCall { tool_call }` is new.
+- `PromptError` variants are unboxed, for example `MaxTurnsError { chat_history: Vec<Message>, prompt }`. `Agent::into_parts()` returns `Result<AgentParts, Agent>`.
+
+#### Choosing models at runtime
+
+0.42's runtime model swapping still works, but hooks now select models by **label** rather than by handle. Register extra models on the agent with `AgentBuilder::model_route(label, model)` (or start from `AgentBuilder::named_model(label, model)`), then return `ModelSelectionAction::select("label")`. `ModelSelection::{default_model, selected_model, previous_model}` are `ModelRef` labels. `agent.set_model(..)`/`with_model(..)` and a run's `using_model_value(..)` take any model value. `using_model(..)` now takes a label, and `set_model_handle`/`with_model_handle` are gone.
+
+```rust
+// 0.42
+// Hooks selected models by handle.
+struct FallbackOnRetry {
+    fallback: ModelHandle,
+}
+
+impl AgentHook for FallbackOnRetry {
+    fn on_model_select(&self, _ctx: &HookContext, event: ModelSelection<'_>) -> ModelSelectionAction {
+        if event.previous_model.is_some() {
+            ModelSelectionAction::select(self.fallback.clone())
+        } else {
+            ModelSelectionAction::continue_run()
+        }
+    }
+}
+```
+
+```rust
+// 0.43
+// Hooks select models by the label they were registered under.
+#[derive(Clone)]
+struct FallbackOnRetry;
+
+impl AgentHook for FallbackOnRetry {
+    fn on_model_select(&self, _ctx: &HookContext, event: ModelSelection<'_>) -> ModelSelectionAction {
+        // `previous_model` is set once an attempt has been issued in this run.
+        if event.previous_model.is_some() {
+            ModelSelectionAction::select("fallback")
+        } else {
+            ModelSelectionAction::continue_run()
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let mut agent = AgentBuilder::new(OpenAI::from_env()?.completion(openai::GPT_5_2))
+        .model_route("fallback", Anthropic::from_env()?.completion(anthropic::CLAUDE_SONNET_4_6))
+        .add_hook(FallbackOnRetry)
+        .build();
+
+    // Replace the default model for every future run, or override it for one run.
+    agent.set_model(Anthropic::from_env()?.completion(anthropic::CLAUDE_SONNET_4_6));
+    let answer = agent
+        .prompt("Summarize this in one line.")
+        .using_model_value(Gemini::from_env()?.completion(gemini::completion::GEMINI_2_5_FLASH))
+        .await?;
+    println!("{}", answer.output);
+    Ok(())
+}
+```
+
+#### Extractors and typed prompts
+
+```rust
+// 0.42
+    let client = openai::Client::from_env()?;
+    let extractor = client.extractor::<Person>(openai::GPT_5_2).build();
+
+    let person: Person = extractor.extract("Jane Smith is a data scientist.").await?;
+    println!("{person:?}");
+    let response = extractor.extract_with_usage("John Doe is a chef.").await?;
+    println!("{:?} ({} tokens)", response.data, response.usage.total_tokens);
+```
+
+```rust
+// 0.43
+    let client = OpenAI::from_env()?;
+    let extractor = ExtractorBuilder::<Person>::new(client.completion(openai::GPT_5_2)).build();
+
+    // `extract` returns a typed run: `.await` it, then read `.output`, `.usage`, `.completion_calls`.
+    let response = extractor.extract("Jane Smith is a data scientist.").await?;
+    println!("{:?} ({:?} tokens)", response.output, response.usage.total_tokens);
+```
+
+The removed methods map as follows:
+
+- `extract_with_usage(t)` → `extract(t).await?`
+- `extract_with_chat_history(t, h)` → `extract(t).history(h)`
+- `extractor.using_model(m).extract(t)` → `extractor.extract(t).using_model(m)`
+
+`ExtractionResponse { data, usage }` is now `TypedPromptResponse { output, usage, completion_calls }` (also at `rig::TypedPromptResponse`). `ExtractionError` is now `StructuredOutputError`, and `ExtractorRun` is removed. `agent.prompt_typed::<T>(p)` returns a `TypedRun<T>` with the same response.
+
+#### Calling a model directly
+
+`model.completion_request(p)….send()` and `CompletionRequestBuilder` are gone.
+
+```rust
+// 0.42
+    let reply = model
+        .completion_request("And of Italy?")
+        .preamble("Answer in one word.".to_string())
+        .temperature(0.2)
+        .max_tokens(16)
+        .send()
+        .await?;
+    let text: String = reply
+        .choice
+        .iter()
+        .filter_map(|content| match content {
+            AssistantContent::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect();
+```
+
+```rust
+// 0.43
+    let request = CompletionRequest::new("And of Italy?")
+        .preamble("Answer in one word.")
+        .temperature(0.2)
+        .max_tokens(16);
+    let reply = model.call(request).await?;
+    println!("{} ({:?} output tokens)", reply.text(), reply.usage.output_tokens);
+```
+
+A few related changes:
+
+- The `CompletionRequest::preamble` *field* and `without_preamble` are removed. The system prompt is a leading `Message::System` in `chat_history`, and `system_instructions()` reads it. The `.preamble(..)` *setter* still exists.
+- Build an assistant history turn with `response.message()`; for a tool result, `Message::tool_result(call_id, tool_name, output)` or `tool_call.result(content)`.
+- `raw_completion` and `raw_stream` are removed: read `response.raw`.
+- The capability `model.ndims()` is now `model.capabilities().ndims`.
+- `NormalizeCompletionResponse` and the provider `TryFrom<…> for CompletionResponse` impls are gone; the wire's decoder is the mapping.
+
+#### Low-level streams
+
+```rust
+// 0.42
+    let mut stream = model.completion_request("Tell me a three-sentence story.").stream().await?;
+    while let Some(chunk) = stream.next().await {
+        if let StreamedAssistantContent::Text(text) = chunk? {
+            print!("{}", text.text);
+        }
+    }
+```
+
+```rust
+// 0.43
+    let mut stream = model.stream("Tell me a three-sentence story.")?;
+    while let Some(item) = stream.next().await {
+        if let Item::Event(StreamEvent::Text { text, .. }) = item? {
+            print!("{text}");
+        }
+    }
+    // The same `CompletionResponse` that `model.call(..)` would have returned.
+    let response = stream.finish().await?;
+```
+
+The mapping:
+
+| 0.42 | 0.43 |
+|---|---|
+| `StreamingCompletionResponse` | `CompletionStream` = `Streamed<Completion>` |
+| `StreamedAssistantContent::Text(text)` | `Item::Event(StreamEvent::Text { text, .. })` |
+| `StreamedAssistantContent::ReasoningDelta { reasoning, .. }` | `Item::Event(StreamEvent::Reasoning { text, .. })` |
+| `StreamedAssistantContent::Reasoning { reasoning, .. }` | `StreamEvent::End { content: AssistantContent::Reasoning(..), .. }` |
+| `StreamedAssistantContent::ToolCallDelta { .. }` | none: a call's arguments arrive once, as `StreamEvent::Arguments` |
+| `StreamedAssistantContent::ToolCall { tool_call, .. }` | `StreamEvent::End { content: AssistantContent::ToolCall(..), .. }` (agent streams also emit `MultiTurnStreamItem::ToolCall`) |
+| `StreamedAssistantContent::Final(StreamFinal)` | `stream.finish().await` |
+| `StreamedAssistantContent::Unknown(payload)` | `Item::Unknown(payload)` |
+| `pause()` / `resume()` / `cancel()` / `is_paused()` | stop polling / drop the stream |
+
+A transport that refuses a request now yields the failure as the stream's first item, not as an error from `stream()`.
+
+#### Errors
+
+```rust
+// 0.42
+    match model.completion_request("Hello").send().await {
+        Ok(reply) => println!("{:?}", reply.choice),
+        Err(CompletionError::ProviderResponse(response)) => eprintln!("provider said {:?}: {}", response.status, response.body),
+        Err(CompletionError::HttpError(error)) => eprintln!("transport failed: {error}"),
+        Err(other) => eprintln!("{other}"),
+    }
+```
+
+```rust
+// 0.43
+    match model.call("Hello").await {
+        Ok(reply) => println!("{}", reply.text()),
+        // One error type for every operation; the variant is the classification.
+        Err(ProviderError::ProviderResponse(response)) => {
+            eprintln!(
+                "provider said {:?} (request id {:?}, retryable: {:?}): {}",
+                response.status, response.provider_request_id, response.transient, response.body
+            );
+        }
+        Err(ProviderError::Http(error)) => eprintln!("transport failed: {error}"),
+        Err(other) => eprintln!("{:?}: {other}", other.kind()),
+    }
+```
+
+The mapping:
+
+- **Variant renames:** `HttpError`→`Http`, `JsonError`→`Json`, `UrlError`→`Url`, `RequestError`→`Request`, `ResponseError`→`Response`, `ProviderError(msg)`→`Provider(msg)`.
+- **Verification:** `VerifyError::InvalidAuthentication` → `ProviderError::InvalidAuthentication(response)`.
+- **Model listing:** `ModelListingError::ApiError { status_code, message }` → `ProviderError::ProviderResponse(response)`, with the provider and path in `response.route`.
+- **Vector stores:** `VectorStoreError::ReqwestError` → `VectorStoreError::Http(http_client::Error)`.
+- **Auth:** `copilot::auth::AuthError::Http` and `chatgpt::auth::AuthError::Http` wrap `http_client::Error`.
+- **Struct literals:** `ProviderResponseError` literals need `route: None` and `headers: Option<HeaderMap>` (no longer boxed).
+- **Persistence:** `ProviderError` is not `Serialize`, so persist `error.report()`.
+
+#### Token usage
+
+```rust
+// 0.42
+    let usage = reply.usage;
+    // Plain u64 counters; 0 meant both "zero" and "not reported".
+    println!("input {} (cached {}), output {}", usage.input_tokens, usage.cached_input_tokens, usage.output_tokens);
+```
+
+```rust
+// 0.43
+    // Counters are `Option<u64>`: `None` = the provider did not report it.
+    let usage = reply.usage;
+    println!(
+        "input {} (cached {}), output {}",
+        usage.input_tokens.unwrap_or(0),
+        usage.cached_input_tokens.unwrap_or(0),
+        usage.output_tokens.unwrap_or(0)
+    );
+```
+
+- `Usage::new()` → `Usage::default()`, and `has_values()` → `is_reported()`.
+- Provider streaming usage fields (OpenAI Chat and Responses) are `Option` too.
+- **Values change** for Anthropic, its gateways and Bedrock (`input_tokens` includes cache reads and writes) and for the Gemini family (`output_tokens` includes thoughts). Dashboards that summed `input_tokens + cached_input_tokens` for Anthropic, or `output_tokens + reasoning_tokens` for Gemini, now double count.
+
+#### Vector stores and embeddings
+
+Stores no longer name the embedding model in their type. They take `impl Into<DynModel<Embedding>>`:
+
+```rust
+// 0.42
+// The index type names the embedding model.
+fn dictionary_agent(index: InMemoryVectorIndex<openai::EmbeddingModel, WordDefinition>, client: &openai::Client) -> Agent {
+    client.agent(openai::GPT_5_2).preamble("You are a dictionary assistant.").dynamic_context(1, index).build()
+}
+```
+
+```rust
+// 0.43
+// The index type no longer names the embedding model.
+fn dictionary_agent(index: InMemoryVectorIndex<WordDefinition>, client: &OpenAI) -> Agent {
+    AgentBuilder::new(client.completion(openai::GPT_5_2))
+        .preamble("You are a dictionary assistant.")
+        .dynamic_context(1, index)
+        .build()
+}
+```
+
+The affected types:
+
+- `InMemoryVectorIndex<M, D>` → `<D>`
+- `QdrantVectorStore<M>` → `QdrantVectorStore`
+- `LanceDbVectorIndex<M>`
+- `MongoDbVectorIndex<C, M>` → `<C>`
+- `MilvusVectorStore<M>`
+- `Neo4jVectorIndex<M>`
+- `PostgresVectorStore<Model>`
+- `ScyllaDbVectorStore<M>`
+- `S3VectorsVectorStore<M>`
+- `SqliteVectorStore<E, T>` → `<T>`
+- `SurrealVectorStore<C, Model>` → `<C>`
+- `HelixDBVectorStore<C, E>`
+- `VectorizeVectorStore<M>`
+
+Other changes in this area:
+
+- **Schema constructors take the width:** `SqliteVectorStore::new(conn, ndims)` and `Neo4jClient::create_vector_index(config, label, ndims)`.
+- **Filter builders** take `&str` keys and borrowed values (qdrant, milvus, surrealdb, lancedb, neo4j, postgres) or `impl Into<String>` keys (mongodb, scylladb, s3vectors, sqlite).
+- **rig-milvus** now exports `Filter` and `MilvusValue`.
+- **rig-sqlite** removes `SqliteError`, which was never constructed.
+- **Embedding and rerank responses** carry provider, model, identity and `raw`. `RerankResponse::model` is `Option<String>`.
+- **rig-memory** keys conversations by `ConversationId`; `conversation("id")` still accepts a string. `HeuristicTokenCounter::{gemini, openai}` are removed.
+
+#### Tools and MCP
+
+```rust
+// 0.42
+    // The closure took the (mutable) tool context first.
+    let add = DynamicTool::new("add", "Add x and y", json!({ "type": "object" }), |_context, args| {
+        Box::pin(async move {
+            let args: Args = serde_json::from_value(args).map_err(|error| ToolExecutionError::invalid_args(error.to_string()))?;
+            Ok(ToolOutput::json(json!(args.x + args.y)))
+        })
+    });
+```
+
+```rust
+// 0.43
+    // A context-free dynamic tool: the closure takes only the JSON arguments.
+    let add = DynamicTool::new(
+        "add",
+        "Add x and y",
+        json!({
+            "type": "object",
+            "properties": { "x": { "type": "integer" }, "y": { "type": "integer" } },
+            "required": ["x", "y"]
+        }),
+        |args| {
+            Box::pin(async move {
+                let args: Args = serde_json::from_value(args)
+                    .map_err(|error| ToolExecutionError::invalid_args(error.to_string()))?;
+                Ok(ToolOutput::json(json!(args.x + args.y)))
+            })
+        },
+    );
+```
+
+- `PortableDynamicTool` merged into `DynamicTool`: `new` for a context-free callback, and `new_with_context` when you need the `ToolContext`. `DynamicTool::from_portable`, `portable_tool_definition` and the `portable_dynamic_tool` builder methods are removed. `PortableTool` and `PortableToolEmbedding` stay.
+- **`ToolContext` values are typed and serializable.** Derive `ContextValue` (optionally `#[context(key = "…")]`) on anything you `insert`. `insert`, `get` and `require` return `Result<_, ToolContextError>`, and `MissingToolContext` is gone. Keep live shared state (connections, handles) in the tool struct itself:
+
+```rust
+// 0.43
+// Values placed in a `ToolContext` declare a key and are serializable, so runs can be persisted.
+#[derive(Clone, Serialize, Deserialize, ContextValue)]
+#[context(key = "app.user_id")]
+struct UserId(String);
+```
+
+- **MCP:** rig-agent's `rmcp` feature is gone; use the facade's `rmcp` feature (rig-rmcp). `rig::tool::rmcp::McpClientHandler` with a `ToolServer` handle works exactly as before. `AgentBuilder::rmcp_tool(s)(_with_timeout)` and `ToolServer::rmcp_tools*` are removed; register MCP tools as `DynamicTool`s (`McpTool` converts into one) or through `McpClientHandler`.
+- `#[rig::tool_macro]` → `#[rig::rig_tool]`.
+- `ToolServerHandle`'s registration methods are synchronous; drop the `.await`.
+
+#### Hooks
+
+- `on_tool_call`, `on_tool_result`, `on_completion_response` and `on_stream_response_finish` are removed. Gate effects (including tool calls) in `on_dispatch` and observe their results in `on_outcome`: `event.completion()` for model replies, or match the outcome for tools.
+- The hook event `CompletionCall` is renamed `CompletionCallEvent`; `rig::run::CompletionCall` keeps its name. `ToolCallAction`, `ToolResultAction` and `ToolResultEvent` are gone.
+- `InvalidToolCallContext` and `StreamedInvalidToolCall` gained a `reason`, so struct literals must add it. A hook that always returns `Repair` now gets the fail-closed report for malformed arguments.
+- `StepEventKind` has new variants; add arms to exhaustive matches.
+
+#### Messages and persisted state
+
+- Tool calls carry a required `CallId` (`Provider` or `Local`) and a `ToolName`. `ToolCallId` is removed, and `Message::tool_result` takes `(CallId, ToolName, output)`. On `wasm32-unknown-unknown`, `LocalCallId` needs `getrandom`'s `js` backend.
+- `AssistantContent::Reasoning` holds `Sealed` reasoning with an `Issuer`; read it with `open(&issuer)` or `open_for(&[..])`.
+- **Persisted histories and runs from 0.42 may not load.** The old `ToolCallId` shape no longer parses. `AgentRun` and rig-ecs checkpoints carry a format tag and reject unknown fields. `CompletionResponse`, `ModelTurn` and `CompletionCall` constructors take the `raw` document. Re-create persisted state, or migrate it.
+- `RunId` moved from `rig::agent` to `rig_core::id` and is a numeric counter id. `conversation(..)` takes `impl Into<ConversationId>`.
+- The conversions from provider wire messages into `Message` are removed: `TryFrom<anthropic::completion::Message>`, `TryFrom<cohere::completion::Message>`, `TryFrom<openai::Message>` and `From<ollama::Message>`.
+
+#### Cargo features and dependencies
+
+- **`rig-core`'s default features drop `reqwest`.** A standalone `rig-core` has no HTTP client unless you enable `reqwest` (`cargo add rig-core --features reqwest`). The `rig` facade still enables it by default. rig-core's `socks`, `reqwest-middleware*`, `websocket-rustls`, `websocket-native-tls` and `rayon` features are gone. `websocket` is now the protocol only; `tungstenite` adds the bundled backend.
+- **Facade features:**
+  - `reqwest` (default) routes `socks` and `reqwest-middleware*` through rig-reqwest.
+  - `websocket`, `websocket-rustls` and `websocket-native-tls` pull in rig-tungstenite.
+  - `rmcp` points at rig-rmcp and no longer implies `agent`.
+  - `typesafeai` is new.
+  - `discord-bot` is removed; copy `examples/discord_bot`, which also drops four `rustls-webpki` advisories from your dependency tree.
+  - `rayon` is removed; vector math is deterministic and sequential.
+- **rig-agent** drops its `rmcp` and `discord-bot` features.
+- **rig-vectorize** gains `rustls` (default) and `native-tls`.
+- **Toolchain:** the workspace builds on Rust 1.95.0 (was 1.94.0).
+
+#### Transports
+
+- To type-erase a transport, wrap it in `DynHttpClient::new(h)`. `with_middleware` attaches `HttpMiddleware`.
+- `rig::http_client::ReqwestClient` used to be a re-export of `reqwest::Client`. It is now rig-reqwest's newtype: wrap a configured client with `ReqwestClient::from(client)` and get it back with `inner()`. `ReqwestClient::default()` is the process-wide client, and if reqwest can't build it (for example, no CA store) every send reports the error instead of panicking.
+- `client.responses_websocket(model)` / `responses_websocket_builder(model)` → `openai_client.responses(model).responses_websocket().connect()` with the `websocket` feature, or `.connect_with(&backend)` for another `WebSocketClientExt`. rig-core's own `websocket-rustls`/`websocket-native-tls` features are gone; use the facade's features of the same names, or rig-tungstenite's `rustls`/`native-tls`.
+- `Transport` is no longer in the preludes; use `rig::driver::Transport`.
+
+#### Implementing a provider or a custom model
+
+`impl CompletionModel for MyModel` (with hand-written `completion` and `stream`) is replaced by:
+
+- `impl Wire` for your request/response shape (`describe`, `encode`, `decoder`)
+- `impl Decoder` over the reply frames
+
+The driver owns the transport, telemetry and observation. For a new operation, implement `Operation` plus a `Fold`. For scripted test models, `test_utils::MockCompletionModel` is now an alias for `Model<MockScript, MockRuntime>`, built with `from_turns(..)`. See the `rig_core::wire` module docs and `examples/frozen_api` (`p5_local_operation.rs`, `p6_http_operation.rs`).
+
+#### Smaller removals and renames
+
+- **Removed model constants:**
+  - Deprecated ones: `deepseek::DEEPSEEK_CHAT`/`DEEPSEEK_REASONER` (use `DEEPSEEK_V4_FLASH`/`DEEPSEEK_V4_PRO`), Cohere's `COMMAND*`, and Mistral's `CODESTRAL_MAMBA`, `MISTRAL_NEMO`, `MISTRAL_SABA`, `PIXTRAL_LARGE` and `PIXTRAL_SMALL`.
+  - Retired Groq and Moonshot ids. The old strings still work if you pass them yourself, but the providers reject them.
+- **llama.cpp:** `providers::llamafile` → `providers::llamacpp`.
+- **Modality request builders**:
+  - Required values are constructor arguments: `TranscriptionRequestBuilder::new(model, data)` or `from_file(model, path)?`, `ImageGenerationRequestBuilder::new(model, prompt)`, `AudioGenerationRequestBuilder::new(model, text, voice)`.
+  - `additional_params(impl Into<Option<Value>>)` merges on every builder, and `additional_params_opt` is removed.
+  - Modality responses lost their type parameter and `response` field.
+- **Telemetry:** `CompletionOperation` → `GenAiOperation` (it covers all ten operations), and `CompletionSpanBuilder` → `SpanBuilder`. `ProviderResponseExt` is removed.
+- **Candle:** the `LlamaModel` and `ModelFamily` aliases are removed; use `CandleModel` and `ConversationProtocol`.
+- **ChatGPT and Copilot:** the `AuthContext` credential fields are `Secret`.
+- **Responses:** `Output` and `InputContent` gained `Compaction` variants, so exhaustive matches need an arm.
+- **rig-core:** the `if_wasm!`/`if_not_wasm!` macros are removed. The `http_client::retry` (`RetryPolicy`, `ExponentialBackoff`, `DEFAULT_RETRY`) and `http_client::sse` modules are removed; retry transient failures in a hook or with `reqwest-middleware`.
+
+### Other API Additions
+
+- `CompletionResponse::{text, reasoning, tool_calls}`; `CompletionRequest` from `&str`/`String`/`Message`/`Vec<Message>`.
+- `Model::{name, id, capabilities, erase}` and `DynModel<Op>`.
+- `providers::registry::{Format, ProviderId, ProviderConfig, ProviderRef}`.
+- `AgentRunner::run_channel`, `RunEvents`; `Agent::resume`; `AgentBuilder::record_to`.
+- `ToolServerHandle::{snapshot, static_tool_defs, toolset}` for synchronous registry reads, and `ToolSet: Clone`. `rig::tool` also exports `ToolCatalog`, `ToolLease`, `RegisteredTool`, `ToolDispatch`, `ErasedTool` and `execute_tool`.
+- `rig::run` / `rig_agent::run`: `AgentRun`, `RunSpec`, `RunEntry`, `TurnTools`, `prepare_request`.
+- `rig_core::transcript::validate_canonical` checks that tool calls and results pair up in externally sourced histories.
+- `http_client::HttpMiddleware` and `DynHttpClient::with_middleware`.
+- `completion::{CacheCost, CacheRates}`.
+- `gemini::cached_content`, `gemini::caching` and `ThoughtReplay`.
+- `ErrorReport` and `ErrorKind` at the crate root; `ErrorDetail::MalformedToolInput`.
+- `rig_core::observe::{scrub_diagnostic, diagnostic_url_secrets}` for hosts that persist their own diagnostics.
+- `openai::wire::Quirks::{without_stream_usage, without_response_format, reliable_reasoning_count}` and `Dialect::with_quirks`, for tuning OpenAI-compatible dialects.
+- `rig_derive::ContextValue`.
+- `rig_candle::pose`.
+- `rig_cassette::http::skip_when_recording`; `CassetteSpec::expects_account_failure`.
+
+### Behavior Changes
+
+These compile as before but act differently:
+
+- **Token usage values** follow one contract (see above): Anthropic/Bedrock input includes cache tokens, and Gemini output includes thoughts. Gemini input includes `toolUsePromptTokenCount`.
+- **OpenAI Responses tools** send `strict: false` explicitly. If you relied on OpenAI's implicit strict mode, set strict tools yourself.
+- **`claude-sonnet-4-6` defaults to 128K `max_tokens`**.
+- **Other providers' reasoning is dropped from requests** instead of being replayed.
+- **Truncated streams are errors.** A stream cut before its terminal record, or a reply without a finish reason, is `ProviderError::Truncated` (retryable) instead of a short successful answer.
+- **Tool calls stream whole**, and **`choice` is in the order parts started**.
+- **Malformed streamed tool arguments** consult `on_invalid_tool_call` before failing.
+- **Gemini prompt blocks:** `SAFETY`/`BLOCKLIST`/`PROHIBITED_CONTENT` is a refusal (`refusal: true`, with the reason as the code), and `OTHER` or unknown is transient.
+- **Anthropic mid-conversation system messages** are moved, not hoisted.
+- **Request-building failures** report `ErrorKind::Request` on every provider.
+- **`CompletionResponse::raw`** is the provider's verbatim reply document, not a re-serialization of Rig's parse.
+- **Bedrock document names** are `document-<hash>` instead of random UUIDs.
+- **The bundled reqwest client** reports a build failure (such as a missing CA store) on the first request instead of panicking.
+- **Telemetry:** every modality opens a `gen_ai` span. Completion spans record `rig.provider_request_id`. `gen_ai.system_instructions` is actually recorded now.
+- **Vector-store scores** are bit-identical from run to run.
+
+### Bug Fixes
+
+- **Prompt caching could never hit** on Gemini requests with tools, or Cohere requests with documents, because map keys serialized in random order.
+- **Gemini Interactions usage** dropped thought, cached and tool-use tokens, so cache hit rates read as zero. Vertex AI hard-coded `reasoning_tokens: 0`.
+- **llama.cpp** served a specific-function `tool_choice` as `auto`. Images in tool results were refused for every OpenAI-compatible server.
+- **`from_env()` panicked** on hosts with no CA store. The bundled client now reports the failure as an error instead.
+- **Tool-call identity:** Vertex, gRPC Gemini and Candle gave every id-less call the same position, so two such calls in one turn could collide.
+- **A truncated reasoning-only turn** was committed to history, and **images were dropped** when a streamed turn was regrouped around a tool call.
+- **OpenAI Responses** silently enabled strict mode (reported by @KumaCrypto). The Groq and Moonshot constants were all retired upstream (reported by @Muhammad-Owais-Warsi, @loony-lisa and @Parikalp-Bhardwaj). Sonnet 4.6 was capped at 64K (@scadoshi).
+- **A Responses reply with odd echoed metadata failed to decode entirely** (@BANG404, @mzdora). **rig-postgres generated invalid SQL** for `member`, single-condition and threshold searches (reported and diagnosed by @jackthepunished).
+- **One malformed streamed tool call killed the whole agent run** (@tiswas247).
+- **Unary/streaming divergences.** Moving every provider onto one decoder per wire closed the gaps between the two paths (14 in all).
+  - Perplexity streams were misread.
+  - A unary tool call cut mid-string destroyed the turn.
+  - A stalled pagination cursor looped forever.
+  - The Responses in-band `error` event was skipped.
+  - Mid-stream transport failures lost status, headers and body.
+  - OpenRouter cache writes were lost.
+  - `embedding(model, None)` dropped `dimensions`.
+  - The telemetry span named the wrong model on override.
+  - …and more.
+- **Ten vector stores could not compile for wasm,** and a standalone `rig-vectorize` build had no TLS.
+- **Eleven downstream-consumer defects**:
+  - `#[derive(Embed)]` called an unrelated inherent `embed`, and emitted wrong members for tuple fields.
+  - `#[rig_tool]` arguments named `args`/`_context` were shadowed.
+  - A native-TLS-only `reqwest-middleware` selection hid the client.
+  - Generated in-memory store ids overwrote explicit ones.
+  - Angular distance was NaN for identical or opposite vectors.
+  - rig-memory window truncation kept orphan tool results.
+  - The EPUB loader deleted entity references.
+  - Vector-store errors lost response facts.
+  - Boxed errors lost their `source()` chains.
+  - Vertex's raw response type was unnameable.
+- **Groq tool loops with reasoning models** failed on the second call, and **Ollama** dropped tool-call ids.
+- **Reasoning was replayed to providers that could not read it,** and Bedrock requests with documents were never byte-stable, so they could not hit a prompt cache.
+- **Gemini answer-text signatures** moved to a synthesized thought part, Vertex dropped them, and OpenRouter's Responses route dropped Claude signatures.
+- **An Interactions stream with `store: false` ended at its first status update,** and an Anthropic stream lost its cache counters when the terminal delta omitted them (with @allenrchan).
+- **Rig-caused 400s on the new Anthropic and OpenAI models:** the extractor's forced tool choice, GPT-6 Chat tools, and system-message hoisting.
+- **Resolved ChatGPT/Copilot credentials** appeared in `Debug` output.
+
+### Performance, Packaging, Docs and DX
+
+- **Smaller dependency graphs.**
+  - rig-core depends on neither reqwest nor tokio.
+  - Fourteen unused dependencies are removed across eleven crates, and rig-bedrock no longer builds the `rig-derive` proc-macro for its users.
+  - `serenity`, `rayon`, `as-any` and `eventsource-stream` are gone from the workspace.
+- **The `rig` package ships its source, not the repository.** The facade tarball is 13 files and 417 KiB.
+- **Fewer allocations.** Two ownership audits and three idiomatic-Rust sweeps removed dead clones, whole-batch copies and redundant bounds. The provider layer lost several thousand lines of duplicated code.
+- **Docs.** Every production doc comment was rewritten to one style, and doc examples that were `ignore`d now compile as `no_run`. New and updated examples: `agent_no_tokio`, `http_middleware`, `frozen_api`, `candle_pose`, `typesafeai_chat` and `typesafeai_triage`.
+- **Contributing is easier.**
+  - Rig no longer asks you to open an issue first, keep PRs small, or avoid drafts.
+  - Changelog and migration notes go in the PR description instead of conflicting edits to `CHANGELOG.md`.
+  - A lean dev profile and a `local` nextest profile cut local build sizes from tens of gigabytes.
+  - Local checks are minimal, and CI does the full verification.
+- **Tests.**
+  - The cassette corpus grew from 1,793 to 2,995 provider recordings, plus 2,058 replayable effect-log goldens.
+  - 1,758 provider-matrix tests are generated from descriptors.
+  - Inline test modules moved to sibling files; `runner.rs` went from 11.7k lines to 1.1k.
+
+---
+
+## 0.41 → 0.42
 
 ### Raw OpenAI-compatible streaming terminals gain `logprobs`
 
@@ -2152,7 +4061,7 @@ There is no replacement crate and no bespoke non-empty type.
 
 The type promised something untrue. It asserted "at least one item" on a
 response path where zero items is a real outcome, so the code fabricated data to
-satisfy it (see [Silent behavior changes](#next)). Its `is_empty()` returned a
+satisfy it (see [Silent behavior changes](#042)). Its `is_empty()` returned a
 hardcoded `false`, which meant every caller asking a list whether it was empty
 got the wrong answer with no compile error — two live defects were hiding behind
 that, one of them a provider guard that could never fire.
@@ -2297,7 +4206,7 @@ Public stream items change accordingly (breaking):
   `provider_id: Option<String>` carrying the provider-issued item id when
   one exists. The previous `rig:reasoning:0`-style renderings (and their
   one-stream uniqueness caveat) are gone; the caveat documented for
-  `0.41 → next` is superseded.
+  `0.41 → 0.42` is superseded.
 - `StreamedAssistantContent::ToolCallDelta` loses its `id` field:
   `internal_call_id` is the correlator, and provider ids arrive on the
   completed `ToolCall`. The agent hook payload `ToolCallDelta` loses
@@ -2996,321 +4905,6 @@ merged `RequestPatch` and the previous model, and may pick a different handle
 per model call). `CompletionModel::capabilities()` is captured by value when
 the handle is created.
 
-### Borrow-shaped signatures: filter builders, rmcp registration, streaming prompt construction
-
-An ownership audit converted signatures that took owned values they never
-consumed into borrows, removing the caller-side clones they forced. Call
-sites passing string literals compile unchanged; sites that built an owned
-`String`/`Value`/`Vec` just to hand it over now pass a reference (and can
-usually stop building the owned value at all).
-
-- Vector-store filter builders take `&str` keys (and, where the value was
-  only serialized, borrowed values): `rig_qdrant::QdrantFilter`
-  (`exists`/`is_null`/`is_empty`/the four `range_*`, values now
-  `&serde_json::Value`), `rig_milvus::Filter` (`gte`/`lte`/`in_values`/
-  `not_in`/`like`/`array_*`), `rig_surrealdb::SurrealSearchFilter`
-  (`contains`/`all`/`any`/`member`/geometry ops, values now `&Value`),
-  `rig_lancedb::LanceDBFilter`, `rig_neo4j::Neo4jSearchFilter`,
-  `rig_postgres::PgSearchFilter`, and `rig_vectorize::VectorizeFilter`
-  (`ne`/`gte`/`lte` take `&Value`; `in_values`/`nin` take `&[Value]`).
-- `MilvusVectorStore::auth(&str, &str)` (was `String, String`).
-- `SqliteVectorStore::add_rows_with_txn` takes `&[(T, Vec<Embedding>)]`.
-- `StreamingPromptRequest::new(&Agent, …)` (was `Arc<Agent>`) — it only ever
-  read through the `Arc`; callers holding an `Arc` pass `&arc`.
-- `ToolServer::rmcp_tools` / `rmcp_tools_with_timeout` and the corresponding
-  `AgentBuilder` wrappers take `client: &ServerSink` (each registered tool
-  clones it anyway); the single-tool `rmcp_tool_with_timeout` still consumes
-  the sink it stores. Callers drop their `peer.clone()`.
-- `rig_vertexai::types::completion_response::map_finish_reason(&FinishReason)`.
-- `VectorStoreIndex::top_n`'s bound is spelled `DeserializeOwned` instead of
-  `for<'a> Deserialize<'a>` — the same bound, so implementations and callers
-  are unaffected; only the spelling changed.
-
-### Transcription, image-generation and audio-generation responses are concrete and normalized
-
-The same argument #2257 applied to completions now applies to the three
-remaining response-bearing model traits. `TranscriptionModel`,
-`ImageGenerationModel` and `AudioGenerationModel` lose `type Response`, and
-`TranscriptionResponse<T>`, `ImageGenerationResponse<T>` and
-`AudioGenerationResponse<T>` lose their parameter. Each is now a concrete
-struct carrying the payload plus the metadata every provider can report:
-
-```rust
-pub struct TranscriptionResponse {
-    pub text: String,                    // ImageGenerationResponse: image: Vec<u8>
-    pub usage: Usage,                    // AudioGenerationResponse: audio: Vec<u8>
-    pub provider: String,                // stable descriptor name, always set
-    pub model: Option<String>,           // provider-reported model, when any
-    pub response_id: Option<String>,
-    pub provider_request_id: Option<String>,
-    pub raw: serde_json::Value,          // the provider's own payload, serialized
-}
-```
-
-plus `identity() -> ResponseIdentity`. Delete the type argument from your
-annotations — `TranscriptionResponse<openai::TranscriptionResponse>` becomes
-`TranscriptionResponse` — and the parameter from
-`TranscriptionRequestBuilder<M, D>` / `ImageGenerationRequestBuilder<M, P>` /
-`AudioGenerationRequestBuilder<M, T, V>` callers, whose `send()` now returns
-the concrete type.
-
-**The `response` field is gone.** Everything a caller used to read off it has
-a named home or lives behind the raw route:
-
-| 0.42 read                                    | now                                                          |
-| -------------------------------------------- | ------------------------------------------------------------ |
-| `r.response.text` (OpenAI / OpenRouter)      | `r.text`                                                     |
-| `r.response.usage` token counts              | `r.usage` (`Usage`, zero when the provider reports none)     |
-| `r.response.usage` duration-billed seconds   | `raw_transcription(..)` / `r.raw["usage"]["seconds"]`        |
-| `r.response.model` (Mistral) / `model_version` (Gemini) | `r.model`                                         |
-| `r.response.response_id` (Gemini)            | `r.response_id`                                              |
-| `r.response.id` (Venice image)               | `r.raw["id"]`, or `raw_image_generation(..).id`              |
-| anything else provider-specific              | `r.raw` (deserialize it into the provider type), or `raw_*`  |
-
-Every concrete provider model gains inherent `raw_transcription`,
-`raw_image_generation` or `raw_audio_generation` returning the provider's
-native type from the same request, transport, parser and error path as the
-normalized call — the same escape hatch `raw_completion` is for completions,
-designed in up front this time rather than restored by a follow-up. For
-providers whose endpoint answers with bytes and no JSON envelope (Hugging Face
-images, every OpenAI-style text-to-speech endpoint) the native type is the
-bytes and `raw` on the normalized response stays `Null`; `raw_*` is the typed
-route.
-
-Normalization is a trait, implementable out of tree: replace
-`impl TryFrom<MyPayload> for TranscriptionResponse<MyPayload>` with
-
-```rust
-impl NormalizeTranscriptionResponse for MyPayload {
-    fn normalize(self, provider: &str) -> Result<TranscriptionResponse, TranscriptionError> {
-        Ok(TranscriptionResponse::new(self.text, provider).with_usage(..))
-    }
-}
-```
-
-(`NormalizeImageGenerationResponse` / `NormalizeAudioGenerationResponse`
-likewise). The provider name is an *input*: several providers share one wire
-shape, and a conversion that hardcoded a name would mislabel every provider
-but one. Custom models implement only the operation:
-
-```rust
-impl TranscriptionModel for MyModel {
-    async fn transcription(&self, req: TranscriptionRequest)
-        -> Result<TranscriptionResponse, TranscriptionError> { /* ... */ }
-}
-```
-
-The three traits also drop `Clone` from their supertraits (and
-`AudioGenerationModel` drops `Sized`), exactly as `CompletionModel` did:
-`transcription_request()` / `image_generation_request()` /
-`audio_generation_request()` gate on `where Self: Sized + Clone`, and each
-trait is implemented for `Arc<M>` by forwarding, so wrapping a non-`Clone`
-model in an `Arc` works through every generic API. Generic code that cloned a
-model through one of these traits must bound `M: …Model + Clone` explicitly.
-
-The shared OpenAI-style drivers now read the provider's transport request-id
-header onto `provider_request_id` where the provider has one (OpenAI, Groq:
-`x-request-id`; Mistral: `mistral-correlation-id`; Bedrock: the SDK's
-`x-amzn-RequestId`). Gemini, Hugging Face, Azure, Venice, xAI and OpenRouter
-report none on these endpoints; `None` is the documented outcome.
-
-### Construction moved off every model trait
-
-`EmbeddingModel`, `RerankModel`, `TranscriptionModel`, `ImageGenerationModel`
-and `AudioGenerationModel` lose `type Client` and `fn make`, matching
-`CompletionModel`. Delete both from your impls. `EmbeddingModel::MAX_DOCUMENTS`
-is now `fn max_documents(&self) -> usize` (a constant cannot survive type
-erasure — see the next section). `RerankModel::MAX_DOCUMENTS` and
-`ImageEmbeddingModel::MAX_DOCUMENTS` follow in the "Embedding and rerank
-responses" section below.
-
-The capability client traits construct models themselves:
-`EmbeddingsClient::embedding_model` / `embedding_model_with_ndims`,
-`RerankingClient::rerank_model`, `TranscriptionClient::transcription_model`,
-`ImageGenerationClient::image_generation_model` and
-`AudioGenerationClient::audio_generation_model` (which loses its default body)
-are required methods that call your model's own constructor. Call sites —
-`client.embedding_model(..)`, `client.transcription_model(..)` — are
-unchanged.
-
-A provider extension built on the generic `rig::client::Client<Ext, H>`
-implements the new public hooks instead: `ConstructEmbeddingModel<C>`
-(`construct(client, model, ndims: Option<usize>)`), `ConstructRerankModel<C>`,
-`ConstructTranscriptionModel<C>`, `ConstructImageGenerationModel<C>`,
-`ConstructAudioGenerationModel<C>` (`construct(client, model)`), all beside
-`ConstructCompletionModel`. The blanket capability-client impls over
-`Client<Ext, H>` bound on them, so an out-of-tree extension reaches
-`embedding_model`/`transcription_model`/… through public API only — the
-orphan rule that forced `ConstructCompletionModel` to be public applies to
-every modality, and this closes the hole. `rig-core` ships a compile probe of
-exactly that (`client::external_modality_extension_probe`).
-
-Tests that called `Model::make(&client, ..)` directly should go through the
-client: `client.embedding_model(..)`.
-
-`ImageEmbeddingModel` also drops `Clone` from its supertraits.
-
-### Vector stores erase the embedding model at construction
-
-Every vector store and index lost its embedding-model type parameter — the
-structural twin of `Agent<M>` losing its model:
-
-```rust
-// 0.42
-let index: QdrantVectorStore<openai::EmbeddingModel> = QdrantVectorStore::new(client, model, ..);
-let index: InMemoryVectorIndex<openai::EmbeddingModel, Doc> = store.index(model);
-// now
-let index: QdrantVectorStore = QdrantVectorStore::new(client, model, ..);
-let index: InMemoryVectorIndex<Doc> = store.index(model);
-```
-
-Constructors take `impl EmbeddingModel + 'static` and erase it once into
-`rig::embeddings::EmbeddingModelHandle`, a cloneable handle that itself
-implements `EmbeddingModel`; `ndims()` and `max_documents()` are captured by
-value at erasure. Affected: `InMemoryVectorIndex<M, D>` → `<D>`,
-`QdrantVectorStore<M>`, `LanceDbVectorIndex<M>`, `ScyllaDbVectorStore<M>`,
-`MongoDbVectorIndex<C, M>` → `<C>`, `MilvusVectorStore<M>`,
-`VectorizeVectorStore<M>`, `Neo4jVectorIndex<M>`, `S3VectorsVectorStore<M>`,
-`PostgresVectorStore<M>`, `SqliteVectorStore<E, T>` / `SqliteVectorIndex<E, T>`
-→ `<T>`, `SurrealVectorStore<C, M>` → `<C>`, `HelixDBVectorStore<C, E>` →
-`<C>`. Construction call sites are unchanged; delete the parameter from type
-annotations. Heterogeneous collections of indexes (`Vec<Box<dyn
-VectorStoreIndex<Filter = _>>>`) no longer need a provider name per element.
-
-Unlike `Agent`, this is **not** a swapping mechanism and there is no
-`set_model`: an index populated under one model is only meaningful under that
-model, so the handle a store holds is fixed for its lifetime. The payoff is
-type ergonomics and dyn-storability, nothing more. `EmbeddingsBuilder<M, T>`
-keeps its parameter: it is transient and dropped at `build()`, like
-`CompletionRequestBuilder`.
-
-### Embedding and rerank responses are concrete and normalized; `embed_texts_with_usage` is `embed_texts_response`
-
-The two response types #2385 left alone get the same treatment as every
-other modality. `EmbeddingResponse` and `RerankResponse` now carry the full
-normalized metadata:
-
-```rust
-pub struct EmbeddingResponse {           // RerankResponse: results: Vec<RerankResult>
-    pub embeddings: Vec<Embedding>,
-    pub usage: Usage,                    // zero when the provider reports none
-    pub provider: String,                // stable descriptor name, always set
-    pub model: Option<String>,           // provider-reported model, when any
-    pub response_id: Option<String>,
-    pub provider_request_id: Option<String>,
-    pub raw: serde_json::Value,          // the provider's own payload, serialized
-}
-```
-
-plus `identity() -> ResponseIdentity`, and a new `ImageEmbeddingResponse` of
-the same shape for `ImageEmbeddingModel`. Both types derive `Serialize` /
-`Deserialize`; construct with `EmbeddingResponse::new(embeddings, provider)`
-and the `with_*` setters.
-
-**`EmbeddingModel::embed_texts_with_usage` is renamed `embed_texts_response`**
-(and `embed_text_with_usage` → `embed_text_response`): it now returns identity
-and the raw payload, not only usage, so the old name would lie. It is also now
-the **required** method — `embed_texts`, `embed_text` and
-`embed_text_response` are defaults derived from it. Custom models flip what
-they implement:
-
-```rust
-// 0.42
-impl EmbeddingModel for MyModel {
-    const MAX_DOCUMENTS: usize = 100;
-    fn ndims(&self) -> usize { 768 }
-    async fn embed_texts(&self, texts: impl IntoIterator<Item = String> + Send)
-        -> Result<Vec<Embedding>, EmbeddingError> { /* ... */ }
-}
-// now
-impl EmbeddingModel for MyModel {
-    fn max_documents(&self) -> usize { 100 }
-    fn ndims(&self) -> usize { 768 }
-    async fn embed_texts_response(&self, texts: impl IntoIterator<Item = String> + Send)
-        -> Result<EmbeddingResponse, EmbeddingError> {
-        Ok(EmbeddingResponse::new(/* embeddings */ vec![], "my-provider"))
-    }
-}
-```
-
-(The other direction is impossible: a defaulted full method forwarding to
-`embed_texts` would have to invent the provider name.) `ImageEmbeddingModel`
-likewise: `embed_images_response` is required, `embed_images` / `embed_image`
-derive from it, and `MAX_DOCUMENTS` is `fn max_documents()`.
-
-**`RerankModel::MAX_DOCUMENTS` is `fn max_documents(&self) -> usize`** (a
-constant cannot survive erasure), and **`RerankResponse::model` is now
-`Option<String>`** — a server that omits `model` still produced a ranking,
-and `None` is the honest report where the shared Jina-shaped driver used to
-substitute the requested name. Replace `response.model == "x"` with
-`response.model.as_deref() == Some("x")`.
-
-Normalization is a trait, implementable out of tree: `NormalizeEmbeddingResponse`
-(`normalize(self, provider: &str, documents: Vec<String>)` — the request's
-inputs, in order, for `Embedding::document`), `NormalizeImageEmbeddingResponse`,
-`NormalizeRerankResponse` (`normalize(self, provider: &str)`). Every concrete
-provider model gains inherent `raw_embed_texts` / `raw_embed_images` /
-`raw_rerank` returning the provider's native type from the same request,
-transport, parser and error path, and the normalized response carries that
-value serialized in `raw`. Where the provider answers one request per input
-(Cohere images, Bedrock embeddings, Gemini gRPC) the raw route returns a
-`Vec` of answers; where there is no JSON payload at all (FastEmbed in-process,
-Gemini gRPC's prost messages) `raw` stays `Null` and `raw_*` is the typed
-route. Provider wire types that were private are now public where they are
-the raw route's return type (`openai::CompatibleEmbeddingResponse`,
-`copilot::CopilotEmbeddingResponse`, `cohere::{ImageEmbeddingResponse,
-FloatEmbeddings}`, the Jina rerank types in `providers::internal::rerank`,
-`gemini::embedding::gemini_api_types`), and gain `Serialize`.
-
-The shared OpenAI-compatible embeddings driver reads `x-request-id` onto
-`provider_request_id` for OpenAI (and Copilot does for its route); the other
-embedding and rerank endpoints report no transport id, and `None` is the
-documented outcome.
-
-`EmbeddingsBuilder::build`'s result is **unchanged**: the builder aggregates
-many model calls, so there is no single response identity. Identity is
-per-call — call `embed_texts_response` on the model directly when you need
-it.
-
-### `RerankModelHandle` and `ImageEmbeddingModelHandle`
-
-`rig::rerank::RerankModelHandle` and `rig::embeddings::ImageEmbeddingModelHandle`
-erase any `RerankModel + 'static` / `ImageEmbeddingModel + 'static`, exactly
-as `EmbeddingModelHandle` does for `EmbeddingModel`: cloneable, themselves
-implementing the trait, `max_documents` / `ndims` captured by value at
-erasure, the model never cloned, no `set_model`. No in-tree type held a
-`RerankModel` or `ImageEmbeddingModel` generically, so nothing lost a
-parameter; the handles exist for dyn-storability and parity.
-
-Image embedding deliberately gets **no** capability client (`ImageEmbeddingsClient`)
-or `Construct*` hook: one provider (Cohere) offers it, through the inherent
-`cohere::Client::image_embedding_model()`, which is unchanged.
-
-### `ModelLister` construction moved to `ConstructModelLister`
-
-`ModelLister<H>` loses `type Client` and `fn new` — the last construction
-associated type on any trait in `rig-core`. Delete both from your impls and
-add the public hook beside them:
-
-```rust
-impl<H> ConstructModelLister<Client<MyExt, H>> for MyLister<H>
-where
-    H: Clone,
-{
-    fn construct(client: &Client<MyExt, H>) -> Self {
-        Self { client: client.clone() }
-    }
-}
-```
-
-The blanket `ModelListingClient` impl over `Client<Ext, H>` bounds on it, so
-an out-of-tree extension reaches `list_models` through public API only (the
-`client::external_modality_extension_probe` test asserts it). `construct`
-takes `&C`, like every other `Construct*` hook. `ModelLister` keeps its `H`
-parameter — the transport, not a provider leak. Call sites
-(`client.list_models()`) are unchanged; code that called `MyLister::new(client)`
-directly calls `MyLister::construct(&client)`.
-
 ### Assistant content is tagged and provider extras are a named field
 
 `AssistantContent` serializes with a `"type"` tag, exactly like `UserContent`
@@ -3610,7 +5204,7 @@ toolset.add_retrieved_tool(Subtract);
 **Superseded guidance.** The 0.40 → 0.41 registration table below, and its row
 in the appendix, name `ToolSetBuilder::retrieved_tool` and
 `ToolSetBuilder::dynamic_tool(DynamicTool)` as the destination of the 0.41
-renames. Those rows stay accurate as history for 0.41; on `next` the
+renames. Those rows stay accurate as history for 0.41; on 0.42 the
 destination is the matching `ToolSet::add_*` method.
 
 **`ProviderResponseExt` loses two items.** `type OutputMessage` and
@@ -3892,7 +5486,7 @@ takes any `impl Into<String>`, so the constants are a convenience, not a gate.
 **Seven surviving constants silently changed value.** These still compile, and
 now name a US cross-region inference profile:
 
-| Constant | 0.41 | next |
+| Constant | 0.41 | 0.42 |
 | --- | --- | --- |
 | `DEEPSEEK_R1` | `deepseek.r1-v1:0` | `us.deepseek.r1-v1:0` |
 | `META_LLAMA_3_3_70B_INSTRUCT` | `meta.llama3-3-70b-instruct-v1:0` | `us.meta.llama3-3-70b-instruct-v1:0` |
@@ -3974,7 +5568,7 @@ over a literal.
 **Superseded guidance.** Earlier sections of this file and the changelog
 describe types as `#[non_exhaustive]` and tell you to construct them through
 constructors for that reason. Those passages remain accurate as history for the
-releases they document, but the attribute claim no longer holds on `next`:
+releases they document, but the attribute claim no longer holds on 0.42:
 "Core errors are `#[non_exhaustive]`" (0.40→0.41), `ProviderResponseError`
 (#2314), `CompletionResponse`, `ProviderCapabilities`, `ModelTurn`/`StreamedTurn`
 (#2322), `MultiTurnStreamItem`, `DocumentSourceKind`, `RerankError`,
@@ -5146,43 +6740,138 @@ Renamed or relocated items, for searching.
 
 | Old | New | Version |
 | --- | --- | --- |
-| `rig_agent::agent::model::ModelHandle` | `rig_core::completion::ModelHandle` (re-exported at `rig_agent::ModelHandle` / `rig_agent::agent::ModelHandle`) | next |
-| `rig_agent::tool::{Tool, ToolEmbedding, ErasedTool, DynamicTool, ToolSet, tool_definition}` | `rig_core::tool::{..}` (module `rig_core::tool::contextual`; re-exported at the old paths and at `rig::tool::*` without the `agent` feature) | next |
-| `rig_agent::tool::server::ToolRegistrySnapshot` (struct) | `pub type ToolRegistrySnapshot = rig_core::tool::ToolCatalog` | next |
-| `rig_agent::agent::hook::RequestPatch` | `rig_agent::run::patch::RequestPatch` (re-exported at the old path) | next |
-| `#[rig_tool]` contextual-tool expansion target `rig_agent::tool::Tool` | `rig_core::tool::Tool` (the macro's "contextual tools require `rig`/`rig-agent`" error is gone) | next |
-| `rig_core::OneOrMany<T>` (and the `one_or_many` module, both prelude re-exports) | `Vec<T>` — no replacement type; see the conversion table in "0.41 → next" | next |
-| `rig_core::EmptyListError` | none — use `message::require_non_empty` where you relied on the rejection | next |
-| `one_or_many::string_or_option_one_or_many` | none — `json_utils::string_or_vec` into a `Vec<T>`, then `message::non_empty` where the `Option` carried "absent" | next |
-| `ToolSet::builder()` / `ToolSetBuilder` (whole type) | `ToolSet::default()` plus `add_tool` / `add_dynamic_tool` / `add_portable_dynamic_tool` / `add_retrieved_tool` | next |
-| `ModelListingError::{RateLimitError, ServiceUnavailable, UnknownError}` and the `auth_error` / `rate_limit_error` / `service_unavailable` / `unknown_error` constructors | `ApiError` (build the surviving variants directly) | next |
-| `telemetry::ProviderResponseExt::{OutputMessage, get_output_messages}` | none — `get_text_response` is kept | next |
-| `json_utils::null_or_vec` | `json_utils::null_or_default` | next |
-| `http_client::with_bearer_auth` | `http_client::bearer_auth_header` on the builder's header map | next |
-| `InMemoryVectorStoreBuilder::documents_with_id_f` | `documents_with_ids`, or the store's own `from_documents_with_id_f` / `add_documents_with_id_f` | next |
-| `InMemoryVectorStore::get_document` | `iter()` | next |
-| `message::Reasoning::optional_id` | the public `id` field, or `with_id` | next |
-| `message::DocumentSourceKind::{raw, unknown}` | `DocumentSourceKind::Raw(..)` / `::Unknown` (the variants stay) | next |
-| `message::Message::tool_result_with_call_id` | `UserContent::tool_result_with_call_id(item_id, call_id, name, content)` wrapped with `Message::from(..)`; `Message::tool_result` itself now takes `(call, name, content)` | next |
-| `message::Image::try_into_url`, `message::Message::assistant_with_id`, `CompletionRequest::{with_provider_tool, with_provider_tools}`, `streaming::RawStreamingToolCall::with_internal_call_id` | none | next |
-| `StreamedTurnEvent::EmitToolCallDelta::id` | none — `internal_call_id` is the correlator, and the provider's id arrives on the completed `ToolCall` | next |
-| `MultiTurnStreamItem::final_response_with_history` | `final_response` | next |
-| `anthropic::completion::apply_cache_control` | none — `apply_prompt_cache_control` is `pub(super)` | next |
-| `TryFrom<message::AssistantContent> for anthropic::completion::Content` | none — convert the whole message with the surviving `TryFrom<message::Message> for anthropic::completion::Message` | next |
-| `anthropic::completion::Citation`'s struct variants (`CharLocation { .. }` … `WebSearchResultLocation { .. }`) | the same five variants as newtypes over `CharLocationCitation`, `PageLocationCitation`, `ContentBlockLocationCitation`, `SearchResultLocationCitation`, `WebSearchResultLocationCitation` — field names and the wire shape unchanged | next |
-| `azure::EmbeddingModel::{new, with_model}(.., Option<usize>)` | the `GenericEmbeddingModel` pair taking `ndims: usize`; `EmbeddingModel::make(.., None)` still infers | next |
-| `azure::{EmbeddingResponse, EmbeddingData, Usage}`, `doubleword::{EmbeddingResponse, EmbeddingData, Usage}` | `openai::embedding::{EmbeddingResponse, EmbeddingData}` plus `openai::completion::Usage` (`openai::embedding` exposes no `Usage` path); for Doubleword, keep a `usage`-optional response type of your own | next |
-| `doubleword::client::doubleword_api_types`, `openai::responses_api::OutputReasoning`, `deepseek::Message::{System, User, ToolResult}`, `ollama::AssistantContent` | none | next |
-| `ollama::{UserContent, ImageUrl, SystemContent, SystemContentType}` | the `openai::completion` types of the same names | next |
-| `copilot::ChatCompletionResponse` / `copilot::ChatChoice` | `openai::completion::CompletionResponse` / `openai::completion::Choice` | next |
-| `mira::MiraError`, mira's inherent `Client::list_models` | `ModelListingClient::list_models` → `Result<ModelList, ModelListingError>` | next |
-| gemini `interactions_api_types::{ImageDelta, AudioDelta, DocumentDelta, VideoDelta, FunctionCallDelta, FunctionResultDelta, CodeExecutionCallDelta, CodeExecutionResultDelta, UrlContextCallDelta, UrlContextResultDelta, GoogleSearchCallDelta, GoogleSearchResultDelta, McpServerToolCallDelta, McpServerToolResultDelta, FileSearchResultDelta}` | the matching `*Content` types, carried directly by `ContentDelta` | next |
-| `rig_bedrock::streaming::BedrockUsage` | `rig_bedrock::types::converse_output::TokenUsage` | next |
-| rig-bedrock's mirror→AWS-SDK `TryFrom` impls (`types::converse_output`) | none — the conversion is one-way now | next |
-| `rig_candle::LlamaModelBuilder<'a>` | `rig_candle::CandleModelBuilder<'a>` | next |
-| `CandleModel::{from_artifacts, from_artifacts_async, from_gguf_async, from_gguf_bytes_async}` | `builder_from_artifacts` / `builder_from_gguf_bytes` plus `build()` / `build_async()` | next |
-| `CandleModel::model_family()` / `CandleModelBuilder::model_family(..)` | `conversation_protocol()` / `conversation_protocol(..)` | next |
-| `rig_s3vectors::document!` | none — build `aws_smithy_types::Document` values directly | next |
+| `Native::reasoning_blob(&Api)` | `Native::reasoning_blob()`, with `ReplayTarget::blob_slots` | 0.46 |
+| `history::{USER_IMAGE_OMITTED, ASSISTANT_IMAGE_OMITTED}` | `history::IMAGE_OMITTED` | 0.46 |
+| `ImageDetail::from_str` | serde (`serde_json::from_value`) | 0.46 |
+| `rig_tools::attach::attached_file` | `rig_core::conversation::attached_file` | 0.46 |
+| `openai::wire::Identity::session_ids` | `Quirks::session_header` | 0.46 |
+| `MessagesDecoder::new(bool)` | `MessagesDecoder::new(anthropic::wire::Quirks)` | 0.46 |
+| `Compat::chat_tools_need_reasoning_off` | `Compat::chat_tools` (`ChatTools`) | 0.46 |
+| `ContextUse::window` | `ContextUse::limit` | 0.46 |
+| `xiaomimimo::{MIMO_V2_FLASH, MIMO_V2_OMNI, MIMO_V2_PRO}` | `MIMO_V2_6_FLASH`, `MIMO_V2_6_PRO` | 0.46 |
+| `Summarizer::request(.., focus: &str, ..)` | `Summarizer::request(.., &CompactReason, ..)` | 0.46 |
+| `rig_memory::output_room` | rig-basics compaction (no public replacement) | 0.46 |
+| `DirectRecordingHttpClient` | `ProviderCassette::direct_http()` | 0.46 |
+| `rig_ecs::turn::{Adapter, Adapters, ModelStarts}` | `turn::Adapted` in `PrepareSystems::{Adapt, AdaptOutermost}` | 0.46 |
+| `rig_ecs::agent::Retry`, `Conversation::resume` | `Deliver::new(agent, text, DeliveryMode::Queue)` | 0.46 |
+| `SubagentSystems::StopRestored` | `GateSystems::After`, `restore::CarryOn` | 0.46 |
+| `add_tool_per_call(tool, options, closure)` | `add_tool_per_call(tool, options)` with `PerCallTool::at` | 0.46 |
+| `rig_tui::AppToolRenderersExt` and its `add_*_renderer` / `add_call_decorator` | systems in `TranscriptRender` writing `RenderBatch` | 0.46 |
+| `rig_tui::highlight::highlight`, `ToolCallView::header_spans` | `highlight::Code`, `ToolCallView::header_code` | 0.46 |
+| `rig_basics::login_chatgpt::{ChatgptLoginPlugin, PendingLogin}` | `rig_basics::login::{LoginPlugin, PendingLogin}` | 0.46 |
+| `rig_basics::coding_tools::ShellSettings`, `Shell::{max_timeout, quiet}`, `Ended::Quiet` | removed (no default shell timeout) | 0.46 |
+| `SessionPicker::show`, `SessionItem` | `ResumeLabel`, a system after `SessionPickerSystems` | 0.46 |
+| `rig_basics::reload::{SELF_EXTENSION_TAG, self_extension, ReloadAsked, MAX_RELOADS, ORIGIN}` | removed | 0.46 |
+| `rig::core`, `rig_agent::core` | `rig`, `rig_core` | 0.45 |
+| `rig_core::memory`, `ConversationMemory` and policy wrappers | `rig_core::conversation` plus `rig_memory::{Store, AsyncStore}` | 0.45 |
+| `rig_core::transcript::{validate_canonical, TranscriptError}` | `conversation::pairing::{validate, PairingError}` | 0.45 |
+| transcript tool-result/feedback helpers | `rig_core::tool::feedback` | 0.45 |
+| `PortableTool`, `PortableToolEmbedding`, `tool::portable` | `Tool`, `ToolEmbedding`, `tool` | 0.45 |
+| `ToolFn::new` | `DynamicTool::new_with_context` | 0.45 |
+| `rig::bus`, `rig_agent::bus`, `Bus::channel`, `AgentBuilder::over_bus` | `handlers::Handlers`, `AgentBuilder::over_handlers` | 0.45 |
+| `effect::Outcome` | `effect::Answered` | 0.45 |
+| `serve::{Decision, Verdict, Origin}` | `serve::{BeforeServe, AfterServe, DispatchContext}` | 0.45 |
+| `streaming::Transcript` | `streaming::StreamRecord` | 0.45 |
+| `operation::Turn` | `operation::ReplyFold` | 0.45 |
+| `http_client::LazyBytes` | `http_client::LazyBody<Bytes>` | 0.45 |
+| HTTP middleware method/URI arguments | `http_client::Exchange` | 0.45 |
+| `RunEntry` | `conversation::Aside` | 0.45 |
+| `AgentBuilder<WithToolServerHandle>` and other tool-state parameters | `AgentBuilder` | 0.45 |
+| `AgentRun::tool_results`, pending-call public fields | `ExecCall::answer` / `MalformedCall::answer`, `AgentRun::{answer, answer_all}` | 0.45 |
+| `ModelTurn::from_response_parts`, `PreparedRequest` tool fields | `ModelTurn::from_response`, `prepared.policy` | 0.45 |
+| `StreamedResolution::TurnAbandoned { skipped_tool_result }` | `TurnAbandoned`, `run::project` | 0.45 |
+| `DocumentSourceKind::String` for binary data | `DocumentSourceKind::Base64` | 0.45 |
+| document `data: DocumentSourceKind` | `DocumentData::Text` / `DocumentData::File` | 0.45 |
+| `Catalog::{from_json, merge, find}` | `from_overrides` / `from_models_dev`, `with_overrides`, `get` | 0.45 |
+| `ProviderRef`, free `registry::connect` | `Catalog::connect` / `connect_with` | 0.45 |
+| `ProviderId::api_key_env` | `api_key_envs` | 0.45 |
+| `gemini::AutoCache::for_model` | `AutoCache::for_spec` | 0.45 |
+| config `.with_http(http)` | `.connect(http)` | 0.45 |
+| `CopilotConfig`, `CopilotWire` | shared OpenAI configuration/wire with `copilot::DIALECT` | 0.45 |
+| `Authenticator::new` file-path arguments | a `TokenStore` | 0.45 |
+| `McpTool::from_mcp_server`, `tools_from_server` | `McpTool::new`, `McpConnection::tools` | 0.45 |
+| `McpClientError::{ToolFetch, ToolFetchTimeout}` | `{Request, Timeout}` | 0.45 |
+| `McpResponseMeta`, `McpStructuredContent` | `McpCallToolResult` | 0.45 |
+| `rig_reqwest::runtime` | `rig_http::runtime::handle` | 0.45 |
+| old `rig-ecs` world/driver API | new Bevy kernel, or classic `AgentRun` (no compatibility shim) | 0.45 |
+| `rig::harness_protocol` (pre-release) | `rig_harness_protocol`, `rig_harness::harness_protocol` | 0.45 |
+| separate default plugin crates (pre-release) | `rig_basics` modules; see [plugin paths](#16-plugins-written-against-pre-release-harness-builds) | 0.45 |
+| `rig_basics::headless` (pre-release) | `rig_basics::print` | 0.45 |
+| `rig_tools::{numbered, read_lines}` (pre-release) | `rig_tools::show_lines` | 0.45 |
+| `PromptResponse::output` (field) and `output() -> &str` | `PromptResponse::output() -> String` | 0.44 |
+| `PromptResponse::messages: Option<Vec<Message>>` | `PromptResponse::messages: Vec<Message>` | 0.44 |
+| `PromptResponse::with_content` | set the public `content` field | 0.44 |
+| `StreamingError` | `PromptError` | 0.44 |
+| `PromptError::{CompletionError, MemoryError, MaxTurnsError, PromptCancelled}`, `PromptError::prompt_cancelled` | `PromptError::{Provider, Memory, MaxTurns, Cancelled}`, `PromptError::cancelled` | 0.44 |
+| `StructuredOutputError::{PromptError, DeserializationError}` | `StructuredOutputError::{Prompt, Deserialization { output, error }}` | 0.44 |
+| `MultiTurnStreamItem::StreamUserItem`, `streaming::StreamedUserContent` | `MultiTurnStreamItem::ToolResult { tool_result }` | 0.44 |
+| `ToolCallDelta::call_id` | `ToolCallDelta::part` (the id arrives on the call's `End`) | 0.44 |
+| `Message::Assistant { id, content }` | `Message::Assistant(AssistantMessage)` | 0.44 |
+| `message::ReasoningContent` | `message::Reasoning { text, redacted, native }` | 0.44 |
+| `operation::IfMalformed`, `MalformedToolInput`, `error::ErrorDetail`, `ProviderError::DuplicateCallId`, `require_non_empty*` | none | 0.44 |
+| `Operation::validate` | `Operation::prepare` | 0.44 |
+| Anthropic `Messages::{with_automatic_caching, with_automatic_caching_1h}` | `.cache(CacheRetention::Short)` / `.cache(CacheRetention::Long)` | 0.44 |
+| `openai::wire::Chat::with_prompt_caching`, `OpenAiWire::with_prompt_caching`, Bedrock `Converse::with_prompt_caching` | `.cache(CacheRetention::Short)` | 0.44 |
+| Bedrock `Converse::with_guardrail` | `rig_bedrock::extension::BedrockOptions::guardrail` | 0.44 |
+| typed provider request/reply types (`openai::completion::Message`, `responses_api::*`, `anthropic::completion::*`, `gemini_api_types::*`, OpenRouter/Venice parameters, …) | `providers::<p>::extension::{…Options, …Extras}` with `provider_option(..)` and `extras::<P>()` | 0.44 |
+| `openrouter::ProviderPreferences`, `venice::VeniceParameters` | `openrouter::extension::ProviderPreferences` via `OpenRouterOptions::provider`; `venice::extension::VeniceParameters` via `VeniceOptions::venice_parameters` | 0.44 |
+| `ToolDefinition::name: String`, `ToolChoice::Specific::function_names: Vec<String>` | `ToolName`, `Vec<ToolName>` | 0.44 |
+| `From<Agent> for DynamicTool`, `From<McpTool> for DynamicTool` | `TryFrom` | 0.44 |
+| `McpClientError::{ConnectionError, ToolFetchError}` | `McpClientError::{Connection, ToolFetch}` | 0.44 |
+| `UserContent::{audio, video, document}` | `UserContent::{audio_base64, video_base64, document_text}` (and `document_base64`) | 0.44 |
+| `VectorStoreIndex::top_n` tuples, `VectorStoreOutput` | `VectorSearchResult<T>`, `VectorSearchIdResult` | 0.44 |
+| `VectorSearchRequestBuilder::additional_params`, `VectorStoreError::BuilderError` | none, `VectorStoreError::SamplesOutOfRange` | 0.44 |
+| `rig_helixdb::HelixDBClient`, `HelixDBVectorStore<C>` | `HelixDBVectorStore` (always `HelixDB`) | 0.44 |
+| `AnthropicConfig::with_dialect(key, &dialect)` | `AnthropicConfig::with_key(&dialect, key)` | 0.44 |
+| `BedrockRuntime::with_profile_name`, `DEFAULT_AWS_REGION` | `BedrockRuntime::builder().profile_name(..)` | 0.44 |
+| `rig_bedrock::types::{assistant_content, converse_output}` (`RigAssistantContent`, …) | none: read `raw` or `extras::<BedrockExt>()` | 0.44 |
+| `GeminiGrpc::from_val` | `GeminiGrpc::new(key).await` | 0.44 |
+| `Ollama::completion` (native `/api/chat`) | `Ollama::native_completion` | 0.44 |
+| `operation::ContextCache`, `operation::CachedContentFold` | `providers::gemini::cached_content::ContextCache`, `operation::Whole` | 0.44 |
+| `effect::RerankRequest` | `operation::RerankRequest` | 0.44 |
+| `embeddings::ImageEmbeddingResponse` | `embeddings::EmbeddingResponse` | 0.44 |
+| `transcription::NormalizeTranscriptionResponse` | OpenAI's inherent `normalize()`; none for Gemini | 0.44 |
+| `CompletionResponse::{provider, model, response_id, message_id}` (fields) | `provider()`, `model()`, `response_id()`, or `origin` | 0.44 |
+| `Reasoning::{display_text, first_text, multi, redacted, …}`, `Sealed`, `Issuer` | `Reasoning { text, redacted, native }` | 0.44 |
+| `deepseek`/`mistral`/`openrouter`/`llamacpp`/`venice::CompletionResponse` and other typed replies | `extras::<P>()` or `raw` | 0.44 |
+| `ollama::wire::{Chat, Embeddings, Models}`, `cohere::wire::{Embeddings, ImageEmbeddings}` | `ollama::{chat::Chat, embedding::Embeddings, model_listing::Models}`, `cohere::embeddings::*` | 0.44 |
+| `rig_cassette::http::DirectHeader` | `(impl AsRef<str>, impl AsRef<str>)` pairs | 0.44 |
+| `rig_ecs::policy::text::*`, `policy::{turn_is_empty, answer_text, user_text}` | `rig_core::structured_output::*`, `transcript::{is_empty_assistant_turn, assistant_text_from_choice}`, `Message::user` | 0.44 |
+| `rig_ecs::systems::{gather_turn, AssemblyInputs}` | `systems::fold_turn` | 0.44 |
+| `rig_ecs::agent::checkpoint::CheckpointError` | `TurnHoldError` | 0.44 |
+| `GenAiOperation::{ChatStreaming, Interactions, InteractionsStreaming}` (deprecated) | `GenAiOperation::Chat` + `SpanBuilder::streaming(true)` | 0.44 |
+| `rig_core::OneOrMany<T>` (and the `one_or_many` module, both prelude re-exports) | `Vec<T>` — no replacement type; see the conversion table in "0.41 → 0.42" | 0.42 |
+| `rig_core::EmptyListError` | none — use `message::require_non_empty` where you relied on the rejection | 0.42 |
+| `one_or_many::string_or_option_one_or_many` | none — `json_utils::string_or_vec` into a `Vec<T>`, then `message::non_empty` where the `Option` carried "absent" | 0.42 |
+| `ToolSet::builder()` / `ToolSetBuilder` (whole type) | `ToolSet::default()` plus `add_tool` / `add_dynamic_tool` / `add_portable_dynamic_tool` / `add_retrieved_tool` | 0.42 |
+| `ModelListingError::{RateLimitError, ServiceUnavailable, UnknownError}` and the `auth_error` / `rate_limit_error` / `service_unavailable` / `unknown_error` constructors | `ApiError` (build the surviving variants directly) | 0.42 |
+| `telemetry::ProviderResponseExt::{OutputMessage, get_output_messages}` | none — `get_text_response` is kept | 0.42 |
+| `json_utils::null_or_vec` | `json_utils::null_or_default` | 0.42 |
+| `http_client::with_bearer_auth` | `http_client::bearer_auth_header` on the builder's header map | 0.42 |
+| `InMemoryVectorStoreBuilder::documents_with_id_f` | `documents_with_ids`, or the store's own `from_documents_with_id_f` / `add_documents_with_id_f` | 0.42 |
+| `InMemoryVectorStore::get_document` | `iter()` | 0.42 |
+| `message::Reasoning::optional_id` | the public `id` field, or `with_id` | 0.42 |
+| `message::DocumentSourceKind::{raw, unknown}` | `DocumentSourceKind::Raw(..)` / `::Unknown` (the variants stay) | 0.42 |
+| `message::Message::tool_result_with_call_id` | `UserContent::tool_result_with_call_id(item_id, call_id, name, content)` wrapped with `Message::from(..)`; `Message::tool_result` itself now takes `(call, name, content)` | 0.42 |
+| `message::Image::try_into_url`, `message::Message::assistant_with_id`, `CompletionRequest::{with_provider_tool, with_provider_tools}`, `streaming::RawStreamingToolCall::with_internal_call_id` | none | 0.42 |
+| `StreamedTurnEvent::EmitToolCallDelta::id` | none — `internal_call_id` is the correlator, and the provider's id arrives on the completed `ToolCall` | 0.42 |
+| `MultiTurnStreamItem::final_response_with_history` | `final_response` | 0.42 |
+| `anthropic::completion::apply_cache_control` | none — `apply_prompt_cache_control` is `pub(super)` | 0.42 |
+| `TryFrom<message::AssistantContent> for anthropic::completion::Content` | none — convert the whole message with the surviving `TryFrom<message::Message> for anthropic::completion::Message` | 0.42 |
+| `anthropic::completion::Citation`'s struct variants (`CharLocation { .. }` … `WebSearchResultLocation { .. }`) | the same five variants as newtypes over `CharLocationCitation`, `PageLocationCitation`, `ContentBlockLocationCitation`, `SearchResultLocationCitation`, `WebSearchResultLocationCitation` — field names and the wire shape unchanged | 0.42 |
+| `azure::EmbeddingModel::{new, with_model}(.., Option<usize>)` | the `GenericEmbeddingModel` pair taking `ndims: usize`; `EmbeddingModel::make(.., None)` still infers | 0.42 |
+| `azure::{EmbeddingResponse, EmbeddingData, Usage}`, `doubleword::{EmbeddingResponse, EmbeddingData, Usage}` | `openai::embedding::{EmbeddingResponse, EmbeddingData}` plus `openai::completion::Usage` (`openai::embedding` exposes no `Usage` path); for Doubleword, keep a `usage`-optional response type of your own | 0.42 |
+| `doubleword::client::doubleword_api_types`, `openai::responses_api::OutputReasoning`, `deepseek::Message::{System, User, ToolResult}`, `ollama::AssistantContent` | none | 0.42 |
+| `ollama::{UserContent, ImageUrl, SystemContent, SystemContentType}` | the `openai::completion` types of the same names | 0.42 |
+| `copilot::ChatCompletionResponse` / `copilot::ChatChoice` | `openai::completion::CompletionResponse` / `openai::completion::Choice` | 0.42 |
+| `mira::MiraError`, mira's inherent `Client::list_models` | `ModelListingClient::list_models` → `Result<ModelList, ModelListingError>` | 0.42 |
+| gemini `interactions_api_types::{ImageDelta, AudioDelta, DocumentDelta, VideoDelta, FunctionCallDelta, FunctionResultDelta, CodeExecutionCallDelta, CodeExecutionResultDelta, UrlContextCallDelta, UrlContextResultDelta, GoogleSearchCallDelta, GoogleSearchResultDelta, McpServerToolCallDelta, McpServerToolResultDelta, FileSearchResultDelta}` | the matching `*Content` types, carried directly by `ContentDelta` | 0.42 |
+| `rig_bedrock::streaming::BedrockUsage` | `rig_bedrock::types::converse_output::TokenUsage` | 0.42 |
+| rig-bedrock's mirror→AWS-SDK `TryFrom` impls (`types::converse_output`) | none — the conversion is one-way now | 0.42 |
+| `rig_candle::LlamaModelBuilder<'a>` | `rig_candle::CandleModelBuilder<'a>` | 0.42 |
+| `CandleModel::{from_artifacts, from_artifacts_async, from_gguf_async, from_gguf_bytes_async}` | `builder_from_artifacts` / `builder_from_gguf_bytes` plus `build()` / `build_async()` | 0.42 |
+| `CandleModel::model_family()` / `CandleModelBuilder::model_family(..)` | `conversation_protocol()` / `conversation_protocol(..)` | 0.42 |
+| `rig_s3vectors::document!` | none — build `aws_smithy_types::Document` values directly | 0.42 |
 | `rig_core::tool::Tool` (portable) | `rig_core::tool::PortableTool` | 0.41 |
 | `rig_agent::<item>` (portable re-export) | `rig_agent::core::<item>` | 0.41 |
 | `client.agent(...)` inherent method | `AgentClientExt::agent` (via `rig::prelude::*`) | 0.41 |
@@ -5197,7 +6886,7 @@ Renamed or relocated items, for searching.
 | `AgentBuilder::dynamic_context` | unchanged call, now hook-backed (removed in #2174, restored in #2219) | 0.41 |
 | `DynamicContextStore` | none — the side retrieval pipeline is gone for good | 0.41 |
 | `dynamic_tools(sample, index, toolset)` | `retrieved_tools` | 0.41 |
-| `ToolSetBuilder::dynamic_tool(ToolEmbedding)` | `retrieved_tool` (0.41), then `ToolSet::add_retrieved_tool` (next) | 0.41 |
+| `ToolSetBuilder::dynamic_tool(ToolEmbedding)` | `retrieved_tool` (0.41), then `ToolSet::add_retrieved_tool` (0.42) | 0.41 |
 | `features = ["wasm"]` | nothing — target is the opt-in | 0.41 |
 | `Tool::definition(prompt)` | `description()` + `parameters()` | 0.40 |
 | `FinalResponse` | `PromptResponse` | 0.40 |

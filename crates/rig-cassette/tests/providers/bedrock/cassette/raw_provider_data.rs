@@ -1,16 +1,15 @@
-//! `raw_completion` is the escape hatch for everything rig does not
-//! normalize, so what Bedrock sends has to survive the trip through
-//! `InternalConverseOutput`. It did not: the conversion's rest pattern
-//! discarded the guardrail trace, the performance configuration, the service
-//! tier and the AWS request id.
+//! What Bedrock sends beyond what rig normalizes has to survive into the
+//! response: `raw` is the body Bedrock sent, guardrail trace included, and
+//! the AWS request id rides the response.
 //!
 //! The guardrail trace is the one that costs a caller real information. A
 //! blocked turn normalizes to `FinishReason::ContentFilter` and nothing else;
 //! only the trace says which policy fired and on what text.
 
 use rig::bedrock;
-use rig::completion::CompletionModel;
-use rig::prelude::*;
+use rig::bedrock::extension::{BedrockExt, BedrockOptions, Guardrail, GuardrailTrace};
+use rig::completion::CompletionRequest;
+use serde_json::Value;
 
 use super::super::support::with_bedrock_cassette;
 
@@ -21,53 +20,65 @@ const GUARDRAIL_ID: &str = "fytaiyvapuzp";
 const GUARDRAIL_VERSION: &str = "DRAFT";
 
 /// Recorded against a guardrail that blocks a specific phrase: Bedrock stops
-/// the turn with `guardrail_intervened` and explains itself in `trace`.
+/// the turn with `guardrail_intervened` and explains itself in `trace`,
+/// which `raw` carries as Bedrock sent it (#2311), and the typed extras
+/// read.
 #[tokio::test]
-async fn guardrail_trace_survives_into_raw_completion() {
+async fn guardrail_trace_survives_into_raw() {
     with_bedrock_cassette(
         "raw_provider_data/guardrail_trace_survives_into_raw_completion",
         |client| async move {
-            let model = client
-                .completion(bedrock::completion::AMAZON_NOVA_LITE)
-                .with_guardrail(
-                    GUARDRAIL_ID,
-                    GUARDRAIL_VERSION,
-                    aws_sdk_bedrockruntime::types::GuardrailTrace::Enabled,
-                );
-
-            let request = model
-                .completion_request("Explain a gravitational singularity in one sentence.")
-                .max_tokens(64)
-                .build();
+            let model = client.completion(bedrock::completion::AMAZON_NOVA_LITE);
+            let guardrail = BedrockOptions::default().guardrail(
+                Guardrail::new(GUARDRAIL_ID, GUARDRAIL_VERSION).trace(GuardrailTrace::Enabled),
+            );
+            let request =
+                CompletionRequest::new("Explain a gravitational singularity in one sentence.")
+                    .max_tokens(64)
+                    .provider_option(guardrail);
 
             let response = model
-                .raw_completion(request)
+                .call(request)
                 .await
                 .expect("guardrail-intervened completion should still return a response");
 
-            let output = &response.0;
-            assert!(
-                matches!(
-                    output.stop_reason,
-                    bedrock::types::converse_output::StopReason::GuardrailIntervened
-                ),
-                "expected the guardrail to intervene, got {:?}",
-                output.stop_reason
+            assert_eq!(
+                response.raw["stopReason"], "guardrail_intervened",
+                "expected the guardrail to intervene: {}",
+                response.raw
             );
-
-            let trace = output
-                .trace()
-                .expect("the guardrail trace must reach raw_completion");
-            let guardrail = trace
-                .guardrail()
-                .expect("a guardrail-intervened turn carries a guardrail assessment");
-            let input_assessment = guardrail
-                .input_assessment()
-                .expect("the blocked input carries an assessment");
+            let input_assessment = response
+                .raw
+                .pointer("/trace/guardrail/inputAssessment")
+                .and_then(Value::as_object)
+                .expect("the blocked input's guardrail assessment reaches raw");
             assert!(
                 !input_assessment.is_empty(),
                 "expected the input assessment naming the policy that fired"
             );
+
+            let extras = response
+                .extras::<BedrockExt>()
+                .expect("a Bedrock reply")
+                .expect("the extras read");
+            assert_eq!(extras.stop_reason.as_deref(), Some("guardrail_intervened"));
+            assert_eq!(extras.latency_ms, Some(271));
+            let trace = extras.trace.expect("the guardrail trace");
+            assert_eq!(
+                trace.pointer("/guardrail/actionReason"),
+                Some(&Value::from("Guardrail blocked."))
+            );
+            assert!(
+                trace
+                    .pointer(&format!("/guardrail/inputAssessment/{GUARDRAIL_ID}"))
+                    .is_some(),
+                "{trace}"
+            );
+            assert_eq!(extras.service_tier, None);
+            assert_eq!(extras.performance_latency, None);
+            assert_eq!(extras.cache_details, None);
+            assert_eq!(extras.invoked_model_id, None);
+            assert_eq!(extras.additional_model_response_fields, None);
         },
     )
     .await;
@@ -86,26 +97,22 @@ async fn guardrail_trace_survives_into_raw_completion() {
 #[tokio::test]
 async fn request_id_survives_into_streamed_terminal() {
     use futures::StreamExt;
-    use rig::streaming::StreamEvent;
 
     with_bedrock_cassette(
         "raw_provider_data/request_id_survives_into_streamed_terminal",
         |client| async move {
             let model = client.completion(bedrock::completion::AMAZON_NOVA_LITE);
-            let request = model
-                .completion_request("Reply with the single word: ready.")
-                .max_tokens(16)
-                .build();
+            let request =
+                CompletionRequest::new("Reply with the single word: ready.").max_tokens(16);
 
-            let mut stream = model.stream(request).await.expect("stream should start");
-            let mut terminal = None;
+            let mut stream = model.stream(request).expect("stream should start");
             while let Some(item) = stream.next().await {
-                if let StreamEvent::Final(final_record) = item.expect("stream item should succeed")
-                {
-                    terminal = Some(final_record);
-                }
+                item.expect("stream item should succeed");
             }
-            let terminal = terminal.expect("stream should yield a terminal record");
+            let terminal = stream
+                .finish()
+                .await
+                .expect("stream should yield a terminal record");
             assert!(
                 terminal
                     .provider_request_id
@@ -113,37 +120,6 @@ async fn request_id_survives_into_streamed_terminal() {
                     .is_some_and(|id| !id.trim().is_empty()),
                 "the AWS request id must reach the streamed terminal, got {:?}",
                 terminal.provider_request_id
-            );
-        },
-    )
-    .await;
-}
-
-/// The AWS request id rides an HTTP header, so it is present on every call —
-/// including the ordinary ones — and it is what AWS support asks for.
-#[tokio::test]
-async fn request_id_survives_into_raw_completion() {
-    with_bedrock_cassette(
-        "raw_provider_data/request_id_survives_into_raw_completion",
-        |client| async move {
-            let model = client.completion(bedrock::completion::AMAZON_NOVA_LITE);
-            let request = model
-                .completion_request("Reply with the single word: ready.")
-                .max_tokens(16)
-                .build();
-
-            let response = model
-                .raw_completion(request)
-                .await
-                .expect("completion should succeed");
-
-            let request_id = response
-                .0
-                .request_id()
-                .expect("the AWS request id must reach raw_completion");
-            assert!(
-                !request_id.trim().is_empty(),
-                "expected a non-empty AWS request id"
             );
         },
     )

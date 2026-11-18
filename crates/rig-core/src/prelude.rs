@@ -6,15 +6,15 @@
 //! let message = Message::user("Hello");
 //! ```
 
-pub use crate::completion::{CompletionModel, Message};
-pub use crate::driver::{Bind, Bound, CompletionProvider};
+pub use crate::completion::Message;
+pub use crate::driver::{DynModel, Model};
 pub use crate::error::ProviderError;
 
 // The root re-export includes the derive macro when enabled.
 pub use crate::Embed;
-pub use crate::embeddings::{EmbeddingModel, EmbeddingsBuilder};
+pub use crate::embeddings::EmbeddingsBuilder;
 
-pub use crate::tool::PortableTool;
+pub use crate::tool::Tool;
 
 pub use crate::vector_store::VectorStoreIndex;
 pub use crate::vector_store::in_memory_store::InMemoryVectorStore;

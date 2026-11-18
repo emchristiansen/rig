@@ -11,9 +11,10 @@ pub use filter::{Filter, MilvusValue};
 use reqwest::StatusCode;
 use rig_core::{
     Embed,
-    embeddings::{Embedding, EmbeddingModel},
+    embeddings::Embedding,
     vector_store::{
-        InsertDocuments, VectorStoreError, VectorStoreIndex,
+        InsertDocuments, VectorSearchIdResult, VectorSearchResult, VectorStoreError,
+        VectorStoreIndex,
         request::{SearchFilter, VectorSearchRequest},
     },
     wasm_compat::WasmCompatSend,
@@ -23,10 +24,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 /// Vector store backed by a [Milvus](https://milvus.io/) collection.
 ///
-/// Queries are embedded with the same model `M` that populated the collection,
+/// Queries are embedded with the same model that populated the collection,
 /// so results are meaningless under another model.
-pub struct MilvusVectorStore<M> {
-    model: M,
+pub struct MilvusVectorStore {
+    model: rig_core::DynModel<rig_core::operation::Embedding>,
     base_url: String,
     client: reqwest::Client,
     database_name: String,
@@ -88,13 +89,18 @@ struct SearchResultDataOnlyId {
     distance: f64,
 }
 
-impl<M: EmbeddingModel> MilvusVectorStore<M> {
+impl MilvusVectorStore {
     /// Creates a store over a collection reached at `base_url`, which is the
     /// Milvus instance or Zilliz cluster endpoint. Requests are unauthenticated
     /// until [`MilvusVectorStore::auth`] supplies credentials.
-    pub fn new(model: M, base_url: String, database_name: String, collection_name: String) -> Self {
+    pub fn new(
+        model: impl Into<rig_core::DynModel<rig_core::operation::Embedding>>,
+        base_url: String,
+        database_name: String,
+        collection_name: String,
+    ) -> Self {
         Self {
-            model,
+            model: model.into(),
             base_url,
             client: reqwest::Client::new(),
             database_name,
@@ -194,7 +200,7 @@ impl<M: EmbeddingModel> MilvusVectorStore<M> {
     }
 }
 
-impl<M: EmbeddingModel> InsertDocuments for MilvusVectorStore<M> {
+impl InsertDocuments for MilvusVectorStore {
     async fn insert_documents<Doc: Serialize + Embed + WasmCompatSend>(
         &self,
         documents: Vec<(Doc, Vec<Embedding>)>,
@@ -235,36 +241,43 @@ impl<M: EmbeddingModel> InsertDocuments for MilvusVectorStore<M> {
     }
 }
 
-impl<M: EmbeddingModel> VectorStoreIndex for MilvusVectorStore<M> {
+impl VectorStoreIndex for MilvusVectorStore {
     type Filter = Filter;
 
-    /// Returns matches as `(distance, id, document)` in the order Milvus reports.
+    /// Returns matches scored by distance, in the order Milvus reports.
     async fn top_n<T: DeserializeOwned + WasmCompatSend>(
         &self,
         req: VectorSearchRequest<Filter>,
-    ) -> Result<Vec<(f64, String, T)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchResult<T>>, VectorStoreError> {
         let json: SearchResult<SearchResultData<T>> = self.search(&req, false).await?;
 
         let res = json
             .data
             .into_iter()
-            .map(|x| (x.distance, x.id.to_string(), x.document))
+            .map(|x| VectorSearchResult {
+                score: x.distance,
+                id: x.id.to_string(),
+                document: x.document,
+            })
             .collect();
 
         Ok(res)
     }
 
-    /// Like `top_n` but returns `(distance, id)` without requesting documents.
+    /// Like `top_n` but returns only scores and ids, without requesting documents.
     async fn top_n_ids(
         &self,
         req: VectorSearchRequest<Filter>,
-    ) -> Result<Vec<(f64, String)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchIdResult>, VectorStoreError> {
         let json: SearchResult<SearchResultDataOnlyId> = self.search(&req, true).await?;
 
         let res = json
             .data
             .into_iter()
-            .map(|x| (x.distance, x.id.to_string()))
+            .map(|x| VectorSearchIdResult {
+                score: x.distance,
+                id: x.id.to_string(),
+            })
             .collect();
 
         Ok(res)

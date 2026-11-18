@@ -20,29 +20,27 @@ use serde::{Deserialize, Serialize};
 use crate::{
     agent::{
         AgentBuilder, AgentHook, CompletionCallAction, CompletionCallEvent, DispatchAction,
-        DispatchEvent, HookContext, InvalidToolCallAction, MultiTurnStreamItem, NoToolConfig,
-        OutcomeAction, OutcomeEvent, OutputMode, RequestPatch, StreamingError,
-        run::{AgentRun, AgentRunStep, ModelTurn, ModelTurnOutcome},
+        DispatchEvent, HookContext, InvalidToolCallAction, MultiTurnStreamItem, OutcomeAction,
+        OutcomeEvent, OutputMode, RequestPatch,
     },
-    completion::{AssistantContent, CompletionModel, Message, PromptError, ToolDefinition},
+    completion::{AssistantContent, Message, PromptError, ToolDefinition},
+    run::{AgentRun, AgentRunStep, ModelTurn, ModelTurnOutcome, PendingToolCall, TurnPolicy},
     tool::{Tool, ToolContext},
 };
+use rig_core::completion::CompletionRequest;
 use rig_core::error::ProviderError;
 use rig_core::message::{ToolChoice, UserContent};
 
 /// Typed failure from a portable model-conformance scenario.
 #[derive(Debug, thiserror::Error)]
 pub enum ScenarioError {
-    /// A buffered agent run failed.
+    /// An agent run failed.
     #[error(transparent)]
     Prompt(#[from] PromptError),
     /// A direct model completion failed.
     #[error(transparent)]
     Completion(#[from] ProviderError),
-    /// A streaming agent run failed.
-    #[error(transparent)]
-    Streaming(#[from] StreamingError),
-    /// A stream item or bus effect failed, as the wire reports it.
+    /// A stream item or effect failed, as the wire reports it.
     #[error(transparent)]
     Report(#[from] rig_core::error::ErrorReport),
     /// Structured content could not be decoded.
@@ -100,7 +98,7 @@ pub fn validate_unknown_tool_failure(
     let history_has_call = chat_history.iter().any(|message| {
         matches!(
             message,
-            Message::Assistant { content, .. }
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. })
                 if content.iter().any(|item| matches!(item, AssistantContent::ToolCall(_)))
         )
     });
@@ -123,20 +121,20 @@ pub fn validate_cancelled_failure(
     expected_tool: &str,
 ) -> Result<(), ScenarioError> {
     const SCENARIO: &str = "cancelled_failure";
-    let PromptError::PromptCancelled {
+    let PromptError::Cancelled {
         chat_history,
         reason,
     } = error
     else {
         return Err(ScenarioError::contract(
             SCENARIO,
-            format!("expected PromptCancelled, observed {error:?}"),
+            format!("expected Cancelled, observed {error:?}"),
         ));
     };
     let history_has_call = chat_history.iter().any(|message| {
         matches!(
             message,
-            Message::Assistant { content, .. }
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. })
                 if content.iter().any(|item| matches!(
                     item,
                     AssistantContent::ToolCall(call) if call.function.name == expected_tool
@@ -161,7 +159,7 @@ pub fn validate_max_turns_failure(
     expected_max_turns: usize,
 ) -> Result<(), ScenarioError> {
     const SCENARIO: &str = "max_turns_failure";
-    let PromptError::MaxTurnsError {
+    let PromptError::MaxTurns {
         max_turns,
         chat_history,
         prompt,
@@ -169,7 +167,7 @@ pub fn validate_max_turns_failure(
     else {
         return Err(ScenarioError::contract(
             SCENARIO,
-            format!("expected MaxTurnsError, observed {error:?}"),
+            format!("expected MaxTurns, observed {error:?}"),
         ));
     };
     let pending_prompt_retained = matches!(
@@ -269,26 +267,6 @@ pub fn validate_rewritten_arguments(
     Ok(())
 }
 
-/// Validate that a sensitive raw tool result was produced but did not reach the
-/// model's user-visible response after result hooks ran.
-pub fn validate_result_redaction(
-    scenario: &'static str,
-    tool_produced_secret: bool,
-    visible_output: &str,
-    secret: &str,
-) -> Result<(), ScenarioError> {
-    if !tool_produced_secret || visible_output.is_empty() || visible_output.contains(secret) {
-        return Err(ScenarioError::contract(
-            scenario,
-            format!(
-                "produced_secret={tool_produced_secret}, secret_visible={}, output={visible_output:?}",
-                visible_output.contains(secret)
-            ),
-        ));
-    }
-    Ok(())
-}
-
 /// Validate a provider-neutral person extraction and its usage accounting.
 pub fn validate_extraction_fields(
     scenario: &'static str,
@@ -378,34 +356,25 @@ fn validate_tool_correlation(
     let mut turn = 0usize;
     for message in messages {
         match message {
-            Message::Assistant { content, .. } => {
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
                 turn += 1;
-                calls.extend(content.iter().filter_map(|item| {
-                    match item {
-                        AssistantContent::ToolCall(call) => Some((
-                            turn,
-                            &call.id,
-                            call.provider
-                                .as_ref()
-                                .map(|provider| provider.call_id.as_str()),
-                        )),
-                        _ => None,
-                    }
+                calls.extend(content.iter().filter_map(|item| match item {
+                    AssistantContent::ToolCall(call) => Some((
+                        turn,
+                        &call.id,
+                        call.id.provider().map(|provider| provider.as_str()),
+                    )),
+                    _ => None,
                 }));
             }
             Message::User { content } => {
-                results.extend(content.iter().filter_map(|item| {
-                    match item {
-                        UserContent::ToolResult(result) => Some((
-                            turn,
-                            &result.call,
-                            result
-                                .provider
-                                .as_ref()
-                                .map(|provider| provider.call_id.as_str()),
-                        )),
-                        _ => None,
-                    }
+                results.extend(content.iter().filter_map(|item| match item {
+                    UserContent::ToolResult(result) => Some((
+                        turn,
+                        &result.call,
+                        result.call.provider().map(|provider| provider.as_str()),
+                    )),
+                    _ => None,
                 }));
             }
             Message::System { .. } => {}
@@ -800,24 +769,20 @@ impl Tool for CaptureComplexTool {
     }
 }
 
-fn has_tool_roundtrip(messages: Option<&[Message]>) -> bool {
-    let saw_call = messages.is_some_and(|messages| {
-        messages.iter().any(|message| {
-            matches!(
-                message,
-                Message::Assistant { content, .. }
-                    if content.iter().any(|item| matches!(item, AssistantContent::ToolCall(_)))
-            )
-        })
+fn has_tool_roundtrip(messages: &[Message]) -> bool {
+    let saw_call = messages.iter().any(|message| {
+        matches!(
+            message,
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. })
+                if content.iter().any(|item| matches!(item, AssistantContent::ToolCall(_)))
+        )
     });
-    let saw_result = messages.is_some_and(|messages| {
-        messages.iter().any(|message| {
-            matches!(
-                message,
-                Message::User { content }
-                    if content.iter().any(|item| matches!(item, UserContent::ToolResult(_)))
-            )
-        })
+    let saw_result = messages.iter().any(|message| {
+        matches!(
+            message,
+            Message::User { content }
+                if content.iter().any(|item| matches!(item, UserContent::ToolResult(_)))
+        )
     });
     saw_call && saw_result
 }
@@ -931,31 +896,29 @@ fn report_from_response(
     tool_calls: usize,
     response: crate::agent::PromptResponse,
 ) -> Result<ScenarioReport, ScenarioError> {
-    if let Some(messages) = response.messages.as_deref() {
-        validate_protocol_hygiene(
-            name,
-            &response.output,
-            messages,
-            &[
-                "<tool_call>",
-                "</tool_call>",
-                "<tool_response>",
-                "</tool_response>",
-                "<|im_start|>",
-                "<|im_end|>",
-                "<think>",
-                "</think>",
-            ],
-        )?;
-    }
+    validate_protocol_hygiene(
+        name,
+        &response.output(),
+        &response.messages,
+        &[
+            "<tool_call>",
+            "</tool_call>",
+            "<tool_response>",
+            "</tool_response>",
+            "<|im_start|>",
+            "<|im_end|>",
+            "<think>",
+            "</think>",
+        ],
+    )?;
     Ok(ScenarioReport {
         name,
         tool_calls,
         prompt_tokens: response.usage.input_tokens.unwrap_or(0),
         generated_tokens: response.usage.output_tokens.unwrap_or(0),
-        history_messages: response.messages.as_ref().map_or(0, Vec::len),
+        history_messages: response.messages.len(),
         duration: started.elapsed(),
-        response: response.output,
+        response: response.output(),
     })
 }
 
@@ -965,9 +928,13 @@ fn correlated_messages<'a>(
     scenario: &'static str,
     response: &'a crate::agent::PromptResponse,
 ) -> Result<&'a [Message], ScenarioError> {
-    let messages = response.messages.as_deref().ok_or_else(|| {
-        ScenarioError::contract(scenario, "extended run omitted accumulated message history")
-    })?;
+    let messages = response.messages.as_slice();
+    if messages.is_empty() {
+        return Err(ScenarioError::contract(
+            scenario,
+            "extended run omitted accumulated message history",
+        ));
+    }
     validate_tool_correlation(scenario, messages)?;
     Ok(messages)
 }
@@ -996,21 +963,21 @@ fn value_matches_integer(value: &serde_json::Value, expected: i64) -> bool {
 ///
 /// Set `tool_concurrency` to `Some(1)` to prove that serial host execution does
 /// not split or drop the model's parallel call batch.
-pub async fn parallel_tools<M, F>(
-    model: M,
+pub async fn parallel_tools<W, T, F>(
+    model: rig_core::driver::Model<W, T>,
     configure: F,
     tool_concurrency: Option<usize>,
 ) -> Result<ScenarioReport, ScenarioError>
 where
-    M: CompletionModel + 'static,
-    F: FnOnce(AgentBuilder<NoToolConfig>) -> AgentBuilder<NoToolConfig>,
+    W: rig_core::wire::Wire<Op = rig_core::operation::Completion>,
+    T: rig_core::driver::Transport<W>,
+    F: FnOnce(AgentBuilder) -> AgentBuilder,
 {
     let add_calls = Arc::new(AtomicUsize::new(0));
     let subtract_calls = Arc::new(AtomicUsize::new(0));
     let started = Instant::now();
-    let agent = configure(AgentBuilder::new(model))
+    let agent = configure(AgentBuilder::new(model).temperature(0.0))
         .preamble(FORCE_TOOLS_PREAMBLE)
-        .temperature(0.0)
         .tool(CountingAdd(add_calls.clone()))
         .tool(CountingSubtract(subtract_calls.clone()))
         .default_max_turns(3)
@@ -1028,7 +995,8 @@ where
     let messages = correlated_messages(scenario, &response)?;
 
     let Some((call_index, calls)) = messages.iter().enumerate().find_map(|(index, message)| {
-        let Message::Assistant { content, .. } = message else {
+        let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) = message
+        else {
             return None;
         };
         let calls = content
@@ -1084,20 +1052,20 @@ where
 }
 
 /// Runs a zero-argument tool and validates verbatim string-result handling.
-pub async fn zero_argument_tool<M, F>(
-    model: M,
+pub async fn zero_argument_tool<W, T, F>(
+    model: rig_core::driver::Model<W, T>,
     configure: F,
 ) -> Result<ScenarioReport, ScenarioError>
 where
-    M: CompletionModel + 'static,
-    F: FnOnce(AgentBuilder<NoToolConfig>) -> AgentBuilder<NoToolConfig>,
+    W: rig_core::wire::Wire<Op = rig_core::operation::Completion>,
+    T: rig_core::driver::Transport<W>,
+    F: FnOnce(AgentBuilder) -> AgentBuilder,
 {
     const SCENARIO: &str = "zero_argument_tool";
     let calls = Arc::new(AtomicUsize::new(0));
     let started = Instant::now();
-    let agent = configure(AgentBuilder::new(model))
+    let agent = configure(AgentBuilder::new(model).temperature(0.0))
         .preamble("You must use the provided tools. Report tool outputs exactly as returned.")
-        .temperature(0.0)
         .tool(PingTool(calls.clone()))
         .default_max_turns(2)
         .build();
@@ -1110,14 +1078,14 @@ where
         || !values
             .iter()
             .any(|value| value.as_str() == Some(PING_OUTPUT))
-        || !response.output.contains(PING_OUTPUT)
+        || !response.output().contains(PING_OUTPUT)
     {
         return Err(ScenarioError::contract(
             SCENARIO,
             format!(
                 "calls={}, results={values:?}, response={:?}",
                 calls.load(Ordering::SeqCst),
-                response.output
+                response.output()
             ),
         ));
     }
@@ -1126,21 +1094,21 @@ where
 
 /// Runs string- and JSON-returning tools and validates that neither output is
 /// double encoded.
-pub async fn tool_output_serialization<M, F>(
-    model: M,
+pub async fn tool_output_serialization<W, T, F>(
+    model: rig_core::driver::Model<W, T>,
     configure: F,
 ) -> Result<ScenarioReport, ScenarioError>
 where
-    M: CompletionModel + 'static,
-    F: FnOnce(AgentBuilder<NoToolConfig>) -> AgentBuilder<NoToolConfig>,
+    W: rig_core::wire::Wire<Op = rig_core::operation::Completion>,
+    T: rig_core::driver::Transport<W>,
+    F: FnOnce(AgentBuilder) -> AgentBuilder,
 {
     const SCENARIO: &str = "tool_output_serialization";
     let started = Instant::now();
     let motto_calls = Arc::new(AtomicUsize::new(0));
     let config_calls = Arc::new(AtomicUsize::new(0));
-    let agent = configure(AgentBuilder::new(model))
+    let agent = configure(AgentBuilder::new(model).temperature(0.0))
         .preamble("You must use the provided tools before answering.")
-        .temperature(0.0)
         .tool(MottoTool(motto_calls.clone()))
         .tool(ConfigTool(config_calls.clone()))
         .default_max_turns(3)
@@ -1180,13 +1148,37 @@ where
 
 /// Runs a nested, escaped, Unicode-bearing argument payload through typed tool
 /// deserialization and validates the exact semantic value received by the tool.
-pub async fn complex_tool_arguments<M, F>(
-    model: M,
+pub async fn complex_tool_arguments<W, T, F>(
+    model: rig_core::driver::Model<W, T>,
     configure: F,
 ) -> Result<ScenarioReport, ScenarioError>
 where
-    M: CompletionModel + 'static,
-    F: FnOnce(AgentBuilder<NoToolConfig>) -> AgentBuilder<NoToolConfig>,
+    W: rig_core::wire::Wire<Op = rig_core::operation::Completion>,
+    T: rig_core::driver::Transport<W>,
+    F: FnOnce(AgentBuilder) -> AgentBuilder,
+{
+    complex_tool_arguments_with_prompt(model, configure, COMPLEX_ARGUMENTS_PROMPT).await
+}
+
+/// The prompt [`complex_tool_arguments`] sends. It spells the values in their
+/// JSON-escaped form, which a model may copy literally, backslashes included.
+const COMPLEX_ARGUMENTS_PROMPT: &str = "Call store_profile with profile.name exactly `Zoë \\\"Z\\\"`, profile.tags exactly [`rust`, `東京`], mode `careful`, note containing the two lines `line one` and `line two` separated by a newline, and quote exactly `path C:\\\\tmp and \\\"quoted\\\"`. Then confirm it was stored.";
+
+/// The same values as [`complex_tool_arguments`] sends, spelled as raw text
+/// between markers, for a model that copies escapes literally.
+pub const COMPLEX_ARGUMENTS_RAW_PROMPT: &str = "Call store_profile once. Each value below is raw text between <<< and >>>, with no escaping: profile.name <<<Zoë \"Z\">>>, profile.tags <<<rust>>> and <<<東京>>>, mode <<<careful>>>, note the two lines <<<line one>>> and <<<line two>>> joined by one newline, and quote <<<path C:\\tmp and \"quoted\">>>. Then confirm it was stored.";
+
+/// [`complex_tool_arguments`] with the user prompt given: the same tool, the
+/// same expected arguments, the same checks.
+pub async fn complex_tool_arguments_with_prompt<W, T, F>(
+    model: rig_core::driver::Model<W, T>,
+    configure: F,
+    prompt: &str,
+) -> Result<ScenarioReport, ScenarioError>
+where
+    W: rig_core::wire::Wire<Op = rig_core::operation::Completion>,
+    T: rig_core::driver::Transport<W>,
+    F: FnOnce(AgentBuilder) -> AgentBuilder,
 {
     const SCENARIO: &str = "complex_tool_arguments";
     let expected = ComplexArgs {
@@ -1201,21 +1193,15 @@ where
     let calls = Arc::new(AtomicUsize::new(0));
     let captured = Arc::new(Mutex::new(None));
     let started = Instant::now();
-    let agent = configure(AgentBuilder::new(model))
+    let agent = configure(AgentBuilder::new(model).temperature(0.0))
         .preamble("Use store_profile exactly once with every value supplied by the user.")
-        .temperature(0.0)
         .tool(CaptureComplexTool {
             calls: calls.clone(),
             captured: captured.clone(),
         })
         .default_max_turns(3)
         .build();
-    let response = agent
-        .prompt(
-            "Call store_profile with profile.name exactly `Zoë \\\"Z\\\"`, profile.tags exactly [`rust`, `東京`], mode `careful`, note containing the two lines `line one` and `line two` separated by a newline, and quote exactly `path C:\\\\tmp and \\\"quoted\\\"`. Then confirm it was stored.",
-        )
-        .max_turns(3)
-        .await?;
+    let response = agent.prompt(prompt).max_turns(3).await?;
     let observed = lock_recover(&captured).clone();
     if calls.load(Ordering::SeqCst) != 1 || observed.as_ref() != Some(&expected) {
         return Err(ScenarioError::contract(
@@ -1223,7 +1209,7 @@ where
             format!(
                 "calls={}, expected={expected:?}, observed={observed:?}, response={:?}",
                 calls.load(Ordering::SeqCst),
-                response.output
+                response.output()
             ),
         ));
     }
@@ -1233,21 +1219,26 @@ where
 
 /// Runs the same deterministic text request through buffered and raw streaming
 /// completion surfaces and validates equivalent visible content and usage.
-pub async fn buffered_streaming_text_parity<M>(model: M) -> Result<ScenarioReport, ScenarioError>
+pub async fn buffered_streaming_text_parity<W, T, A>(
+    model: rig_core::driver::Model<W, T>,
+    adjust: A,
+) -> Result<ScenarioReport, ScenarioError>
 where
-    M: CompletionModel + Clone + 'static,
+    W: rig_core::wire::Wire<Op = rig_core::operation::Completion>,
+    T: rig_core::driver::Transport<W>,
+    A: Fn(CompletionRequest) -> CompletionRequest,
 {
     const SCENARIO: &str = "buffered_streaming_text_parity";
     const PROMPT: &str = "Answer with exactly the single word Paris.";
     let started = Instant::now();
     let request = || {
-        model
-            .completion_request(PROMPT)
-            .temperature(0.0)
-            .max_tokens(32)
-            .build()
+        adjust(
+            CompletionRequest::new(PROMPT)
+                .temperature(0.0)
+                .max_tokens(32),
+        )
     };
-    let buffered = model.completion(request()).await?;
+    let buffered = model.call(request()).await?;
     let buffered_text = buffered
         .choice
         .iter()
@@ -1257,26 +1248,16 @@ where
         })
         .collect::<String>();
 
-    let mut stream = model.stream(request()).await?;
+    let mut stream = model.stream(request())?;
     let mut streamed_text = String::new();
-    let mut streamed_usage = None;
     while let Some(item) = stream.next().await {
-        match item? {
-            crate::streaming::StreamEvent::BlockDelta {
-                delta: crate::streaming::Delta::Text { text },
-                ..
-            } => {
-                streamed_text.push_str(&text);
-            }
-            crate::streaming::StreamEvent::Final(response) => {
-                streamed_usage = Some(response.usage);
-            }
-            crate::streaming::StreamEvent::BlockStart { .. }
-            | crate::streaming::StreamEvent::BlockDelta { .. }
-            | crate::streaming::StreamEvent::BlockEnd { .. }
-            | crate::streaming::StreamEvent::Unknown(_) => {}
+        if let crate::streaming::Item::Event(crate::streaming::StreamEvent::Text { text, .. }) =
+            item?
+        {
+            streamed_text.push_str(&text);
         }
     }
+    let streamed_usage = Some(stream.finish().await?.usage);
     let usage = streamed_usage.ok_or_else(|| {
         ScenarioError::contract(SCENARIO, "raw stream omitted its final response metadata")
     })?;
@@ -1313,19 +1294,24 @@ where
 
 /// Runs Rig's structured extractor and validates both the extracted semantic
 /// fields and accumulated usage.
-pub async fn structured_extraction<M>(model: M) -> Result<ScenarioReport, ScenarioError>
+pub async fn structured_extraction<W, T>(
+    model: rig_core::driver::Model<W, T>,
+    additional_params: Option<serde_json::Value>,
+) -> Result<ScenarioReport, ScenarioError>
 where
-    M: CompletionModel + 'static,
+    W: rig_core::wire::Wire<Op = rig_core::operation::Completion>,
+    T: rig_core::driver::Transport<W>,
 {
     const SCENARIO: &str = "structured_extraction";
     const INPUT: &str = "Hello, my name is Ada Lovelace and I work as a mathematician.";
     let started = Instant::now();
-    let response = crate::extractor::ExtractorBuilder::<ExtractedPerson>::new(model)
+    let mut builder = crate::extractor::ExtractorBuilder::<ExtractedPerson>::new(model)
         .max_tokens(384)
-        .retries(0)
-        .build()
-        .extract(INPUT)
-        .await?;
+        .retries(0);
+    if let Some(params) = additional_params {
+        builder = builder.additional_params(params);
+    }
+    let response = builder.build().extract(INPUT).await?;
     validate_extraction_fields(
         SCENARIO,
         response.output.first_name.as_deref(),
@@ -1382,25 +1368,41 @@ fn restricted_recovery_run(
 
 /// Uses one real model turn to exercise fail-fast, retry exhaustion, repair,
 /// rejected repair, and skip handling without executing a disallowed call.
-pub async fn invalid_tool_recovery<M, F>(
-    model: M,
+pub async fn invalid_tool_recovery<W, T, F>(
+    model: rig_core::driver::Model<W, T>,
     configure: F,
 ) -> Result<ScenarioReport, ScenarioError>
 where
-    M: CompletionModel + 'static,
-    F: FnOnce(AgentBuilder<NoToolConfig>) -> AgentBuilder<NoToolConfig>,
+    W: rig_core::wire::Wire<Op = rig_core::operation::Completion>,
+    T: rig_core::driver::Transport<W>,
+    F: FnOnce(AgentBuilder) -> AgentBuilder,
+{
+    invalid_tool_recovery_with_choice(model, configure, ToolChoice::Required).await
+}
+
+/// [`invalid_tool_recovery`] with the agent's tool choice given, for a model
+/// that rejects a forced choice (`ToolChoice::Auto`; the prompt still asks for
+/// the call).
+pub async fn invalid_tool_recovery_with_choice<W, T, F>(
+    model: rig_core::driver::Model<W, T>,
+    configure: F,
+    tool_choice: ToolChoice,
+) -> Result<ScenarioReport, ScenarioError>
+where
+    W: rig_core::wire::Wire<Op = rig_core::operation::Completion>,
+    T: rig_core::driver::Transport<W>,
+    F: FnOnce(AgentBuilder) -> AgentBuilder,
 {
     const SCENARIO: &str = "invalid_tool_recovery";
     const PROMPT: &str = "Call the add tool exactly once with x=2 and y=3. Do not call sum.";
     let started = Instant::now();
     let add_calls = Arc::new(AtomicUsize::new(0));
     let sum_calls = Arc::new(AtomicUsize::new(0));
-    let agent = configure(AgentBuilder::new(model))
+    let agent = configure(AgentBuilder::new(model).temperature(0.0))
         .preamble(FORCE_TOOLS_PREAMBLE)
-        .temperature(0.0)
         .tool(CountingAdd(add_calls.clone()))
         .tool(CountingSum(sum_calls.clone()))
-        .tool_choice(ToolChoice::Required)
+        .tool_choice(tool_choice)
         .build();
     #[derive(Clone)]
     struct CaptureTurn(Arc<Mutex<Option<ModelTurn>>>);
@@ -1411,11 +1413,10 @@ where
                 return OutcomeAction::proceed();
             };
             *lock_recover(&self.0) = Some(ModelTurn::new(
-                response.message_id.clone(),
+                response.head(),
                 response.choice.clone(),
                 response.usage,
-                BTreeSet::new(),
-                BTreeSet::new(),
+                TurnPolicy::default(),
                 response.raw.clone(),
             ));
             OutcomeAction::stop("captured conformance model turn")
@@ -1428,7 +1429,7 @@ where
         .add_hook(CaptureTurn(captured.clone()))
         .run()
         .await;
-    if !matches!(stopped, Err(PromptError::PromptCancelled { .. })) {
+    if !matches!(stopped, Err(PromptError::Cancelled { .. })) {
         return Err(ScenarioError::contract(
             SCENARIO,
             format!("capture hook did not stop after the model response: {stopped:?}"),
@@ -1454,13 +1455,19 @@ where
         ));
     }
     let executable = BTreeSet::from([CountingAdd::NAME.to_string(), CountingSum::NAME.to_string()]);
-    let allowed = BTreeSet::from([CountingSum::NAME.to_string()]);
+    let only_sum = ToolChoice::Specific {
+        function_names: vec![
+            rig_core::message::ToolName::new(CountingSum::NAME)
+                .map_err(|error| ScenarioError::contract(SCENARIO, error.to_string()))?,
+        ],
+    };
+    let policy = TurnPolicy::new(executable, Some(only_sum), None)
+        .map_err(|error| ScenarioError::contract(SCENARIO, error.to_string()))?;
     let turn = ModelTurn::new(
-        response.message_id,
+        response.head,
         response.choice,
         response.usage,
-        executable,
-        allowed,
+        policy,
         response.raw,
     );
 
@@ -1522,7 +1529,7 @@ where
     let repaired_call = calls.first();
     if calls.len() != 1
         || !repaired_call.is_some_and(|call| {
-            call.tool_call.function.name == CountingSum::NAME && call.preresolved_result.is_none()
+            matches!(call, PendingToolCall::Execute(call) if call.name() == CountingSum::NAME)
         })
     {
         return Err(ScenarioError::contract(
@@ -1538,20 +1545,16 @@ where
     ) {
         return Err(ScenarioError::contract(SCENARIO, "skip did not continue"));
     }
-    let AgentRunStep::CallTools { calls } = skipped.next_step()? else {
+    // A whole-turn skip answers every call, so the run asks the model again.
+    let step = skipped.next_step()?;
+    let skipped_answered = matches!(
+        skipped.messages().last().map(|message| &**message),
+        Some(Message::User { content }) if content.len() == 1
+    );
+    if !matches!(step, AgentRunStep::CallModel { .. }) || !skipped_answered {
         return Err(ScenarioError::contract(
             SCENARIO,
-            "skip did not produce a pre-resolved pending call",
-        ));
-    };
-    let skipped_is_preresolved = match calls.first() {
-        Some(call) => call.preresolved_result.is_some(),
-        None => false,
-    };
-    if calls.len() != 1 || !skipped_is_preresolved {
-        return Err(ScenarioError::contract(
-            SCENARIO,
-            format!("skipped pending calls were incorrect: {calls:?}"),
+            format!("skip did not answer the turn and continue: {step:?}"),
         ));
     }
     if add_calls.load(Ordering::SeqCst) != 0 || sum_calls.load(Ordering::SeqCst) != 0 {
@@ -1574,22 +1577,38 @@ where
 
 /// Exercises chained argument/result rewrites and a first-turn-only request
 /// patch. Completion proves `tool_choice=Required` did not leak to turn two.
-pub async fn hook_rewrites_and_request_patch<M, F>(
-    model: M,
+pub async fn hook_rewrites_and_request_patch<W, T, F>(
+    model: rig_core::driver::Model<W, T>,
     configure: F,
 ) -> Result<ScenarioReport, ScenarioError>
 where
-    M: CompletionModel + 'static,
-    F: FnOnce(AgentBuilder<NoToolConfig>) -> AgentBuilder<NoToolConfig>,
+    W: rig_core::wire::Wire<Op = rig_core::operation::Completion>,
+    T: rig_core::driver::Transport<W>,
+    F: FnOnce(AgentBuilder) -> AgentBuilder,
+{
+    hook_rewrites_and_request_patch_with_choice(model, configure, ToolChoice::Required).await
+}
+
+/// [`hook_rewrites_and_request_patch`] with the first-turn patch's tool
+/// choice given, for a model that rejects a forced choice (`ToolChoice::Auto`:
+/// the patch still narrows the active tools on turn one only).
+pub async fn hook_rewrites_and_request_patch_with_choice<W, T, F>(
+    model: rig_core::driver::Model<W, T>,
+    configure: F,
+    first_turn_choice: ToolChoice,
+) -> Result<ScenarioReport, ScenarioError>
+where
+    W: rig_core::wire::Wire<Op = rig_core::operation::Completion>,
+    T: rig_core::driver::Transport<W>,
+    F: FnOnce(AgentBuilder) -> AgentBuilder,
 {
     const SCENARIO: &str = "hook_rewrites_and_request_patch";
     let started = Instant::now();
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = ObserveArguments::default();
     let observed_probe = observed.clone();
-    let agent = configure(AgentBuilder::new(model))
+    let agent = configure(AgentBuilder::new(model).temperature(0.0))
         .preamble("Use add for arithmetic and report only the tool result.")
-        .temperature(0.0)
         .tool(CountingAdd(calls.clone()))
         .default_max_turns(3)
         .build();
@@ -1599,7 +1618,7 @@ where
         .add_hook(FirstTurnPatch(
             RequestPatch::new()
                 .active_tools([CountingAdd::NAME])
-                .tool_choice(ToolChoice::Required),
+                .tool_choice(first_turn_choice),
         ))
         .add_hook(RewriteArgument {
             key: "x",
@@ -1619,9 +1638,13 @@ where
         &observations,
         &serde_json::json!({ "x": 7, "y": 8 }),
     )?;
-    let messages = response.messages.as_deref().ok_or_else(|| {
-        ScenarioError::contract(SCENARIO, "extended hook run omitted message history")
-    })?;
+    let messages = response.messages.as_slice();
+    if messages.is_empty() {
+        return Err(ScenarioError::contract(
+            SCENARIO,
+            "extended hook run omitted message history",
+        ));
+    }
     let results = messages
         .iter()
         .flat_map(tool_result_values)
@@ -1638,7 +1661,7 @@ where
                 "calls={}, completion_calls={}, results={results:?}, output={:?}",
                 calls.load(Ordering::SeqCst),
                 response.completion_calls.len(),
-                response.output
+                response.output()
             ),
         ));
     }
@@ -1647,21 +1670,21 @@ where
 
 /// Exercises post-execution cancellation and max-turn diagnostics through the
 /// public agent driver using real model-emitted calls.
-pub async fn cancellation_and_max_turns<M, F>(
-    model: M,
+pub async fn cancellation_and_max_turns<W, T, F>(
+    model: rig_core::driver::Model<W, T>,
     configure: F,
 ) -> Result<ScenarioReport, ScenarioError>
 where
-    M: CompletionModel + Clone + 'static,
-    F: Fn(AgentBuilder<NoToolConfig>) -> AgentBuilder<NoToolConfig>,
+    W: rig_core::wire::Wire<Op = rig_core::operation::Completion>,
+    T: rig_core::driver::Transport<W>,
+    F: Fn(AgentBuilder) -> AgentBuilder,
 {
     const SCENARIO: &str = "cancellation_and_max_turns";
     const REASON: &str = "portable result veto";
     let started = Instant::now();
     let cancelled_calls = Arc::new(AtomicUsize::new(0));
-    let cancelled_agent = configure(AgentBuilder::new(model.clone()))
+    let cancelled_agent = configure(AgentBuilder::new(model.clone()).temperature(0.0))
         .preamble("Use add for arithmetic; never calculate by hand.")
-        .temperature(0.0)
         .tool(CountingAdd(cancelled_calls.clone()))
         .build();
     let cancelled = match cancelled_agent
@@ -1681,9 +1704,8 @@ where
     validate_cancelled_failure(&cancelled, REASON, CountingAdd::NAME)?;
 
     let max_turn_calls = Arc::new(AtomicUsize::new(0));
-    let max_turn_agent = configure(AgentBuilder::new(model))
+    let max_turn_agent = configure(AgentBuilder::new(model).temperature(0.0))
         .preamble("Use add for arithmetic; never calculate by hand.")
-        .temperature(0.0)
         .tool(CountingAdd(max_turn_calls.clone()))
         .build();
     let max_turn = match max_turn_agent
@@ -1724,13 +1746,14 @@ where
 /// `configure` is deliberately outside the scenario so a provider suite can
 /// attach transport-only settings without putting them into the shared model
 /// contract.
-pub async fn optional_argument<M, F>(
-    model: M,
+pub async fn optional_argument<W, T, F>(
+    model: rig_core::driver::Model<W, T>,
     configure: F,
 ) -> Result<ScenarioReport, ScenarioError>
 where
-    M: CompletionModel + 'static,
-    F: FnOnce(AgentBuilder<NoToolConfig>) -> AgentBuilder<NoToolConfig>,
+    W: rig_core::wire::Wire<Op = rig_core::operation::Completion>,
+    T: rig_core::driver::Transport<W>,
+    F: FnOnce(AgentBuilder) -> AgentBuilder,
 {
     let calls = Arc::new(AtomicUsize::new(0));
     let started = Instant::now();
@@ -1746,11 +1769,11 @@ where
             "Use the repeat_text tool to repeat the word \"banana\" 3 times, then show me the exact result.",
         )
         .await?;
-    let response = result.output.clone();
+    let response = result.output();
     let tool_calls = calls.load(Ordering::SeqCst);
     if tool_calls == 0
         || response.matches("banana").count() < 1
-        || !has_tool_roundtrip(result.messages.as_deref())
+        || !has_tool_roundtrip(&result.messages)
     {
         return Err(ScenarioError::contract(
             "optional_argument",
@@ -1761,10 +1784,14 @@ where
 }
 
 /// Runs a portable two-tool sequential arithmetic scenario.
-pub async fn sequential_tools<M, F>(model: M, configure: F) -> Result<ScenarioReport, ScenarioError>
+pub async fn sequential_tools<W, T, F>(
+    model: rig_core::driver::Model<W, T>,
+    configure: F,
+) -> Result<ScenarioReport, ScenarioError>
 where
-    M: CompletionModel + 'static,
-    F: FnOnce(AgentBuilder<NoToolConfig>) -> AgentBuilder<NoToolConfig>,
+    W: rig_core::wire::Wire<Op = rig_core::operation::Completion>,
+    T: rig_core::driver::Transport<W>,
+    F: FnOnce(AgentBuilder) -> AgentBuilder,
 {
     let add_calls = Arc::new(AtomicUsize::new(0));
     let multiply_calls = Arc::new(AtomicUsize::new(0));
@@ -1782,13 +1809,13 @@ where
             "Compute (4 + 6) * 2. First call the add tool, then call the multiply tool on the result. Tell me the final number.",
         )
         .await?;
-    let response = result.output.clone();
+    let response = result.output();
     let add = add_calls.load(Ordering::SeqCst);
     let multiply = multiply_calls.load(Ordering::SeqCst);
     if add == 0
         || multiply == 0
         || !response.contains("20")
-        || !has_tool_roundtrip(result.messages.as_deref())
+        || !has_tool_roundtrip(&result.messages)
     {
         return Err(ScenarioError::contract(
             "sequential_tools",
@@ -1799,10 +1826,14 @@ where
 }
 
 /// Runs a tool through Rig's multi-turn streaming agent driver.
-pub async fn streaming_tool<M, F>(model: M, configure: F) -> Result<ScenarioReport, ScenarioError>
+pub async fn streaming_tool<W, T, F>(
+    model: rig_core::driver::Model<W, T>,
+    configure: F,
+) -> Result<ScenarioReport, ScenarioError>
 where
-    M: CompletionModel + 'static,
-    F: FnOnce(AgentBuilder<NoToolConfig>) -> AgentBuilder<NoToolConfig>,
+    W: rig_core::wire::Wire<Op = rig_core::operation::Completion>,
+    T: rig_core::driver::Transport<W>,
+    F: FnOnce(AgentBuilder) -> AgentBuilder,
 {
     let calls = Arc::new(AtomicUsize::new(0));
     let started = Instant::now();
@@ -1822,10 +1853,10 @@ where
     let mut streamed_result_ids = Vec::new();
     while let Some(item) = stream.next().await {
         match item? {
-            MultiTurnStreamItem::ToolCall { block_id, .. } => streamed_call_ids.push(block_id),
-            MultiTurnStreamItem::StreamUserItem(
-                crate::streaming::StreamedUserContent::ToolResult { id, .. },
-            ) => streamed_result_ids.push(id),
+            MultiTurnStreamItem::ToolCall { tool_call } => streamed_call_ids.push(tool_call.id),
+            MultiTurnStreamItem::ToolResult { tool_result } => {
+                streamed_result_ids.push(tool_result.call)
+            }
             MultiTurnStreamItem::CompletionCall(call) => completion_usage += call.usage,
             MultiTurnStreamItem::FinalResponse(response) => {
                 final_count += 1;
@@ -1839,17 +1870,14 @@ where
     let result = final_response.ok_or_else(|| {
         ScenarioError::contract("streaming_tool", "stream produced no final response")
     })?;
-    let response = result.output.clone();
-    let history_messages = result.messages.as_ref().map_or(0, Vec::len);
+    let response = result.output();
+    let history_messages = result.messages.len();
     let tool_calls = calls.load(Ordering::SeqCst);
     streamed_call_ids.sort();
     streamed_result_ids.sort();
     let correlated_stream =
         !streamed_call_ids.is_empty() && streamed_call_ids == streamed_result_ids;
-    let correlated_history = result
-        .messages
-        .as_deref()
-        .is_some_and(|messages| validate_tool_correlation("streaming_tool", messages).is_ok());
+    let correlated_history = validate_tool_correlation("streaming_tool", &result.messages).is_ok();
     if tool_calls == 0
         || !response.contains("42")
         || history_messages < 4
@@ -1867,14 +1895,12 @@ where
             ),
         ));
     }
-    if let Some(messages) = result.messages.as_deref() {
-        validate_protocol_hygiene(
-            "streaming_tool",
-            &response,
-            messages,
-            &["<tool_call>", "</tool_call>", "<think>", "</think>"],
-        )?;
-    }
+    validate_protocol_hygiene(
+        "streaming_tool",
+        &response,
+        &result.messages,
+        &["<tool_call>", "</tool_call>", "<think>", "</think>"],
+    )?;
     Ok(ScenarioReport {
         name: "streaming_tool",
         tool_calls,
@@ -1887,13 +1913,14 @@ where
 }
 
 /// Runs a normal tool followed by Rig's synthetic structured-output tool.
-pub async fn structured_after_tool<M, F>(
-    model: M,
+pub async fn structured_after_tool<W, T, F>(
+    model: rig_core::driver::Model<W, T>,
     configure: F,
 ) -> Result<ScenarioReport, ScenarioError>
 where
-    M: CompletionModel + 'static,
-    F: FnOnce(AgentBuilder<NoToolConfig>) -> AgentBuilder<NoToolConfig>,
+    W: rig_core::wire::Wire<Op = rig_core::operation::Completion>,
+    T: rig_core::driver::Transport<W>,
+    F: FnOnce(AgentBuilder) -> AgentBuilder,
 {
     let calls = Arc::new(AtomicUsize::new(0));
     let started = Instant::now();
@@ -1909,10 +1936,10 @@ where
     let result = agent
         .prompt("Use add to calculate 19 + 23. Return answer=42 and a short optional explanation.")
         .await?;
-    let response = result.output.clone();
+    let response = result.output();
     let parsed: ArithmeticResult = serde_json::from_str(&response)?;
     let tool_calls = calls.load(Ordering::SeqCst);
-    if tool_calls == 0 || parsed.answer != 42 || !has_tool_roundtrip(result.messages.as_deref()) {
+    if tool_calls == 0 || parsed.answer != 42 || !has_tool_roundtrip(&result.messages) {
         return Err(ScenarioError::contract(
             "structured_after_tool",
             format!("calls={tool_calls}, response={response:?}"),
@@ -1923,31 +1950,42 @@ where
 }
 
 /// Runs all portable tool-choice modes directly against a completion model.
-pub async fn tool_choice_modes<M>(model: M) -> Result<ScenarioReport, ScenarioError>
+pub async fn tool_choice_modes<W, T, A>(
+    model: rig_core::driver::Model<W, T>,
+    adjust: A,
+) -> Result<ScenarioReport, ScenarioError>
 where
-    M: CompletionModel + Clone + 'static,
+    W: rig_core::wire::Wire<Op = rig_core::operation::Completion>,
+    T: rig_core::driver::Transport<W>,
+    A: Fn(CompletionRequest) -> CompletionRequest,
 {
-    let definition = |name: &str| ToolDefinition {
-        name: name.to_string(),
+    let tool_name = |name: &str| {
+        rig_core::message::ToolName::new(name)
+            .map_err(|error| ScenarioError::contract("tool_choice_modes", error.to_string()))
+    };
+    let definition = |name: rig_core::message::ToolName| ToolDefinition {
         description: format!("Return the supplied integer using {name}."),
+        name,
         parameters: serde_json::json!({
             "type": "object",
             "properties": {"value": {"type": "integer"}},
             "required": ["value"]
         }),
+        annotations: Default::default(),
     };
-    let tools = vec![definition("alpha"), definition("beta")];
+    let tools = vec![
+        definition(tool_name("alpha")?),
+        definition(tool_name("beta")?),
+    ];
     let started = Instant::now();
     let none = model
-        .completion(
-            model
-                .completion_request("Answer with only the number 4. Do not call a function.")
+        .call(adjust(
+            CompletionRequest::new("Answer with only the number 4. Do not call a function.")
                 .tools(tools.clone())
                 .tool_choice(ToolChoice::None)
                 .temperature(0.0)
-                .max_tokens(64)
-                .build(),
-        )
+                .max_tokens(64),
+        ))
         .await?;
     if none
         .choice
@@ -1961,15 +1999,13 @@ where
     }
 
     let required = model
-        .completion(
-            model
-                .completion_request("Call alpha with value 7.")
+        .call(adjust(
+            CompletionRequest::new("Call alpha with value 7.")
                 .tools(tools.clone())
                 .tool_choice(ToolChoice::Required)
                 .temperature(0.0)
-                .max_tokens(96)
-                .build(),
-        )
+                .max_tokens(96),
+        ))
         .await?;
     let required_calls = required
         .choice
@@ -1984,17 +2020,15 @@ where
     }
 
     let specific = model
-        .completion(
-            model
-                .completion_request("Call beta with value 9.")
+        .call(adjust(
+            CompletionRequest::new("Call beta with value 9.")
                 .tools(tools)
                 .tool_choice(ToolChoice::Specific {
-                    function_names: vec!["beta".to_string()],
+                    function_names: vec![tool_name("beta")?],
                 })
                 .temperature(0.0)
-                .max_tokens(96)
-                .build(),
-        )
+                .max_tokens(96),
+        ))
         .await?;
     let specific_calls = specific
         .choice
@@ -2028,13 +2062,14 @@ where
 }
 
 /// Runs a streamed real-tool turn followed by Rig's synthetic output tool.
-pub async fn streaming_structured_after_tool<M, F>(
-    model: M,
+pub async fn streaming_structured_after_tool<W, T, F>(
+    model: rig_core::driver::Model<W, T>,
     configure: F,
 ) -> Result<ScenarioReport, ScenarioError>
 where
-    M: CompletionModel + 'static,
-    F: FnOnce(AgentBuilder<NoToolConfig>) -> AgentBuilder<NoToolConfig>,
+    W: rig_core::wire::Wire<Op = rig_core::operation::Completion>,
+    T: rig_core::driver::Transport<W>,
+    F: FnOnce(AgentBuilder) -> AgentBuilder,
 {
     let calls = Arc::new(AtomicUsize::new(0));
     let started = Instant::now();
@@ -2065,18 +2100,18 @@ where
             "stream produced no final response",
         )
     })?;
-    let parsed: ArithmeticResult = serde_json::from_str(&result.output)?;
+    let parsed: ArithmeticResult = serde_json::from_str(&result.output())?;
     let calls = calls.load(Ordering::SeqCst);
     if calls == 0
         || final_count != 1
         || parsed.answer != 42
-        || !has_tool_roundtrip(result.messages.as_deref())
+        || !has_tool_roundtrip(&result.messages)
     {
         return Err(ScenarioError::contract(
             "streaming_structured_after_tool",
             format!(
                 "calls={calls}, final_count={final_count}, response={:?}",
-                result.output
+                result.output()
             ),
         ));
     }

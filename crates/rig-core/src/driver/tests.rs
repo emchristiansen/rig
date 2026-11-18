@@ -10,25 +10,103 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::StreamExt;
+use serde_json::json;
 
-use super::{Bound, call, stream};
-use crate::completion::{CompletionModel, CompletionRequest};
+use super::{Model, Transport};
+use crate::completion::CompletionRequest;
 use crate::error::{EncodeError, ProviderError};
 use crate::http_client::framing::Framing;
-use crate::model::{Model, ModelList, ModelLister};
-use crate::observe::{
-    AdapterContext, AdapterEvent, AdapterUsage, AdapterVerdict, ObservationLog, Subject,
-};
-use crate::operation::{Completion, ModelListing};
-use crate::streaming::{StreamEvent, StreamFinal};
+use crate::message::{CallId, ToolName};
+use crate::observe::{AdapterContext, AdapterVerdict, ObservationLog, Subject};
+use crate::operation::{Block, Completion, Finish};
+use crate::streaming::Streamed;
 use crate::test_utils::{
-    HttpErrorStreamingClient, MockHttpResponse, MockStreamingClient, NonSuccessStreamingClient,
-    RecordingHttpClient, SequencedHttpClient, SequencedStreamingHttpClient,
+    MockHttpResponse, MockStreamingClient, NonSuccessStreamingClient, PacedStreamingClient,
+    RecordingHttpClient, SequencedHttpClient, SilentStreamingClient, TraceCapture,
 };
 use crate::wire::{
-    Body, Decoder, Encoded, Mode, ObservationSink, Operation, Output, Sink, Wire, WireEvent,
+    Body, Decoder, Descriptor, Encoded, Flow, Mode, ObservationSink, Out, Wire, WireEvent,
     WireFrame,
 };
+
+/// Fold one reply of `wire` over `http`.
+pub(crate) async fn call<W, H>(
+    wire: &W,
+    http: &H,
+    request: crate::wire::Request<W>,
+    context: Option<AdapterContext>,
+) -> Result<crate::wire::Response<W>, ProviderError>
+where
+    W: Wire,
+    H: Transport<W>,
+{
+    let model = Model::new(wire.clone(), http.clone());
+    match context {
+        Some(context) => model.call_observed(request, context).await,
+        None => model.call(request).await,
+    }
+}
+
+/// One streamed reply of `wire` over `http`.
+pub(crate) fn stream<W, H>(
+    wire: &W,
+    http: &H,
+    request: crate::wire::Request<W>,
+    context: Option<AdapterContext>,
+) -> Result<Streamed<W::Op>, ProviderError>
+where
+    W: Wire,
+    H: Transport<W>,
+{
+    let model = Model::new(wire.clone(), http.clone());
+    match context {
+        Some(context) => model.stream_observed(request, context),
+        None => model.stream(request),
+    }
+}
+
+/// One observed reply of `wire` over `http` in `mode`: the usage
+/// observations it emitted, in order, and the response's usage.
+///
+/// # Panics
+///
+/// When the reply does not fold.
+pub(crate) async fn observed_usage<W, T>(
+    wire: W,
+    http: T,
+    mode: crate::wire::Mode,
+) -> (Vec<crate::observe::AdapterUsage>, crate::completion::Usage)
+where
+    W: crate::wire::Wire<Op = crate::operation::Completion>,
+    T: Transport<W>,
+{
+    use crate::observe::{Action, AdapterContext, AdapterEvent, ObservationLog, Subject};
+    let log = std::sync::Arc::new(ObservationLog::default());
+    let context = AdapterContext::new(log.clone(), Subject::default(), "call");
+    let model = Model::new(wire, http);
+    let request = crate::completion::CompletionRequest::new("hi");
+    let response = match mode {
+        crate::wire::Mode::Unary => model.call_observed(request, context).await,
+        crate::wire::Mode::Streaming => match model.stream_observed(request, context) {
+            Ok(stream) => stream.finish().await,
+            Err(error) => Err(error),
+        },
+    }
+    .unwrap_or_else(|error| panic!("the reply folds: {error}"));
+    let observed = log
+        .trace()
+        .observations
+        .iter()
+        .filter_map(|observation| match &observation.action {
+            Action::Adapter { observation } => match &observation.event {
+                AdapterEvent::Usage { usage } => Some(usage.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    (observed, response.usage)
+}
 
 // ── the fake completion wire ────────────────────────────────────────────
 
@@ -38,7 +116,6 @@ use crate::wire::{
 struct Echo {
     framing: Framing,
     request_id_header: Option<&'static str>,
-    response_header_prefix: Option<&'static str>,
     relaxed_content_type: bool,
 }
 
@@ -47,7 +124,6 @@ impl Echo {
         Self {
             framing: Framing::Whole,
             request_id_header: Some("request-id"),
-            response_header_prefix: None,
             relaxed_content_type: false,
         }
     }
@@ -56,7 +132,6 @@ impl Echo {
         Self {
             framing: Framing::Sse,
             request_id_header: Some("request-id"),
-            response_header_prefix: None,
             relaxed_content_type: false,
         }
     }
@@ -65,11 +140,6 @@ impl Echo {
     /// endpoint's shape on a dialect that always streams.
     fn sse_unary() -> Self {
         Self::streaming()
-    }
-
-    fn capturing(mut self, prefix: &'static str) -> Self {
-        self.response_header_prefix = Some(prefix);
-        self
     }
 
     fn relaxed(mut self) -> Self {
@@ -88,6 +158,15 @@ enum Frame {
     Delta { text: String },
     /// The provider's own end of turn.
     Stop { usage: Usage },
+    /// A whole tool call whose block the provider declared complete, ending
+    /// the turn when it carries usage.
+    Tool {
+        name: String,
+        arguments: String,
+        usage: Option<Usage>,
+    },
+    /// The provider's in-band failure, ending the stream without an end.
+    Error { message: String },
 }
 
 #[derive(Clone, Copy, serde::Deserialize)]
@@ -96,44 +175,80 @@ struct Usage {
 }
 
 #[derive(Default)]
-struct EchoDecoder;
+struct EchoDecoder<'id> {
+    brand: std::marker::PhantomData<fn(&'id ()) -> &'id ()>,
+}
 
-impl Decoder<Completion> for EchoDecoder {
+impl<'id> Decoder<'id, Completion> for EchoDecoder<'id> {
     type Event = Frame;
 
     fn classify(&self, frame: WireFrame) -> WireEvent<Self::Event> {
         crate::providers::internal::wire::classify_tagged_frame(&frame.as_str(), "type", |kind| {
-            matches!(kind, "message" | "delta" | "stop")
+            matches!(kind, "message" | "delta" | "stop" | "tool" | "error")
         })
     }
 
-    fn interpret(&mut self, event: Self::Event, out: &mut Output<Completion>) {
+    fn decode(
+        &mut self,
+        event: Frame,
+        mut out: Out<'id, Completion>,
+    ) -> Result<Flow, ProviderError> {
         match event {
-            // The unary shape synthesizes the stream's events rather than
-            // carrying a second content mapping.
+            // A whole message is the stream's text and end in one frame.
             Frame::Message { text, usage } => {
-                out.text(text);
-                terminal(out, usage);
+                out.run(Block::Text, &text)?;
+                return self.end(out, usage);
             }
-            Frame::Delta { text } => out.text(text),
-            Frame::Stop { usage } => terminal(out, usage),
+            Frame::Delta { text } => {
+                out.run(Block::Text, &text)?;
+            }
+            Frame::Stop { usage } => return self.end(out, usage),
+            Frame::Error { message } => return Err(ProviderError::Provider(message)),
+            Frame::Tool {
+                name,
+                arguments,
+                usage,
+            } => {
+                out.end_run()?;
+                let name = ToolName::new(name)
+                    .map_err(|error| ProviderError::Response(error.to_string()))?;
+                let index = out.fresh_index();
+                out.whole(
+                    index,
+                    Block::Call {
+                        id: CallId::from_wire("call_1"),
+                        name,
+                    },
+                    serde_json::Value::Null,
+                    &arguments,
+                )?;
+                if let Some(usage) = usage {
+                    return self.end(out, usage);
+                }
+            }
         }
+        Ok(Flow::More)
     }
+}
 
-    fn project(&self, payload: &[u8], sink: &mut dyn ObservationSink) {
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) else {
+impl<'id> EchoDecoder<'id> {
+    fn end(&mut self, mut out: Out<'id, Completion>, usage: Usage) -> Result<Flow, ProviderError> {
+        out.end_run()?;
+        Ok(out.end(Finish {
+            usage: crate::completion::Usage {
+                output_tokens: Some(usage.output_tokens),
+                ..crate::completion::Usage::default()
+            },
+            model: Some("echo-1".to_owned()),
+            ..Finish::default()
+        }))
+    }
+}
+
+impl EchoDecoder<'_> {
+    fn project(payload: &[u8], sink: &mut ObservationSink<'_>) {
+        if serde_json::from_slice::<serde_json::Value>(payload).is_err() {
             return;
-        };
-        if let Some(tokens) = value
-            .pointer("/usage/output_tokens")
-            .and_then(|v| v.as_u64())
-        {
-            sink.emit(AdapterEvent::Usage {
-                usage: AdapterUsage {
-                    output_tokens: Some(tokens),
-                    ..AdapterUsage::default()
-                },
-            });
         }
         sink.provider(
             AdapterVerdict {
@@ -145,31 +260,95 @@ impl Decoder<Completion> for EchoDecoder {
     }
 }
 
-fn terminal(out: &mut Output<Completion>, usage: Usage) {
-    out.close_active_blocks();
-    out.final_record(
-        StreamFinal::new(
-            "echo",
-            crate::completion::Usage {
-                output_tokens: Some(usage.output_tokens),
-                ..crate::completion::Usage::default()
-            },
-            serde_json::json!({}),
-        )
-        .with_model("echo-1"),
-    );
+impl crate::completion::ReplayTarget for Echo {
+    fn map_options(
+        &self,
+        _request: &crate::completion::CompletionRequest,
+        fields: crate::completion::options::OptionFields<'_>,
+    ) -> crate::completion::options::OptionMap {
+        crate::test_utils::refuse_options(fields)
+    }
+
+    fn api(&self) -> crate::message::Api {
+        crate::message::Api::from_static("echo.chat")
+    }
+
+    fn provider(&self) -> &str {
+        "echo"
+    }
+
+    fn model(&self) -> &str {
+        "echo-1"
+    }
+
+    fn accepts(&self, _model: &str) -> crate::completion::Accepts {
+        crate::completion::Accepts::ALL
+    }
+}
+
+/// The unary `message` document the fake wire's frames add up to: delta
+/// texts append, a stop gives the usage, a whole message or call is kept.
+#[derive(Default)]
+struct EchoDocument(Option<serde_json::Map<String, serde_json::Value>>);
+
+impl crate::wire::document::Serves<Completion> for EchoDocument {}
+
+impl crate::wire::document::Reassemble<Frame> for EchoDocument {
+    fn absorb(&mut self, frame: &Frame) {
+        let document = self.0.get_or_insert_with(|| {
+            serde_json::Map::from_iter([
+                ("type".to_owned(), json!("message")),
+                ("text".to_owned(), json!("")),
+            ])
+        });
+        let usage = |usage: &Usage| json!({"output_tokens": usage.output_tokens});
+        match frame {
+            Frame::Message { text, usage: used } => {
+                *document = serde_json::Map::from_iter([
+                    ("type".to_owned(), json!("message")),
+                    ("text".to_owned(), json!(text)),
+                    ("usage".to_owned(), usage(used)),
+                ]);
+            }
+            Frame::Delta { text } => {
+                if let Some(serde_json::Value::String(held)) = document.get_mut("text") {
+                    held.push_str(text);
+                }
+            }
+            Frame::Stop { usage: used } => {
+                document.insert("usage".to_owned(), usage(used));
+            }
+            Frame::Tool {
+                name,
+                arguments,
+                usage: used,
+            } => {
+                document.insert("name".to_owned(), json!(name));
+                document.insert("arguments".to_owned(), json!(arguments));
+                if let Some(used) = used {
+                    document.insert("usage".to_owned(), usage(used));
+                }
+            }
+            Frame::Error { .. } => {}
+        }
+    }
+
+    fn finish(self) -> serde_json::Value {
+        self.0
+            .map_or(serde_json::Value::Null, serde_json::Value::Object)
+    }
 }
 
 impl Wire for Echo {
     type Op = Completion;
-    type Decoder = EchoDecoder;
+    type Payload = Encoded;
+    type Frame = WireFrame;
+    type Event = Frame;
+    type Decoder<'id> = EchoDecoder<'id>;
+    type Reassembler = EchoDocument;
 
-    fn name(&self) -> &str {
-        "echo"
-    }
-
-    fn model(&self) -> Option<&str> {
-        Some("echo-1")
+    fn describe(&self) -> Descriptor<'_> {
+        Descriptor::new("echo").model("echo-1").replay(self)
     }
 
     fn encode(&self, request: CompletionRequest, _mode: Mode) -> Result<Encoded, EncodeError> {
@@ -180,7 +359,7 @@ impl Wire for Echo {
             http::Request::post("https://echo.invalid/v1/messages").body(Body::Bytes(body))?;
         let encoded = Encoded::new(request, self.framing)
             .with_request_id_header(self.request_id_header)
-            .with_captured_response_headers(self.response_header_prefix);
+            .with_projection(EchoDecoder::project);
         Ok(if self.relaxed_content_type {
             encoded.with_relaxed_content_type()
         } else {
@@ -188,74 +367,18 @@ impl Wire for Echo {
         })
     }
 
-    fn decoder(&self, _mode: Mode) -> Self::Decoder {
-        EchoDecoder
+    fn decoder<'id>(&self) -> Self::Decoder<'id> {
+        EchoDecoder::default()
     }
 }
 
 fn prompt() -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        chat_history: vec![crate::message::Message::user("say hi")],
-        documents: Vec::new(),
-        tools: Vec::new(),
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    }
+    CompletionRequest::new("say hi")
 }
 
 // ── the property the model exists for ───────────────────────────────────
 
 const UNARY_BODY: &str = r#"{"type":"message","text":"hi there","usage":{"output_tokens":3}}"#;
-const STREAM_BODY: &str = concat!(
-    "data: {\"type\":\"delta\",\"text\":\"hi \"}\n\n",
-    "data: {\"type\":\"delta\",\"text\":\"there\"}\n\n",
-    "data: {\"type\":\"stop\",\"usage\":{\"output_tokens\":3}}\n\n",
-);
-
-#[tokio::test]
-async fn a_unary_reply_and_a_streamed_reply_fold_to_the_same_response() {
-    let unary = Bound::new(Echo::unary(), RecordingHttpClient::new(UNARY_BODY));
-    let buffered = unary.completion(prompt()).await.expect("the reply decodes");
-
-    let streaming = Bound::new(
-        Echo::streaming(),
-        MockStreamingClient {
-            sse_bytes: Bytes::from_static(STREAM_BODY.as_bytes()),
-        },
-    );
-    let mut response = streaming.stream(prompt()).await.expect("the stream opens");
-    while response.next().await.is_some() {}
-    let streamed = response
-        .finish()
-        .expect("the stream produced a terminal record");
-
-    assert_eq!(buffered.choice, streamed.choice);
-    assert_eq!(buffered.usage, streamed.usage);
-    assert_eq!(buffered.model, streamed.model);
-    assert_eq!(buffered.finish_reason(), streamed.finish_reason());
-    assert_eq!(
-        buffered.choice.first().and_then(|block| match block {
-            crate::message::AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        }),
-        Some("hi there")
-    );
-}
-
-#[tokio::test]
-async fn a_unary_reply_carries_its_body_as_raw() {
-    let bound = Bound::new(Echo::unary(), RecordingHttpClient::new(UNARY_BODY));
-    let response = bound.completion(prompt()).await.expect("the reply decodes");
-    assert_eq!(
-        response.raw.pointer("/text").and_then(|text| text.as_str()),
-        Some("hi there")
-    );
-}
 
 // ── the non-success funnel: four cells ──────────────────────────────────
 
@@ -291,148 +414,7 @@ async fn a_relaxed_wire_still_reads_a_unary_reply_that_names_no_content_type() {
     assert_eq!(text_of(&response), Some("hi there"));
 }
 
-/// Projection walks framed payloads, not the raw body: an SSE-framed unary
-/// reply's facts are JSON *inside* `data:` lines, so projecting the body
-/// would hand every projector a document it cannot parse and the trace
-/// would silently lose its usage and verdict.
-#[tokio::test]
-async fn a_unary_reply_projects_the_same_facts_a_streamed_one_does() {
-    let body = format!("data: {UNARY_BODY}\n\n");
-    let (unary_log, unary_context) = observed();
-    let http = SequencedHttpClient::new([MockHttpResponse::success_typed(
-        body.clone(),
-        "text/event-stream",
-    )]);
-    call(&Echo::sse_unary(), &http, prompt(), Some(unary_context))
-        .await
-        .expect("the reply decodes");
-
-    let (streamed_log, streamed_context) = observed();
-    let http = MockStreamingClient {
-        sse_bytes: Bytes::from(body),
-    };
-    let frames = stream(&Echo::streaming(), &http, prompt(), Some(streamed_context))
-        .expect("the stream opens");
-    let _: Vec<_> = frames.collect().await;
-
-    let facts = |log: &ObservationLog| {
-        events(log)
-            .into_iter()
-            .filter(|event| event != "finished")
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(facts(&unary_log), facts(&streamed_log));
-    assert!(
-        facts(&unary_log).contains(&"usage".to_owned()),
-        "the projection ran: {:?}",
-        facts(&unary_log)
-    );
-}
-
-/// A transport that reports the reply as an error, with a request-id header.
-#[tokio::test]
-async fn a_transport_reported_failure_preserves_status_headers_and_request_id() {
-    let mut headers = http::HeaderMap::new();
-    headers.insert("retry-after", http::HeaderValue::from_static("7"));
-    headers.insert("request-id", http::HeaderValue::from_static("req_1"));
-    let http = RecordingHttpClient::with_error_headers(
-        http::StatusCode::TOO_MANY_REQUESTS,
-        "slow down",
-        headers,
-    );
-    let error = call(&Echo::unary(), &http, prompt(), None)
-        .await
-        .expect_err("a 429 fails the call");
-    assert_eq!(
-        error.provider_response_status(),
-        Some(http::StatusCode::TOO_MANY_REQUESTS)
-    );
-    assert_eq!(error.provider_request_id(), Some("req_1"));
-    assert_eq!(
-        error
-            .provider_response_headers()
-            .and_then(|headers| headers.get("retry-after"))
-            .and_then(|value| value.to_str().ok()),
-        Some("7")
-    );
-}
-
-/// A transport that hands the non-success *response* back instead.
-#[tokio::test]
-async fn a_non_success_response_preserves_status_headers_and_request_id() {
-    let mut headers = http::HeaderMap::new();
-    headers.insert("retry-after", http::HeaderValue::from_static("11"));
-    headers.insert("request-id", http::HeaderValue::from_static("req_2"));
-    let http = SequencedHttpClient::new([MockHttpResponse::error_with_headers(
-        http::StatusCode::SERVICE_UNAVAILABLE,
-        "down",
-        headers,
-    )]);
-    let error = call(&Echo::unary(), &http, prompt(), None)
-        .await
-        .expect_err("a 503 fails the call");
-    assert_eq!(
-        error.provider_response_status(),
-        Some(http::StatusCode::SERVICE_UNAVAILABLE)
-    );
-    assert_eq!(error.provider_request_id(), Some("req_2"));
-    assert_eq!(
-        error
-            .provider_response_headers()
-            .and_then(|headers| headers.get("retry-after"))
-            .and_then(|value| value.to_str().ok()),
-        Some("11")
-    );
-}
-
-#[tokio::test]
-async fn an_undecodable_body_fails_the_call_as_a_json_error() {
-    let http = RecordingHttpClient::new("not json at all");
-    let error = call(&Echo::unary(), &http, prompt(), None)
-        .await
-        .expect_err("a non-JSON reply fails the call");
-    let ProviderError::CorruptFrame(corrupt) = &error else {
-        panic!("expected a corrupt frame, got {error:?}");
-    };
-    assert_eq!(corrupt.frame(), Some("not json at all"));
-    assert_eq!(error.kind(), crate::error::ErrorKind::Json);
-}
-
-/// The driver itself has no empty-turn policy: a reply that framed to
-/// nothing folds to a response with nothing in it. Whether that is an
-/// answer or a defect is the decoder's to say, from the [`Mode`] it was
-/// built for — see
-/// [`the_mode_a_decoder_is_built_for_decides_what_its_eof_means`].
-#[tokio::test]
-async fn a_reply_with_no_frames_folds_to_an_empty_response_with_no_terminal() {
-    let http = RecordingHttpClient::new("");
-    let response = call(&Echo::unary(), &http, prompt(), None)
-        .await
-        .expect("an empty body yields an empty choice");
-    assert!(response.choice.is_empty());
-    assert_eq!(response.finish_reason(), None);
-    assert_eq!(response.usage, crate::completion::Usage::default());
-}
-
 // ── streaming semantics ─────────────────────────────────────────────────
-
-#[tokio::test]
-async fn a_connect_failure_is_the_streams_only_item() {
-    let http = HttpErrorStreamingClient::new(http::StatusCode::UNAUTHORIZED, "{\"error\":\"no\"}");
-    let frames = stream(&Echo::streaming(), &http, prompt(), None)
-        .expect("opening the stream is not an encode error");
-    let items: Vec<_> = frames.collect().await;
-    assert_eq!(items.len(), 1);
-    let error = items
-        .into_iter()
-        .next()
-        .expect("one item")
-        .expect_err("the item is the connect failure");
-    assert_eq!(
-        error.provider_response_status(),
-        Some(http::StatusCode::UNAUTHORIZED)
-    );
-}
 
 /// A streaming transport that hands the non-success *response* back as `Ok`:
 /// the driver rejects it on status, and the reply's status, headers, request
@@ -475,83 +457,302 @@ async fn a_non_success_streaming_response_is_rejected_as_the_streams_only_item()
     );
 }
 
-#[tokio::test]
-async fn a_transport_failure_mid_stream_ends_it_without_a_terminal() {
-    let http = SequencedStreamingHttpClient::new(vec![
-        Ok(Bytes::from_static(
-            b"data: {\"type\":\"delta\",\"text\":\"hi\"}\n\n",
-        )),
-        Err(crate::http_client::Error::StreamEnded),
-    ]);
-    let frames = stream(&Echo::streaming(), &http, prompt(), None).expect("the stream opens");
-    let items: Vec<_> = frames.collect().await;
-    let terminals = items
-        .iter()
-        .filter(|item| matches!(item, Ok(StreamEvent::Final(_))))
-        .count();
-    assert_eq!(terminals, 0, "truncation never fabricates a terminal");
-    assert!(
-        items.last().is_some_and(|item| item.is_err()),
-        "the transport error is the last item"
-    );
-}
+/// A transport whose reply sends `frames`, then fails.
+#[derive(Clone)]
+struct Broken(Vec<&'static str>);
 
-#[tokio::test]
-async fn a_corrupt_frame_surfaces_in_band_and_the_stream_keeps_consuming() {
-    let body = concat!(
-        "data: {\"type\":\"delta\",\"text\":\"hi\"}\n\n",
-        "data: {\"type\":\"delta\"}\n\n",
-        "data: {\"type\":\"stop\",\"usage\":{\"output_tokens\":1}}\n\n",
-    );
-    let http = MockStreamingClient {
-        sse_bytes: Bytes::from(body),
-    };
-    let frames = stream(&Echo::streaming(), &http, prompt(), None).expect("the stream opens");
-    let items: Vec<_> = frames.collect().await;
-    assert_eq!(items.iter().filter(|item| item.is_err()).count(), 1);
-    assert_eq!(
-        items
+impl Transport<Echo> for Broken {
+    fn send(&self, _payload: Encoded, _exchange: super::Exchange) -> super::Opening<WireFrame> {
+        let frames = self
+            .0
             .iter()
-            .filter(|item| matches!(item, Ok(StreamEvent::Final(_))))
-            .count(),
-        1,
-        "a genuine terminal after a corrupt frame still completes the stream"
+            .map(|frame| Ok(WireFrame::Text((*frame).to_owned())))
+            .chain([Err(ProviderError::Response(
+                "the connection dropped".to_owned(),
+            ))])
+            .collect::<Vec<_>>();
+        super::Opening::ready(super::Opened::new(futures::stream::iter(frames)))
+    }
+}
+
+/// A transport whose reply sends `frames`, each `gap` after the last, then
+/// sends nothing more, without ending.
+#[derive(Clone)]
+struct Paced {
+    frames: Vec<&'static str>,
+    gap: std::time::Duration,
+}
+
+impl Transport<Echo> for Paced {
+    fn send(&self, _payload: Encoded, _exchange: super::Exchange) -> super::Opening<WireFrame> {
+        let gap = self.gap;
+        let frames = futures::stream::iter(self.frames.clone())
+            .then(move |frame| async move {
+                tokio::time::sleep(gap).await;
+                Ok(WireFrame::Text(frame.to_owned()))
+            })
+            .chain(futures::stream::pending());
+        super::Opening::ready(super::Opened::new(frames))
+    }
+}
+
+/// A streamed reply that keeps sending within the idle timeout ends as the
+/// provider ends it however long it takes; one that falls silent fails as
+/// a retryable stall.
+#[tokio::test]
+async fn a_streamed_reply_that_falls_silent_stalls() {
+    let idle = std::time::Duration::from_millis(200);
+    let delta = r#"{"type":"delta","text":"hi"}"#;
+    let stop = r#"{"type":"stop","usage":{"output_tokens":1}}"#;
+    let steady = Paced {
+        frames: vec![delta, delta, delta, delta, stop],
+        gap: idle / 4,
+    };
+    let response = Model::new(Echo::streaming(), steady)
+        .with_idle_timeout(Some(idle))
+        .stream(prompt())
+        .expect("the stream opens")
+        .finish()
+        .await;
+    assert!(response.is_ok(), "a steady reply ends: {response:?}");
+
+    let silent = Paced {
+        frames: vec![delta],
+        gap: idle / 4,
+    };
+    let stalled = Model::new(Echo::streaming(), silent)
+        .with_idle_timeout(Some(idle))
+        .stream(prompt())
+        .expect("the stream opens")
+        .finish()
+        .await;
+    match stalled {
+        Err(error @ ProviderError::Stalled(after)) => {
+            assert_eq!(after, idle);
+            assert!(error.is_retryable(), "a stall is retried");
+        }
+        other => panic!("a silent reply stalls: {other:?}"),
+    }
+}
+
+/// An event stream that sends only comments for longer than the idle
+/// timeout, as a provider pings while its model thinks, does not stall.
+#[tokio::test]
+async fn comments_keep_a_streamed_reply_from_stalling() {
+    let idle = std::time::Duration::from_millis(200);
+    let pinging = PacedStreamingClient {
+        chunks: vec![
+            ": ping\n\n",
+            ": ping\n\n",
+            ": ping\n\n",
+            ": ping\n\n",
+            ": ping\n\n",
+            ": ping\n\n",
+            "data: {\"type\":\"delta\",\"text\":\"hi\"}\n\n\
+             data: {\"type\":\"stop\",\"usage\":{\"output_tokens\":1}}\n\n",
+        ],
+        gap: idle / 4,
+    };
+    let response = Model::new(Echo::streaming(), pinging)
+        .with_idle_timeout(Some(idle))
+        .stream(prompt())
+        .expect("the stream opens")
+        .finish()
+        .await;
+    assert!(response.is_ok(), "a pinging reply ends: {response:?}");
+}
+
+/// A reply that pings once and then falls silent stalls the idle timeout
+/// after the ping, not a whole timeout after the timer next looked.
+#[tokio::test]
+async fn a_ping_then_silence_stalls_an_idle_timeout_after_the_ping() {
+    let idle = std::time::Duration::from_millis(400);
+    let once = PacedStreamingClient {
+        chunks: vec![": ping\n\n"],
+        gap: idle / 4,
+    };
+    let started = std::time::Instant::now();
+    let stalled = Model::new(Echo::streaming(), once)
+        .with_idle_timeout(Some(idle))
+        .stream(prompt())
+        .expect("the stream opens")
+        .finish()
+        .await;
+    let took = started.elapsed();
+    assert!(
+        matches!(stalled, Err(ProviderError::Stalled(_))),
+        "a silent reply stalls: {stalled:?}"
+    );
+    // The ping at 100 ms moves the stall to about 500 ms; timing from the
+    // timer's next look would take 800 ms.
+    assert!(
+        took < idle + idle * 3 / 4,
+        "stalled {took:?} after it opened"
     );
 }
 
+/// A reader that pauses between frames does not move the stall: it comes
+/// the idle timeout after the last bytes, however long the reader took.
 #[tokio::test]
-async fn a_heartbeat_frame_never_reaches_the_decoder() {
-    let body = concat!(
-        ": keep-alive\n\n",
-        "data:  \n\n",
-        "data: {\"type\":\"stop\",\"usage\":{\"output_tokens\":0}}\n\n",
-    );
-    let http = MockStreamingClient {
-        sse_bytes: Bytes::from(body),
+async fn a_slow_reader_stalls_an_idle_timeout_after_the_last_bytes() {
+    let idle = std::time::Duration::from_millis(400);
+    let once = PacedStreamingClient {
+        chunks: vec!["data: {\"type\":\"delta\",\"text\":\"hi\"}\n\n"],
+        gap: std::time::Duration::ZERO,
     };
-    let frames = stream(&Echo::streaming(), &http, prompt(), None).expect("the stream opens");
-    let items: Vec<_> = frames.collect().await;
-    assert!(items.iter().all(|item| item.is_ok()));
-    assert_eq!(items.len(), 1, "only the terminal is a frame");
+    let mut stream = Model::new(Echo::streaming(), once)
+        .with_idle_timeout(Some(idle))
+        .stream(prompt())
+        .expect("the stream opens");
+    let started = std::time::Instant::now();
+    assert!(
+        matches!(stream.next().await, Some(Ok(_))),
+        "the delta comes"
+    );
+    tokio::time::sleep(idle * 3 / 4).await;
+    let mut last = None;
+    while let Some(item) = stream.next().await {
+        last = Some(item);
+    }
+    let took = started.elapsed();
+    assert!(
+        matches!(last, Some(Err(ProviderError::Stalled(_)))),
+        "a silent reply stalls: {last:?}"
+    );
+    // The bytes came at once, so the stall is due at about 400 ms; timing
+    // from when the reader came back would take 700 ms.
+    assert!(took < idle + idle / 2, "stalled {took:?} after the bytes");
 }
 
+/// An idle timeout longer than a browser's timer takes waits indefinitely,
+/// where a browser would otherwise fire it at once.
 #[tokio::test]
-async fn a_streams_terminal_carries_the_transport_request_id() {
-    let http = MockStreamingClient {
-        sse_bytes: Bytes::from_static(STREAM_BODY.as_bytes()),
+async fn an_idle_timeout_past_the_timer_waits_indefinitely() {
+    let delta = r#"{"type":"delta","text":"hi"}"#;
+    let stop = r#"{"type":"stop","usage":{"output_tokens":1}}"#;
+    let steady = Paced {
+        frames: vec![delta, stop],
+        gap: std::time::Duration::from_millis(10),
     };
-    // `MockStreamingClient` reports no request-id header, so a wire that
-    // names one still yields `None` rather than failing.
-    let frames = stream(&Echo::streaming(), &http, prompt(), None).expect("the stream opens");
-    let items: Vec<_> = frames.collect().await;
-    let terminal = items.iter().find_map(|item| match item {
-        Ok(StreamEvent::Final(terminal)) => Some(terminal),
-        _ => None,
-    });
+    let response = Model::new(Echo::streaming(), steady)
+        .with_idle_timeout(Some(std::time::Duration::MAX))
+        .stream(prompt())
+        .expect("the stream opens")
+        .finish()
+        .await;
+    assert!(response.is_ok(), "the reply ends: {response:?}");
+}
+
+/// A streamed reply that never opens stalls too, and its attempt ends on
+/// the stall, not as dropped.
+#[tokio::test]
+async fn a_reply_that_never_opens_ends_its_attempt_on_the_stall() {
+    use crate::observe::{Action, AdapterEnding, AdapterEvent};
+    let idle = std::time::Duration::from_millis(100);
+    let (log, context) = observed();
+    let stalled = match Model::new(Echo::streaming(), SilentStreamingClient)
+        .with_idle_timeout(Some(idle))
+        .stream_observed(prompt(), context)
+    {
+        Ok(stream) => stream.finish().await,
+        Err(error) => Err(error),
+    };
+    assert!(
+        matches!(stalled, Err(ProviderError::Stalled(after)) if after == idle),
+        "a reply that never opens stalls: {stalled:?}"
+    );
+    let endings: Vec<AdapterEnding> = log
+        .trace()
+        .observations
+        .iter()
+        .filter_map(|observation| match &observation.action {
+            Action::Adapter { observation } => match &observation.event {
+                AdapterEvent::Finished { ending } => Some(ending.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert!(
+        matches!(
+            endings.as_slice(),
+            [AdapterEnding::Error {
+                retryable: true,
+                ..
+            }]
+        ),
+        "the attempt ends once, on the stall: {endings:?}"
+    );
+}
+
+/// A streamed reply's `raw` is what its reassembler rebuilt: the whole
+/// document at the provider's end, and the document so far on a stream cut
+/// short or failed by its transport, which `partial()` then carries.
+#[tokio::test]
+async fn a_streamed_reply_records_its_document_whole_cut_or_failed() {
+    let delta = r#"{"type":"delta","text":"hi "}"#;
+    let whole = MockStreamingClient {
+        sse_bytes: Bytes::from(format!(
+            "data: {delta}\n\ndata: {{\"type\":\"delta\",\"text\":\"there\"}}\n\n\
+             data: {{\"type\":\"stop\",\"usage\":{{\"output_tokens\":3}}}}\n\n"
+        )),
+    };
+    let response = Model::new(Echo::streaming(), whole)
+        .stream(prompt())
+        .expect("the stream opens")
+        .finish()
+        .await
+        .expect("the reply ends");
     assert_eq!(
-        terminal.and_then(|terminal| terminal.provider_request_id.as_deref()),
-        None
+        response.raw,
+        serde_json::from_str::<serde_json::Value>(UNARY_BODY).expect("the unary body is JSON"),
+        "the stream rebuilds the unary document"
     );
+
+    let so_far = json!({"type": "message", "text": "hi "});
+    let cut = MockStreamingClient {
+        sse_bytes: Bytes::from(format!("data: {delta}\n\n")),
+    };
+    let mut stream = Model::new(Echo::streaming(), cut)
+        .stream(prompt())
+        .expect("the stream opens");
+    while stream.next().await.is_some() {}
+    assert_eq!(
+        stream.partial().raw,
+        so_far,
+        "a cut stream keeps the document so far"
+    );
+
+    let mut stream = Model::new(Echo::streaming(), Broken(vec![delta]))
+        .stream(prompt())
+        .expect("the stream opens");
+    let items: Vec<_> = (&mut stream).collect().await;
+    assert!(
+        items.last().is_some_and(Result::is_err),
+        "the transport failure ends the stream: {items:?}"
+    );
+    assert_eq!(
+        stream.partial().raw,
+        so_far,
+        "a failed stream keeps the document so far"
+    );
+}
+
+/// A caller that stops polling leaves the reassembler unfinished, so the
+/// reply records no `raw`.
+#[tokio::test]
+async fn a_stream_the_caller_stopped_polling_records_no_raw() {
+    let http = MockStreamingClient {
+        sse_bytes: Bytes::from_static(
+            b"data: {\"type\":\"delta\",\"text\":\"hi \"}\n\n\
+              data: {\"type\":\"delta\",\"text\":\"there\"}\n\n",
+        ),
+    };
+    let mut stream = Model::new(Echo::streaming(), http)
+        .stream(prompt())
+        .expect("the stream opens");
+    let _first = stream.next().await;
+    assert!(stream.partial().raw.is_null());
 }
 
 // ── observation ────────────────────────────────────────────────────────
@@ -580,36 +781,45 @@ fn events(log: &ObservationLog) -> Vec<String> {
         .collect()
 }
 
+/// A tool call whose input is not JSON never fails the reply: the call is
+/// kept with its raw text, in both modes.
 #[tokio::test]
-async fn a_streams_observation_facts_arrive_in_the_old_order() {
-    let (log, context) = observed();
-    let http = MockStreamingClient {
-        sse_bytes: Bytes::from_static(STREAM_BODY.as_bytes()),
-    };
-    let frames =
-        stream(&Echo::streaming(), &http, prompt(), Some(context)).expect("the stream opens");
-    let _: Vec<_> = frames.collect().await;
-    assert_eq!(
-        events(&log),
-        vec![
-            "started", "response",
-            // Each frame's payload is projected before it is classified.
-            "provider", "provider", "usage", "provider", "finished",
-        ]
+async fn a_malformed_tool_input_is_kept_with_its_raw_text() {
+    let http = RecordingHttpClient::new(
+        r#"{"type":"tool","name":"add","arguments":"{not json","usage":{"output_tokens":1}}"#,
     );
-}
-
-#[tokio::test]
-async fn a_unary_call_closes_its_attempt_as_decoded() {
-    let (log, context) = observed();
-    let http = RecordingHttpClient::new(UNARY_BODY);
-    call(&Echo::unary(), &http, prompt(), Some(context))
+    let response = call(&Echo::unary(), &http, prompt(), None)
         .await
-        .expect("the reply decodes");
+        .expect("a malformed call does not fail the reply");
+    let call_of = |response: &crate::completion::CompletionResponse| {
+        response
+            .tool_calls()
+            .map(|call| {
+                (
+                    call.function.arguments_value(),
+                    call.function.invalid_arguments.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
     assert_eq!(
-        events(&log),
-        vec!["started", "response", "usage", "provider", "finished"]
+        call_of(&response),
+        [(serde_json::json!({}), Some("{not json".to_owned()))]
     );
+
+    let http = MockStreamingClient {
+        sse_bytes: Bytes::from_static(
+            b"data: {\"type\":\"tool\",\"name\":\"add\",\"arguments\":\"{not json\"}\n\n\
+              data: {\"type\":\"stop\",\"usage\":{\"output_tokens\":1}}\n\n",
+        ),
+    };
+    let streamed = Model::new(Echo::streaming(), http)
+        .stream(prompt())
+        .expect("the stream opens")
+        .finish()
+        .await
+        .expect("a malformed call does not fail the stream");
+    assert_eq!(call_of(&streamed), call_of(&response));
 }
 
 #[tokio::test]
@@ -624,262 +834,154 @@ async fn a_failed_unary_call_projects_the_reply_it_failed_on() {
         .expect_err("a 400 fails the call");
     let events = events(&log);
     assert!(
-        events.contains(&"usage".to_owned()),
+        events.contains(&"provider".to_owned()),
         "the failed reply's facts are still projected: {events:?}"
     );
     assert_eq!(events.last().map(String::as_str), Some("finished"));
 }
 
+/// The driver observes a reply's usage once, when it ends, from the usage
+/// the decoder normalized into its end: unary or streamed, it is the
+/// response's usage, with no invented total.
+#[tokio::test]
+async fn a_reply_observes_its_finish_usage_once() {
+    let streamed = MockStreamingClient {
+        sse_bytes: Bytes::from_static(
+            b"data: {\"type\":\"delta\",\"text\":\"hi\"}\n\n\
+              data: {\"type\":\"stop\",\"usage\":{\"output_tokens\":3}}\n\n",
+        ),
+    };
+    for (observed, usage) in [
+        crate::driver::tests::observed_usage(
+            Echo::unary(),
+            RecordingHttpClient::new(UNARY_BODY),
+            Mode::Unary,
+        )
+        .await,
+        crate::driver::tests::observed_usage(Echo::streaming(), streamed, Mode::Streaming).await,
+    ] {
+        let expected = crate::observe::AdapterUsage {
+            output_tokens: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(observed, std::slice::from_ref(&expected));
+        assert_eq!(expected, crate::observe::AdapterUsage::from(&usage));
+    }
+}
+
+/// A stream that carries usage and then fails has no end, so it observes
+/// no usage, and its attempt closes on the failure, not as `Terminal`.
+/// Before usage was observed from the end, the raw-bytes projector reported
+/// the failing stream's usage frame.
+#[tokio::test]
+async fn a_failed_stream_observes_no_usage() {
+    use crate::observe::{Action, AdapterEnding, AdapterEvent};
+    // Each frame carries usage the old projector would have reported.
+    let usage_frame =
+        "data: {\"type\":\"delta\",\"text\":\"hi\",\"usage\":{\"output_tokens\":3}}\n\n";
+    let in_band =
+        format!("{usage_frame}data: {{\"type\":\"error\",\"message\":\"overloaded\"}}\n\n");
+    for (sse, ended) in [
+        (
+            in_band,
+            (|ending: &AdapterEnding| matches!(ending, AdapterEnding::Error { .. }))
+                as fn(&AdapterEnding) -> bool,
+        ),
+        (usage_frame.to_owned(), |ending| {
+            matches!(ending, AdapterEnding::Eof { after: 1 })
+        }),
+    ] {
+        let (log, context) = observed();
+        let http = MockStreamingClient {
+            sse_bytes: Bytes::from(sse),
+        };
+        let result = match Model::new(Echo::streaming(), http).stream_observed(prompt(), context) {
+            Ok(stream) => stream.finish().await,
+            Err(error) => Err(error),
+        };
+        assert!(result.is_err(), "the stream fails");
+        let adapter: Vec<AdapterEvent> = log
+            .trace()
+            .observations
+            .iter()
+            .filter_map(|observation| match &observation.action {
+                Action::Adapter { observation } => Some(observation.event.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !adapter
+                .iter()
+                .any(|event| matches!(event, AdapterEvent::Usage { .. })),
+            "a failed stream observes no usage: {adapter:?}"
+        );
+        let endings: Vec<&AdapterEnding> = adapter
+            .iter()
+            .filter_map(|event| match event {
+                AdapterEvent::Finished { ending } => Some(ending),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            matches!(endings.as_slice(), [ending] if ended(ending)),
+            "the attempt closes once, on the failure: {endings:?}"
+        );
+    }
+}
+
 // ── paging ─────────────────────────────────────────────────────────────
 
-/// A model-listing wire whose first reply names a second page.
-#[derive(Clone, Debug, PartialEq)]
-struct Catalogue;
-
-#[derive(Default)]
-struct CatalogueDecoder {
-    next: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct Page {
-    data: Vec<String>,
-    #[serde(default)]
-    next: Option<String>,
-}
-
-impl Decoder<ModelListing> for CatalogueDecoder {
-    type Event = Page;
-
-    fn classify(&self, frame: WireFrame) -> WireEvent<Self::Event> {
-        let text = frame.as_str();
-        match serde_json::from_str(&text) {
-            Ok(page) => WireEvent::Known(page),
-            Err(error) => {
-                WireEvent::Corrupt(crate::error::CorruptFrame::text(None, text.as_ref(), error))
-            }
-        }
-    }
-
-    fn interpret(&mut self, page: Self::Event, out: &mut Output<ModelListing>) {
-        self.next = page.next;
-        out.push(Ok(ModelList::new(
-            page.data.into_iter().map(Model::from_id).collect(),
-        )));
-    }
-
-    fn continuation(&self) -> Option<http::Request<Body>> {
-        let cursor = self.next.as_ref()?;
-        http::Request::get(format!("https://echo.invalid/v1/models?after={cursor}"))
-            .body(Body::empty())
-            .ok()
-    }
-}
-
-impl Wire for Catalogue {
-    type Op = ModelListing;
-    type Decoder = CatalogueDecoder;
-
-    fn name(&self) -> &str {
-        "echo"
-    }
-
-    fn encode(&self, _request: (), _mode: Mode) -> Result<Encoded, EncodeError> {
-        let request = http::Request::get("https://echo.invalid/v1/models").body(Body::empty())?;
-        Ok(Encoded::new(request, Framing::Whole))
-    }
-
-    fn decoder(&self, _mode: Mode) -> Self::Decoder {
-        CatalogueDecoder::default()
-    }
-}
-
-#[tokio::test]
-async fn a_paged_listing_follows_every_continuation() {
-    let http = SequencedHttpClient::new([
-        MockHttpResponse::success(r#"{"data":["a","b"],"next":"b"}"#),
-        MockHttpResponse::success(r#"{"data":["c"]}"#),
-    ]);
-    let bound = Bound::new(Catalogue, http.clone());
-    let models = bound.list_all().await.expect("both pages decode");
-    assert_eq!(
-        models
-            .iter()
-            .map(|model| model.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["a", "b", "c"]
-    );
-    let paths: Vec<_> = http
-        .requests()
-        .into_iter()
-        .map(|request| request.uri)
-        .collect();
-    assert_eq!(
-        paths,
-        vec![
-            "https://echo.invalid/v1/models".to_owned(),
-            "https://echo.invalid/v1/models?after=b".to_owned(),
-        ]
-    );
-}
-
-#[tokio::test]
-async fn a_listing_that_repeats_its_cursor_stops_after_the_repeated_page() {
-    // The second page names the cursor that fetched it, so the next request
-    // would be identical to the one just answered (rig#2334).
-    let http = SequencedHttpClient::new([
-        MockHttpResponse::success(r#"{"data":["a"],"next":"b"}"#),
-        MockHttpResponse::success(r#"{"data":["b"],"next":"b"}"#),
-        MockHttpResponse::success(r#"{"data":["never"]}"#),
-    ]);
-    let bound = Bound::new(Catalogue, http.clone());
-    let models = bound.list_all().await.expect("the fetched pages decode");
-    assert_eq!(
-        models
-            .iter()
-            .map(|model| model.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["a", "b"]
-    );
-    assert_eq!(
-        http.requests().len(),
-        2,
-        "the repeated cursor is not re-sent"
-    );
-}
-
-#[tokio::test]
-async fn a_listing_whose_cursor_keeps_changing_stops_at_the_page_ceiling() {
-    let pages = (0..super::MAX_CONTINUATION_PAGES + 5).map(|page| {
-        MockHttpResponse::success(format!(r#"{{"data":["m{page}"],"next":"c{}"}}"#, page + 1))
-    });
-    let http = SequencedHttpClient::new(pages);
-    let bound = Bound::new(Catalogue, http.clone());
-    let models = bound.list_all().await.expect("the fetched pages decode");
-    assert_eq!(models.len(), super::MAX_CONTINUATION_PAGES);
-    assert_eq!(http.requests().len(), super::MAX_CONTINUATION_PAGES);
-}
-
 // ── telemetry ──────────────────────────────────────────────────────────
-
-#[test]
-fn the_completion_operation_names_its_span_by_mode() {
-    assert_eq!(
-        Completion::telemetry(false),
-        crate::telemetry::GenAiOperation::Chat
-    );
-    assert_eq!(
-        Completion::telemetry(true),
-        crate::telemetry::GenAiOperation::ChatStreaming
-    );
-}
 
 #[tokio::test]
 async fn the_driver_records_the_folded_responses_metadata() {
     use tracing::subscriber::with_default;
-    use tracing_subscriber::layer::SubscriberExt;
 
-    let recorded = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
-    let layer = RecordFields {
-        recorded: recorded.clone(),
-    };
-    let subscriber = tracing_subscriber::registry().with(layer);
-    let bound = Bound::new(Echo::unary(), RecordingHttpClient::new(UNARY_BODY));
-    let response = with_default(subscriber, || {
-        futures::executor::block_on(bound.completion(prompt()))
+    let capture = TraceCapture::default();
+    let bound = Model::new(Echo::unary(), RecordingHttpClient::new(UNARY_BODY));
+    let response = with_default(capture.subscriber(), || {
+        futures::executor::block_on(bound.call(prompt()))
     })
     .expect("the reply decodes");
-    assert_eq!(response.model.as_deref(), Some("echo-1"));
-    let recorded = recorded.lock().expect("no panic held the lock").clone();
+    assert_eq!(response.model(), Some("echo-1"));
     assert!(
-        recorded
-            .iter()
-            .any(|(field, value)| field == "gen_ai.response.model" && value == "echo-1"),
-        "expected the response model on the span: {recorded:?}"
+        capture
+            .values_of("gen_ai.response.model")
+            .contains(&json!("echo-1")),
+        "expected the response model on the span"
     );
     assert!(
-        recorded
-            .iter()
-            .any(|(field, _)| field == "gen_ai.usage.output_tokens"),
-        "expected usage on the span: {recorded:?}"
+        !capture.values_of("gen_ai.usage.output_tokens").is_empty(),
+        "expected usage on the span"
     );
 }
 
-#[tokio::test]
-async fn the_span_names_the_requests_model_override_not_the_wires() {
+/// A streamed embedding records its response on the span when it
+/// finishes, as a call does.
+#[test]
+fn a_streamed_embedding_records_its_response_on_the_span() {
     use tracing::subscriber::with_default;
-    use tracing_subscriber::layer::SubscriberExt;
 
-    let recorded = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
-    let layer = RecordFields {
-        recorded: recorded.clone(),
-    };
-    let subscriber = tracing_subscriber::registry().with(layer);
-    let bound = Bound::new(Echo::unary(), RecordingHttpClient::new(UNARY_BODY));
-    let request = CompletionRequest {
-        model: Some("echo-override".to_owned()),
-        ..prompt()
-    };
-    with_default(subscriber, || {
-        futures::executor::block_on(bound.completion(request))
-    })
-    .expect("the reply decodes");
-    let recorded = recorded.lock().expect("no panic held the lock").clone();
-    assert!(
-        recorded
-            .iter()
-            .any(|(field, value)| field == "gen_ai.request.model" && value == "echo-override"),
-        "expected the override on the span: {recorded:?}"
+    const REPLY: &str = r#"{"object":"list","model":"text-embedding-3-small","data":[{"object":"embedding","index":0,"embedding":[0.1]}],"usage":{"prompt_tokens":2,"total_tokens":2}}"#;
+    let capture = TraceCapture::default();
+    let wire = crate::providers::openai::wire::OpenAIConfig::new("sk-test")
+        .embedding("text-embedding-3-small", None);
+    let model = Model::new(
+        wire,
+        SequencedHttpClient::new([MockHttpResponse::success(REPLY)]),
     );
-}
-
-/// Captures every field recorded on a span, so the driver's telemetry is
-/// asserted through `tracing` rather than through its own call sites.
-struct RecordFields {
-    recorded: Arc<std::sync::Mutex<Vec<(String, String)>>>,
-}
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RecordFields {
-    fn on_new_span(
-        &self,
-        attrs: &tracing::span::Attributes<'_>,
-        _id: &tracing::Id,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        let mut recorded = self
-            .recorded
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        attrs.record(&mut Visit(&mut recorded));
-    }
-
-    fn on_record(
-        &self,
-        _id: &tracing::Id,
-        values: &tracing::span::Record<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        let mut recorded = self
-            .recorded
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        values.record(&mut Visit(&mut recorded));
-    }
-}
-
-struct Visit<'a>(&'a mut Vec<(String, String)>);
-impl tracing::field::Visit for Visit<'_> {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        self.0.push((field.name().to_owned(), format!("{value:?}")));
-    }
-
-    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        self.0.push((field.name().to_owned(), value.to_owned()));
-    }
-
-    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
-        self.0.push((field.name().to_owned(), value.to_string()));
-    }
+    with_default(capture.subscriber(), || {
+        let stream = model
+            .stream(vec!["a".to_owned()])
+            .expect("the embedding opens");
+        futures::executor::block_on(stream.finish()).expect("the reply folds")
+    });
+    assert!(
+        capture
+            .values_of("gen_ai.response.model")
+            .contains(&json!("text-embedding-3-small")),
+        "expected the response model on the span"
+    );
 }
 
 /// The text a folded response carries, for the assertions below.
@@ -890,254 +992,117 @@ fn text_of(response: &crate::completion::CompletionResponse) -> Option<&str> {
     })
 }
 
-// ── the mode a decoder is built for ─────────────────────────────────────
-
-/// A wire whose decoder runs the whole-reply guard the two real ones run
-/// (`providers::openai::wire::chat`, `providers::gemini::streaming`): a
-/// reply that delivered no content and named no terminal is the provider
-/// answering with nothing when it arrived whole, and truncation when it was
-/// streamed. The [`Mode`] it was built for is the only thing that tells the
-/// two apart, so this wire is what pins that `call` and `stream` each hand
-/// [`Wire::decoder`] the mode they actually are.
-#[derive(Clone, Debug, PartialEq)]
-struct Guarded(Framing);
-
-struct GuardedDecoder {
-    /// This reply arrives whole, so its EOF ends an answer.
-    whole: bool,
-}
-
-impl Decoder<Completion> for GuardedDecoder {
-    type Event = ();
-
-    fn classify(&self, _frame: WireFrame) -> WireEvent<()> {
-        WireEvent::Known(())
-    }
-
-    /// Every frame decodes and none of them delivers content: the state the
-    /// guard exists for, reached without a second frame vocabulary.
-    fn interpret(&mut self, _event: (), _out: &mut Output<Completion>) {}
-
-    fn finish(&mut self, out: &mut Output<Completion>) {
-        if self.whole {
-            out.error(ProviderError::Response(
-                crate::message::EMPTY_RESPONSE_ERROR.to_owned(),
-            ));
-        }
-    }
-}
-
-impl Wire for Guarded {
-    type Op = Completion;
-    type Decoder = GuardedDecoder;
-
-    fn name(&self) -> &str {
-        "guarded"
-    }
-
-    fn encode(&self, _request: CompletionRequest, _mode: Mode) -> Result<Encoded, EncodeError> {
-        let request = http::Request::post("https://echo.invalid/v1/messages")
-            .body(Body::Bytes(Vec::new()))?;
-        Ok(Encoded::new(request, self.0))
-    }
-
-    fn decoder(&self, mode: Mode) -> Self::Decoder {
-        GuardedDecoder {
-            whole: mode == Mode::Unary,
-        }
-    }
-}
-
-#[tokio::test]
-async fn the_mode_a_decoder_is_built_for_decides_what_its_eof_means() {
-    let unary = Bound::new(Guarded(Framing::Whole), RecordingHttpClient::new("{}"));
-    let error = unary
-        .completion(prompt())
-        .await
-        .expect_err("a whole reply that delivered nothing is not an answer");
-    assert!(
-        matches!(&error, ProviderError::Response(message)
-            if message == crate::message::EMPTY_RESPONSE_ERROR),
-        "expected the empty-reply error, got {error:?}"
-    );
-
-    let streaming = Bound::new(
-        Guarded(Framing::Sse),
-        MockStreamingClient {
-            sse_bytes: Bytes::from_static(b"data: {}\n\n"),
-        },
-    );
-    let mut response = streaming.stream(prompt()).await.expect("the stream opens");
-    let mut errors = Vec::new();
-    while let Some(item) = response.next().await {
-        if let Err(error) = item {
-            errors.push(error);
-        }
-    }
-    assert!(
-        errors.is_empty(),
-        "a streamed reply's EOF is truncation — reported by carrying no \
-         terminal record, not by an error: {errors:?}"
-    );
-}
-
-/// A stream opens one byte-body request. A wire that encodes a batch or a
-/// multipart body for a stream fails before anything is sent, as a request
-/// that could not be built.
+/// A stream opens one byte-body request. A wire that encodes a multipart
+/// body for a stream fails before anything is sent, as a request that could
+/// not be built: the stream's only item.
 #[test]
 fn a_stream_the_driver_cannot_send_is_a_request_failure() {
-    struct Batch;
-    impl Wire for Batch {
-        type Op = Completion;
-        type Decoder = EchoDecoder;
-        fn name(&self) -> &str {
+    #[derive(Clone, Debug)]
+    struct Multipart;
+    impl crate::completion::ReplayTarget for Multipart {
+        fn map_options(
+            &self,
+            _request: &crate::completion::CompletionRequest,
+            fields: crate::completion::options::OptionFields<'_>,
+        ) -> crate::completion::options::OptionMap {
+            crate::test_utils::refuse_options(fields)
+        }
+
+        fn api(&self) -> crate::message::Api {
+            crate::message::Api::from_static("echo.chat")
+        }
+        fn provider(&self) -> &str {
             "echo"
         }
-        fn encode(&self, _request: CompletionRequest, _mode: Mode) -> Result<Encoded, EncodeError> {
-            let one =
-                || http::Request::post("https://echo.invalid/a").body(Body::Bytes(Vec::new()));
-            let mut encoded = Encoded::new(one()?, Framing::Sse);
-            encoded.requests.push(one()?);
-            Ok(encoded)
+        fn model(&self) -> &str {
+            ""
         }
-        fn decoder(&self, _mode: Mode) -> Self::Decoder {
-            EchoDecoder
+
+        fn accepts(&self, _model: &str) -> crate::completion::Accepts {
+            crate::completion::Accepts::ALL
         }
     }
-    struct Multipart;
     impl Wire for Multipart {
         type Op = Completion;
-        type Decoder = EchoDecoder;
-        fn name(&self) -> &str {
-            "echo"
+        type Payload = Encoded;
+        type Frame = WireFrame;
+        type Event = Frame;
+        type Decoder<'id> = EchoDecoder<'id>;
+        type Reassembler = EchoDocument;
+        fn describe(&self) -> Descriptor<'_> {
+            Descriptor::new("echo").replay(self)
         }
         fn encode(&self, _request: CompletionRequest, _mode: Mode) -> Result<Encoded, EncodeError> {
             let request = http::Request::post("https://echo.invalid/a")
                 .body(Body::Multipart(crate::http_client::MultipartForm::new()))?;
             Ok(Encoded::new(request, Framing::Sse))
         }
-        fn decoder(&self, _mode: Mode) -> Self::Decoder {
-            EchoDecoder
+        fn decoder<'id>(&self) -> Self::Decoder<'id> {
+            EchoDecoder::default()
         }
     }
 
     let http = crate::test_utils::RecordingHttpClient::new("");
-    for (error, message) in [
-        (
-            stream(&Batch, &http, prompt(), None).err(),
-            "RequestError: a streamed reply takes exactly one request, not 2",
-        ),
-        (
-            stream(&Multipart, &http, prompt(), None).err(),
-            "RequestError: a multipart request cannot open a streamed reply",
-        ),
-    ] {
-        let error = error.expect("the stream must not open");
-        assert_eq!(error.to_string(), message);
-        assert_eq!(error.kind(), crate::error::ErrorKind::Request);
-        assert_eq!(
-            error.boundary(),
-            crate::observe::AdapterErrorBoundary::Request
-        );
-        assert!(!error.is_retryable());
-    }
-}
-
-// ── captured success-reply headers ─────────────────────────────────────
-
-/// A successful reply's headers: three `x-codex-*` ones — one repeated, one
-/// not valid UTF-8 — beside headers no dialect captures here.
-fn codex_reply_headers(content_type: &'static str) -> http::HeaderMap {
-    let mut headers = http::HeaderMap::new();
-    headers.insert(
-        http::header::CONTENT_TYPE,
-        http::HeaderValue::from_static(content_type),
+    let items: Vec<_> = futures::executor::block_on(
+        stream(&Multipart, &http, prompt(), None)
+            .expect("the request encodes")
+            .collect::<Vec<_>>(),
     );
-    headers.insert("request-id", http::HeaderValue::from_static("req_9"));
-    headers.insert(
-        "x-codex-primary-used-percent",
-        http::HeaderValue::from_static("12.5"),
-    );
-    headers.append(
-        "x-codex-credits-balance",
-        http::HeaderValue::from_static("10"),
-    );
-    headers.append(
-        "x-codex-credits-balance",
-        http::HeaderValue::from_static("20"),
-    );
-    headers.insert(
-        "x-codex-promo-message",
-        http::HeaderValue::from_bytes(b"caf\xe9").expect("an opaque header value"),
-    );
-    headers
-}
-
-/// What a dialect capturing `x-codex-` keeps from [`codex_reply_headers`]:
-/// only those headers, a repeated one joined in arrival order, and a value
-/// that is not UTF-8 converted lossily.
-fn captured_codex_headers() -> crate::completion::ProviderResponseHeaders {
-    [
-        ("x-codex-credits-balance", "10, 20"),
-        ("x-codex-primary-used-percent", "12.5"),
-        ("x-codex-promo-message", "caf\u{FFFD}"),
-    ]
-    .into_iter()
-    .map(|(name, value)| (name.to_owned(), value.to_owned()))
-    .collect()
-}
-
-#[tokio::test]
-async fn a_unary_reply_keeps_the_success_headers_its_dialect_captures() {
-    let http = RecordingHttpClient::new(UNARY_BODY);
-    http.set_response(MockHttpResponse::SuccessWithHeaders(
-        Bytes::from_static(UNARY_BODY.as_bytes()),
-        codex_reply_headers("application/json"),
-    ));
-    let bound = Bound::new(Echo::unary().capturing("x-codex-"), http.clone());
-    let response = bound.completion(prompt()).await.expect("the reply decodes");
-    assert_eq!(response.provider_response_headers, captured_codex_headers());
-
-    // A wire that captures nothing keeps nothing from the same reply.
-    let plain = Bound::new(Echo::unary(), http);
-    let response = plain.completion(prompt()).await.expect("the reply decodes");
-    assert!(response.provider_response_headers.is_empty());
-}
-
-#[tokio::test]
-async fn a_streamed_reply_keeps_the_success_headers_its_dialect_captures() {
-    let http = NonSuccessStreamingClient {
-        status: http::StatusCode::OK,
-        headers: codex_reply_headers("text/event-stream"),
-        body: Bytes::from_static(STREAM_BODY.as_bytes()),
+    let [Err(error)] = items.as_slice() else {
+        panic!("the failure is the stream's only item: {items:?}");
     };
-    let frames = stream(
-        &Echo::streaming().capturing("x-codex-"),
-        &http,
-        prompt(),
-        None,
-    )
-    .expect("the stream opens");
-    let items: Vec<_> = frames.collect().await;
-    let terminal = items
-        .iter()
-        .find_map(|item| match item {
-            Ok(StreamEvent::Final(terminal)) => Some(terminal),
-            _ => None,
-        })
-        .expect("the stream ends with a terminal record");
-    assert_eq!(terminal.provider_response_headers, captured_codex_headers());
+    assert_eq!(
+        error.to_string(),
+        "RequestError: a multipart request cannot open a streamed reply"
+    );
+    assert_eq!(error.kind(), crate::error::ErrorKind::Request);
+    assert_eq!(
+        error.boundary(),
+        crate::observe::AdapterErrorBoundary::Request
+    );
+    assert!(!error.is_retryable());
+    assert!(http.requests().is_empty(), "nothing was sent");
+}
 
-    // A wire that captures nothing still ends in a terminal record, which
-    // keeps no headers.
-    let frames = stream(&Echo::streaming(), &http, prompt(), None).expect("the stream opens");
-    let items: Vec<_> = frames.collect().await;
-    let terminal = items
-        .iter()
-        .find_map(|item| match item {
-            Ok(StreamEvent::Final(terminal)) => Some(terminal),
-            _ => None,
-        })
-        .expect("the stream ends with a terminal record");
-    assert!(terminal.provider_response_headers.is_empty());
+// ── request validation ─────────────────────────────────────────────────
+
+/// An erased model observed under a context records the adapter events the
+/// model it was made from records, called or streamed.
+#[tokio::test]
+async fn an_erased_model_is_observed_as_the_model_it_was_made_from() {
+    let reply = r#"{"type":"text","text":"hi","usage":{"output_tokens":1}}"#;
+    let direct = {
+        let (log, context) = observed();
+        let _ = Model::new(Echo::unary(), RecordingHttpClient::new(reply))
+            .call_observed(prompt(), context)
+            .await;
+        events(&log)
+    };
+    let erased = {
+        let (log, context) = observed();
+        let _ = Model::new(Echo::unary(), RecordingHttpClient::new(reply))
+            .erase()
+            .call_observed(prompt(), context)
+            .await;
+        events(&log)
+    };
+    assert!(!direct.is_empty(), "the direct call is observed");
+    assert_eq!(direct, erased);
+
+    let streamed = |erase: bool| async move {
+        let (log, context) = observed();
+        let model = Model::new(Echo::streaming(), RecordingHttpClient::new(reply));
+        let opened = if erase {
+            model.erase().stream_observed(prompt(), context)
+        } else {
+            model.stream_observed(prompt(), context)
+        };
+        if let Ok(stream) = opened {
+            let _ = stream.finish().await;
+        }
+        events(&log)
+    };
+    let direct = streamed(false).await;
+    assert!(!direct.is_empty(), "the direct stream is observed");
+    assert_eq!(direct, streamed(true).await);
 }

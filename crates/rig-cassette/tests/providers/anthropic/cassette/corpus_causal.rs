@@ -10,14 +10,12 @@
 use futures::StreamExt;
 use rig::agent::tool::server::ToolServer;
 use rig::agent::{AgentBuilder, MultiTurnStreamItem};
-use rig::bus::Bus;
-use rig::driver::Bound;
 use rig::effect::{EffectFamily, HandlerKey};
+use rig::handlers::Handlers;
 use rig::providers::anthropic::completion::CLAUDE_SONNET_4_6;
-use rig::providers::anthropic::wire::Anthropic;
-use rig::serve::ServingPolicy;
 use rig::tool::RegisteredTool;
 use rig_cassette::agent::AgentReplayExt;
+use rig_test_support::cassette_models::AnthropicModels;
 
 use super::super::support::with_anthropic_corpus_causal_cassette;
 use crate::goldens::{Lookup, NestedChild, Nesting, families, parent_positions};
@@ -27,7 +25,6 @@ pub(super) const TOOLS_PREAMBLE: &str =
 pub(super) const PROMPT: &str = "Use the lookup tool with q set to exactly \"What is the capital of France?\" and reply with just the lookup result.";
 
 struct Host {
-    serial: bool,
     streamed: bool,
 }
 
@@ -35,23 +32,19 @@ async fn final_output(stream: &mut rig::agent::StreamingResult) -> String {
     let mut output = None;
     while let Some(item) = stream.next().await {
         if let MultiTurnStreamItem::FinalResponse(response) = item.expect("the stream yields") {
-            output = Some(response.output);
+            output = Some(response.output());
         }
     }
     output.expect("a final response")
 }
 
-async fn over_host(client: Bound<Anthropic>, host: Host) -> rig::cassette::effect_log::EffectLog {
-    let config = ServingPolicy {
-        serial_per_handler: host.serial,
-        ..ServingPolicy::default()
-    };
-    let (dispatcher, registrar, mut driver) = Bus::channel_with(config);
+async fn over_host(client: AnthropicModels, host: Host) -> rig::cassette::effect_log::EffectLog {
+    let handlers = Handlers::default();
     let model_key = HandlerKey::from("golden/model:default");
-    driver
+    handlers
         .register_erased(
             model_key.clone(),
-            rig::serve::ErasedHandler::new(rig::serve::adapters::CompletionAdapter::new(
+            rig::serve::ErasedHandler::new(rig::serve::adapters::ModelAdapter::new(
                 "default",
                 client.completion(CLAUDE_SONNET_4_6),
             )),
@@ -62,15 +55,13 @@ async fn over_host(client: Bound<Anthropic>, host: Host) -> rig::cassette::effec
     } else {
         rig::cassette::effect_log::EffectLogRecorder::new()
     };
-    driver.record_to(recorder.clone());
-    let driver = tokio::spawn(driver);
+    handlers.record_to(recorder.clone());
     let server = ToolServer::new()
         .owner("golden")
         .registered_tool(
             RegisteredTool::from_handler(Lookup {
                 nesting: Nesting {
                     child: NestedChild::Completion,
-                    from_thread: false,
                     detached: false,
                     no_temperature: false,
                 },
@@ -79,7 +70,7 @@ async fn over_host(client: Bound<Anthropic>, host: Host) -> rig::cassette::effec
             .expect("a tool-family handler"),
         )
         .run();
-    let agent = AgentBuilder::over_bus(dispatcher.clone(), registrar.clone(), "golden", model_key)
+    let agent = AgentBuilder::over_handlers(handlers.clone(), "golden", model_key)
         .name("golden")
         .preamble(TOOLS_PREAMBLE)
         .temperature(0.0)
@@ -96,13 +87,11 @@ async fn over_host(client: Bound<Anthropic>, host: Host) -> rig::cassette::effec
             .max_turns(3)
             .await
             .expect("the agent answers")
-            .output
+            .output()
     };
     assert!(output.contains("Paris"), "{output}");
     let log = agent.stamp(recorder.take());
-    drop((agent, dispatcher, registrar));
-    driver.await.expect("the host's driver");
-    assert_eq!(log.header.bus, None, "the policy is the host's");
+    drop(agent);
     // The tool's completion is the model key's second record, made from
     // the tool's record.
     assert_eq!(
@@ -121,14 +110,7 @@ async fn over_host(client: Bound<Anthropic>, host: Host) -> rig::cassette::effec
 #[tokio::test]
 async fn completion_serial_effect_log_is_the_golden_fixture() {
     with_anthropic_corpus_causal_cassette("corpus_causal/completion_serial", |client| async move {
-        let log = over_host(
-            client,
-            Host {
-                serial: true,
-                streamed: false,
-            },
-        )
-        .await;
+        let log = over_host(client, Host { streamed: false }).await;
         crate::goldens::golden_effects("anthropic_causal_completion_serial", &log);
     })
     .await;
@@ -139,14 +121,7 @@ async fn completion_concurrent_effect_log_is_the_golden_fixture() {
     with_anthropic_corpus_causal_cassette(
         "corpus_causal/completion_concurrent",
         |client| async move {
-            let log = over_host(
-                client,
-                Host {
-                    serial: false,
-                    streamed: false,
-                },
-            )
-            .await;
+            let log = over_host(client, Host { streamed: false }).await;
             crate::goldens::golden_effects("anthropic_causal_completion_concurrent", &log);
         },
     )
@@ -158,14 +133,7 @@ async fn completion_streamed_effect_log_is_the_golden_fixture() {
     with_anthropic_corpus_causal_cassette(
         "corpus_causal/completion_streamed",
         |client| async move {
-            let log = over_host(
-                client,
-                Host {
-                    serial: false,
-                    streamed: true,
-                },
-            )
-            .await;
+            let log = over_host(client, Host { streamed: true }).await;
             // The run's completions are streamed with their events; the
             // tool's nested completion is unary.
             assert!(log.records[0].events.is_some());

@@ -5,11 +5,7 @@ use rig::agent::MultiTurnStreamItem;
 use rig::message::{
     AssistantContent, DocumentSourceKind, ImageMediaType, Message, ToolResultContent, UserContent,
 };
-use rig::prelude::*;
 use rig::providers::gemini;
-use rig::providers::gemini::completion::gemini_api_types::{
-    AdditionalParameters, GenerationConfig,
-};
 use rig::tool::{Tool, ToolOutput};
 use serde_json::json;
 
@@ -19,8 +15,7 @@ const RED_PIXEL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ
 const MULTIMODAL_FUNCTION_RESPONSE_MODEL: &str = gemini::completion::GEMINI_3_FLASH_PREVIEW;
 
 fn streaming_tool_params() -> serde_json::Value {
-    serde_json::to_value(AdditionalParameters::default().with_config(GenerationConfig::default()))
-        .expect("Gemini additional params should serialize")
+    json!({ "generationConfig": {} })
 }
 
 #[derive(Debug)]
@@ -68,8 +63,7 @@ impl Tool for HybridImageTool {
 #[tokio::test]
 async fn streaming_history_preserves_hybrid_tool_result_image_parts() {
     super::super::support::with_gemini_cassette("streaming_multimodal_tool_results/streaming_history_preserves_hybrid_tool_result_image_parts", |client| async move {
-    let agent = client
-        .agent(MULTIMODAL_FUNCTION_RESPONSE_MODEL)
+    let agent = rig::AgentBuilder::new(client.completion(MULTIMODAL_FUNCTION_RESPONSE_MODEL))
         .preamble(
             "You are a precise assistant. Call `render_reference_image` exactly once before \
              answering. After the tool result arrives, do not call any more tools. Answer in one \
@@ -95,11 +89,11 @@ async fn streaming_history_preserves_hybrid_tool_result_image_parts() {
         match item.expect("streaming prompt should succeed") {
             MultiTurnStreamItem::FinalResponse(response) => {
                 final_response = Some(response.output().to_owned());
-                final_history = response.messages().map(<[rig::completion::Message]>::to_vec);
+                final_history = Some(response.messages().to_vec());
                 break;
             }
             MultiTurnStreamItem::StreamAssistantItem(_)
-            | MultiTurnStreamItem::StreamUserItem(_) => {}
+            | MultiTurnStreamItem::ToolResult { .. } => {}
             _ => {}
         }
     }
@@ -111,7 +105,7 @@ async fn streaming_history_preserves_hybrid_tool_result_image_parts() {
     assert!(
         history.iter().any(|message| matches!(
             message,
-            Message::Assistant { content, .. }
+            Message::Assistant(rig::message::AssistantMessage { content, .. })
                 if content.iter().any(|item| matches!(
                     item,
                     AssistantContent::ToolCall(tool_call)

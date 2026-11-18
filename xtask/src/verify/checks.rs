@@ -32,6 +32,42 @@ pub(crate) struct Check {
 fn cargo(args: &[&str]) -> Step {
     Step::new("cargo", args)
 }
+/// The rig agent's packages, none of them a default member: the kernel,
+/// the core and its libraries, every plugin crate of `plugins/`, and their
+/// test support.
+pub(crate) const HARNESS_PACKAGES: [&str; 14] = [
+    "rig-ecs",
+    "rig-tools",
+    "rig-harness",
+    "rig-harness-protocol",
+    "rig-basics",
+    "rig-inspect",
+    "rig-steel",
+    "rig-tui",
+    "rig-claude-cloak",
+    "rig-traffic",
+    "rig-mcp-client",
+    "rig-acp",
+    "rig-harness-test-support",
+    "rig-defaults-test-support",
+];
+/// The plugin corpus (`corpus/*`), as one cargo package glob: plugins
+/// written against the harness's public API to shape and prove the kernel,
+/// one per module of a few `publish = false` packages named
+/// `corpus-<directory>`, so their tests link a few binaries, not one each.
+/// None is a default member; CI builds, lints and tests every one beside
+/// [`HARNESS_PACKAGES`], so a kernel change that breaks one fails CI.
+pub(crate) const CORPUS_PACKAGES: &str = "corpus-*";
+/// cargo with `head`, then `-p` for each of [`HARNESS_PACKAGES`] and
+/// [`CORPUS_PACKAGES`], then `tail`.
+fn harness(head: &[&str], tail: &[&str]) -> Step {
+    let mut args = head.to_vec();
+    for package in HARNESS_PACKAGES.into_iter().chain([CORPUS_PACKAGES]) {
+        args.extend(["-p", package]);
+    }
+    args.extend(tail);
+    cargo(&args)
+}
 fn check(id: &str, steps: Vec<Step>) -> Check {
     Check {
         id: id.into(),
@@ -50,6 +86,9 @@ pub(super) fn all() -> Vec<Check> {
                     &[".github/scripts/check-migrating-guide-preamble.sh"],
                 ),
                 Step::new("@fixture-paths", &[]),
+                Step::new("@ecs-boundary", &[]),
+                Step::new("@options-guards", &[]),
+                Step::new("@stage-order", &[]),
                 Step::new(
                     "node",
                     &[
@@ -79,6 +118,19 @@ pub(super) fn all() -> Vec<Check> {
                         "test_dependency_floors.py",
                     ],
                 ),
+                Step::new(
+                    "python3",
+                    &[
+                        "-B",
+                        "-m",
+                        "unittest",
+                        "discover",
+                        "-s",
+                        "plugins/rig-claude-cloak/tests/acceptance",
+                        "-p",
+                        "test_*.py",
+                    ],
+                ),
                 cargo(&["test", "--locked", "-p", "xtask"]),
                 cargo(&[
                     "clippy",
@@ -94,56 +146,157 @@ pub(super) fn all() -> Vec<Check> {
         ),
         check(
             "clippy",
-            vec![cargo(&[
-                "clippy",
-                "--locked",
-                "--all-features",
-                "--all-targets",
-                "--",
-                "-D",
-                "warnings",
-            ])],
+            vec![
+                cargo(&[
+                    "clippy",
+                    "--locked",
+                    "--all-features",
+                    "--all-targets",
+                    "--",
+                    "-D",
+                    "warnings",
+                ]),
+                // The rig agent's packages and the plugin corpus are not
+                // default members.
+                harness(
+                    &["clippy", "--locked"],
+                    &["--all-targets", "--", "-D", "warnings"],
+                ),
+                // And their plugins without the terminal view (`tui`).
+                harness(
+                    &["clippy", "--locked", "--no-default-features"],
+                    &["--", "-D", "warnings"],
+                ),
+            ],
         ),
         check(
             "default-check",
-            // A dependency's #[cfg(test)] bodies are not compiled by the
-            // facade's test targets after moving helpers into this crate.
-            vec![cargo(&[
-                "check",
-                "--locked",
-                "-p",
-                "rig",
-                "-p",
-                "rig-test-support",
-                "--tests",
-            ])],
+            vec![
+                // A dependency's #[cfg(test)] bodies are not compiled by the
+                // facade's test targets after moving helpers into this crate.
+                cargo(&[
+                    "check",
+                    "--locked",
+                    "-p",
+                    "rig",
+                    "-p",
+                    "rig-test-support",
+                    "--tests",
+                ]),
+                // The divan benches compile here and run nowhere in CI.
+                cargo(&[
+                    "check",
+                    "--locked",
+                    "-p",
+                    "rig-cassette",
+                    "--features",
+                    "http,jsonl",
+                    "--bench",
+                    "wire",
+                ]),
+                cargo(&[
+                    "check",
+                    "--locked",
+                    "-p",
+                    "rig-cassette",
+                    "--features",
+                    "http",
+                    "--bench",
+                    "agent",
+                ]),
+                cargo(&[
+                    "check",
+                    "--locked",
+                    "-p",
+                    "rig-memory",
+                    "--features",
+                    "fs",
+                    "--bench",
+                    "session",
+                ]),
+                cargo(&["check", "--locked", "-p", "rig-tools", "--bench", "tools"]),
+                cargo(&[
+                    "check",
+                    "--locked",
+                    "-p",
+                    "rig-core",
+                    "--bench",
+                    "vector_search",
+                ]),
+            ],
         ),
+        // The agent's signals, closed-pipe check and process groups, and the
+        // launcher's cleanup of what a killed agent left (its groups' members
+        // read in rig-harness-protocol), which use each platform's own calls
+        // and commands.
         check(
-            "default-tests",
+            "process-tests",
             vec![cargo(&[
                 "nextest",
                 "run",
                 "--locked",
-                "--features",
-                "bedrock",
-                "--retries",
-                "2",
+                "-p",
+                "rig-tools",
+                "-p",
+                "rig-harness",
+                "-p",
+                "rig",
+                "-p",
+                "rig-harness-protocol",
+                "--lib",
+                "--bins",
+                "--no-fail-fast",
+                "--no-tests",
+                "fail",
                 "-E",
-                "not binary(macro_hygiene) and not (package(rig-cassette) and (binary(verify) or binary(world_replay) or test(/(^|::)(ecs|corpus)_/))) and not (package(rig) and test(golden_pairing))",
+                "test(/^process::tests::/) | test(/^host::(signals|launcher)::tests::/) \
+                 | test(/^launcher::(run|locks)::tests::/) \
+                 | test(/^tests::a_group_whose_leader_left/)",
             ])],
         ),
-        // Parity cells have one lane owner; default-tests excludes them. Each
-        // cell asserts its own runtime's record against the cell; no log is
-        // compared across runtimes. They
-        // moved with the cassette-backed provider suites, so the predicate is
-        // `package(rig-cassette)` now, qualified away from the two absorbed
-        // verification binaries whose `corpus_` module names would otherwise
-        // match it. The golden-pairing guard stays in the facade's `core`
-        // target. Excluding them never costs the cassette engine's own unit
-        // tests their default owner. Distinct feature/target runs (core-all,
-        // wasm, loom) remain separate coverage.
         check(
-            "ecs-parity",
+            "rig-claude-cloak-tests",
+            vec![cargo(&[
+                "nextest",
+                "run",
+                "--locked",
+                "-p",
+                "rig-claude-cloak",
+                "--lib",
+                "--no-tests",
+                "fail",
+            ])],
+        ),
+        check(
+            "default-tests",
+            vec![
+                cargo(&[
+                    "nextest",
+                    "run",
+                    "--locked",
+                    "--features",
+                    "bedrock",
+                    "--retries",
+                    "2",
+                    "-E",
+                    "not binary(macro_hygiene) and not (package(rig-cassette) and (binary(verify) or test(/(^|::)corpus_/))) and not (package(rig) and test(golden_pairing))",
+                ]),
+                // The rig agent's packages and the plugin corpus are not
+                // default members, so the run above never reaches their
+                // tests.
+                harness(&["nextest", "run", "--locked"], &[]),
+            ],
+        ),
+        // The effect-corpus cells have one lane owner; default-tests excludes
+        // them. Each cell replays its cassette and compares the agent's log
+        // with its committed golden. The predicate is `package(rig-cassette)`,
+        // qualified away from the `verify` binary whose `corpus_` module names
+        // would otherwise match it. The golden-pairing guard stays in the
+        // facade's `core` target. Excluding them never costs the cassette
+        // engine's own unit tests their default owner. Distinct feature/target
+        // runs (core-all, wasm) remain separate coverage.
+        check(
+            "effect-corpus",
             vec![
                 cargo(&[
                     "nextest",
@@ -153,33 +306,21 @@ pub(super) fn all() -> Vec<Check> {
                     "rig",
                     "-p",
                     "rig-cassette",
-                    // Extracted ECS helper regressions retain this graph too.
+                    // Extracted corpus helper regressions retain this graph too.
                     "-p",
                     "rig-test-support",
                     "--features",
                     "bedrock",
-                    // The same retries as `test`: a divergence or a stale
-                    // golden is deterministic and fails every attempt, while
-                    // a handful of cells carry wall-clock deadlines (a 30 s
-                    // session budget, a stream drained at the replay's pace)
-                    // that a loaded machine can miss once. Without retries
-                    // one such miss cancels the lane mid-run.
+                    // The same retries as `test`: a stale golden is
+                    // deterministic and fails every attempt, while a handful
+                    // of cells carry wall-clock deadlines (a 30 s session
+                    // budget, a stream drained at the replay's pace) that a
+                    // loaded machine can miss once. Without retries one such
+                    // miss cancels the lane mid-run.
                     "--retries",
                     "2",
                     "-E",
-                    "(package(rig-cassette) and test(/(^|::)(ecs|corpus)_/) and not binary(verify) and not binary(world_replay)) or (package(rig-test-support) and test(/(^|::)(ecs|corpus)_/)) or (package(rig) and test(golden_pairing))",
-                ]),
-                cargo(&[
-                    "nextest",
-                    "run",
-                    "--locked",
-                    "-p",
-                    "rig-cassette-minimal",
-                    "--all-features",
-                    "-E",
-                    "package(rig-cassette-minimal) and binary(world_replay)",
-                    "--retries",
-                    "0",
+                    "(package(rig-cassette) and test(/(^|::)corpus_/) and not binary(verify)) or (package(rig-test-support) and test(/(^|::)corpus_/)) or (package(rig) and test(golden_pairing))",
                 ]),
                 // The default-member graph enables different dependency
                 // implementations (including JSON/allocator features). Keep
@@ -193,7 +334,7 @@ pub(super) fn all() -> Vec<Check> {
                     "--retries",
                     "2",
                     "-E",
-                    "(package(rig-cassette) and test(/(^|::)(ecs|corpus)_/) and not binary(verify) and not binary(world_replay)) or (package(rig) and test(golden_pairing)) or (package(rig-cassette) and binary(world_replay))",
+                    "(package(rig-cassette) and test(/(^|::)corpus_/) and not binary(verify)) or (package(rig) and test(golden_pairing))",
                 ]),
             ],
         ),
@@ -205,6 +346,8 @@ pub(super) fn all() -> Vec<Check> {
                 "--locked",
                 "-p",
                 "rig-core",
+                "-p",
+                "rig-http",
                 "-p",
                 "rig-reqwest",
                 "-p",
@@ -240,10 +383,10 @@ pub(super) fn all() -> Vec<Check> {
                     "package(rig-cassette-minimal) and (binary(verify) or binary(effect_log))",
                 ]),
                 // Preserve the former default sweep's dependency graph and
-                // retry policy. The nested runner above preserves the former
-                // minimal serde_json graph; this execution also exercises
-                // preserve_order/float_roundtrip and the unified allocator.
-                // Only the `verify` binary moves out of the default sweep.
+                // retry policy. The nested runner above has no native HTTP
+                // engine; this execution also exercises the unified
+                // allocator. Only the `verify` binary moves out of the
+                // default sweep.
                 cargo(&[
                     "nextest",
                     "run",
@@ -277,11 +420,13 @@ pub(super) fn all() -> Vec<Check> {
                 "-p",
                 "rig-core",
                 "-p",
-                "rig-tungstenite",
-                "-p",
                 "rig-candle",
                 "-p",
                 "rig-gemini-grpc",
+                "-p",
+                "rig-bedrock",
+                "-p",
+                "rig-vertexai",
                 "--all-features",
                 // nextest -E filters execution after Cargo compilation. Select
                 // the same integration targets before compiling their harnesses.
@@ -291,11 +436,26 @@ pub(super) fn all() -> Vec<Check> {
                 "streaming_conformance_websocket",
                 "--test",
                 "driver_adoption",
+                "--test",
+                "history_conformance",
                 "--retries",
                 "0",
                 "-E",
-                "binary(streaming_conformance) + binary(streaming_conformance_websocket) + binary(driver_adoption)",
+                "binary(streaming_conformance) + binary(streaming_conformance_websocket) + binary(driver_adoption) + binary(history_conformance)",
             ])],
+        ),
+        // Every request fact Rig sends has a live recording: the corpus
+        // and its request snapshots against crates/rig-cassette/fixtures/
+        // acceptance.toml. Reads files only.
+        check(
+            "acceptance",
+            vec![cargo(&["xtask", "cassette", "acceptance", "--check"])],
+        ),
+        // The reply bank is what the corpus gives: crates/rig-cassette/
+        // fixtures/bank against the cassettes. Reads files only.
+        check(
+            "bank",
+            vec![cargo(&["xtask", "cassette", "bank", "--check"])],
         ),
         check(
             "derive",
@@ -322,22 +482,6 @@ pub(super) fn all() -> Vec<Check> {
                     "--all-features",
                 ])
                 .env("RUSTDOCFLAGS", "-D warnings"),
-            ],
-        ),
-        check(
-            "loom",
-            vec![
-                cargo(&[
-                    "test",
-                    "--locked",
-                    "-p",
-                    "rig-agent",
-                    "--lib",
-                    "--release",
-                    "loom_",
-                ])
-                .env("RUSTFLAGS", "--cfg rig_loom")
-                .env("LOOM_MAX_PREEMPTIONS", "3"),
             ],
         ),
         check(
@@ -375,10 +519,11 @@ pub(super) fn all() -> Vec<Check> {
     ];
     for package in [
         "rig-core",
+        "rig-http",
         "rig-cassette",
-        "rig-ecs",
         "rig-reqwest",
         "rig-agent",
+        "rig-memory",
         "rig",
         "rig-candle",
         "candle_wasm_chat",
@@ -391,43 +536,34 @@ pub(super) fn all() -> Vec<Check> {
             "--target",
             "wasm32-unknown-unknown",
         ])];
-        if package == "rig-ecs" {
+        if package == "rig-cassette" {
             steps.push(cargo(&[
                 "check",
                 "--locked",
                 "-p",
                 package,
                 "--no-default-features",
-                "--lib",
-            ]));
-            steps.push(cargo(&[
-                "check",
-                "--locked",
-                "-p",
-                package,
-                "--no-default-features",
+                "--features",
+                "agent",
                 "--lib",
                 "--target",
                 "wasm32-unknown-unknown",
             ]));
         }
-        if package == "rig-cassette" {
-            for features in ["agent", "ecs", "agent,ecs"] {
-                steps.push(cargo(&[
-                    "check",
-                    "--locked",
-                    "-p",
-                    package,
-                    "--no-default-features",
-                    "--features",
-                    features,
-                    "--lib",
-                    "--target",
-                    "wasm32-unknown-unknown",
-                ]));
-            }
+        // A store that is not `Send`, as one over a JavaScript promise is.
+        if package == "rig-memory" {
+            steps.push(cargo(&[
+                "check",
+                "--locked",
+                "-p",
+                package,
+                "--test",
+                "wasm_store",
+                "--target",
+                "wasm32-unknown-unknown",
+            ]));
         }
-        if ["rig-core", "rig-ecs"].contains(&package) {
+        if ["rig-core", "rig-http"].contains(&package) {
             steps.push(cargo(&[
                 "check",
                 "--locked",
@@ -440,36 +576,40 @@ pub(super) fn all() -> Vec<Check> {
         }
         checks.push(check(&format!("wasm-{package}"), steps));
     }
-    for (package, test) in [
-        ("rig-agent", "bus_wasm"),
-        ("rig-ecs", "bus_wasm"),
-        ("rig-ecs", "run_wasm"),
-    ] {
-        checks.push(check(
-            &format!("wasm-{package}-{test}"),
-            vec![
-                cargo(&[
-                    "test",
-                    "--locked",
-                    "--package",
-                    package,
-                    "--target",
-                    "wasm32-unknown-unknown",
-                    "--test",
-                    test,
-                ])
-                .env(
-                    "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER",
-                    "wasm-bindgen-test-runner",
-                ),
-            ],
-        ));
-    }
+    // The kernel alone (rig-ecs has no features): it builds natively and
+    // for the web, and a headless app of only the kernel and Bevy's task
+    // pools runs a turn with a tool call on a scripted model.
+    checks.push(check(
+        "kernel-only",
+        vec![
+            cargo(&["check", "--locked", "--package", "rig-ecs"]),
+            cargo(&[
+                "check",
+                "--locked",
+                "--package",
+                "rig-ecs",
+                "--target",
+                "wasm32-unknown-unknown",
+            ]),
+            cargo(&[
+                "test",
+                "--locked",
+                "--package",
+                "rig-ecs",
+                "--test",
+                "kernel_only",
+            ]),
+        ],
+    ));
     for (package, message) in [
         ("rig-rmcp", "the `rmcp` feature is native-only"),
         (
             "rig-tungstenite",
             "rig-tungstenite is a native websocket backend",
+        ),
+        (
+            "rig-acp",
+            "rig-acp runs sessions as processes: it needs a native target",
         ),
     ] {
         checks.push(check(
@@ -496,12 +636,14 @@ pub(super) fn full_lane(path: &str) -> bool {
         || path.starts_with("tests/integrations/")
         || path.starts_with("test-support/")
         || path.starts_with(".github/actions/")
-        // `crates/*/Cargo.toml`: the workspace members' manifests, not the
+        // `crates/*/Cargo.toml`, `plugins/*/Cargo.toml` and
+        // `corpus/*/Cargo.toml`: the workspace members' manifests, not the
         // nested compile fixtures beneath them (those have their own owners).
-        || path
-            .strip_prefix("crates/")
-            .and_then(|rest| rest.strip_suffix("/Cargo.toml"))
-            .is_some_and(|name| !name.contains('/'))
+        || ["crates/", "plugins/", "corpus/"].iter().any(|folder| {
+            path.strip_prefix(folder)
+                .and_then(|rest| rest.strip_suffix("/Cargo.toml"))
+                .is_some_and(|name| !name.contains('/'))
+        })
         || [
             "rig-lancedb",
             "rig-mongodb",

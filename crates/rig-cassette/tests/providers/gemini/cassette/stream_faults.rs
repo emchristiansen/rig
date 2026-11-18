@@ -1,29 +1,18 @@
 //! Gemini stream faults through the runner: the recorded 404 on stream
 //! setup, and scripted faults — a blocked prompt, a stream cut before its
 //! terminal, an in-band error after content — served to the real
-//! `streamGenerateContent` adapter. Native counterparts:
-//! `ecs_stream_faults.rs`. Every cell's hypothesis is that the fault
+//! `streamGenerateContent` adapter. Every cell's hypothesis is that the fault
 //! surfaces as its own kind, with nothing recorded, committed or executed
 //! after it.
 
 use bytes::Bytes;
-use rig::driver::Bound;
 use rig::error::ErrorKind;
-use rig::prelude::*;
-use rig::providers::gemini::{Gemini, completion::GEMINI_2_5_FLASH};
+use rig::providers::gemini::{GeminiConfig, completion::GEMINI_2_5_FLASH};
 use rig::test_utils::SequencedStreamingHttpClient;
 use rig_cassette::agent::AgentReplayExt;
 
 use super::super::support::with_gemini_cassette;
-use crate::stream_faults::{
-    assert_setup_failure, drain, recorded_stream_errors, scripted, sole_failed_completion,
-};
-
-/// The recorded stream-setup failure, `error_envelope/nonexistent_model_streaming_error_preserves_status_and_body`,
-/// carries this model, prompt and budget.
-pub(super) const MISSING_MODEL: &str = "gemini-nonexistent-rig-test";
-pub(super) const SETUP_PROMPT: &str = "Say hi.";
-pub(super) const SETUP_MAX_TOKENS: u64 = 16;
+use crate::stream_faults::{drain, recorded_stream_errors, scripted, sole_failed_completion};
 
 /// A real `streamGenerateContent` content frame without a finish reason,
 /// as `gemini-3.8-flash` streamed it on 2026-09-08 (captured in the
@@ -53,47 +42,8 @@ pub(super) fn gemini_sse(frames: &[&str]) -> Bytes {
 
 /// A client over a transport that answers one streaming request with
 /// `chunks`, then EOF.
-pub(super) fn scripted_client(chunks: Vec<Bytes>) -> Bound<Gemini, SequencedStreamingHttpClient> {
-    Gemini::new(SCRIPTED_KEY).bind(scripted(chunks))
-}
-
-/// The model refuses the request before any frame: the run fails with the
-/// recorded 404 and its body, streams nothing, and records the one
-/// completion as that failure.
-#[tokio::test]
-async fn setup_failure_fails_the_run_with_the_recorded_status() {
-    // The fixture census wants the scenario as a literal at the wrapper call.
-    with_gemini_cassette(
-        "error_envelope/nonexistent_model_streaming_error_preserves_status_and_body",
-        |client| async move {
-            let recorder = rig_cassette::effect_log::EffectLogRecorder::keeping_stream_events();
-            let agent = client
-                .agent(MISSING_MODEL)
-                .max_tokens(SETUP_MAX_TOKENS)
-                .record_to(recorder.clone())
-                .build();
-            let mut stream = agent.prompt(SETUP_PROMPT).stream();
-            let drained = drain(&mut stream).await;
-            drop(stream);
-
-            assert_eq!(drained.finals, 0, "no final response: {drained:?}");
-            assert_eq!(drained.terminals, 0, "no terminal record: {drained:?}");
-            assert!(drained.text.is_empty(), "no text: {drained:?}");
-            assert_eq!(drained.errors.len(), 1, "one error item: {drained:?}");
-            assert_setup_failure(&drained.errors[0], ErrorKind::ProviderResponse, 404);
-
-            let log = agent.stamp(recorder.take());
-            assert_setup_failure(
-                sole_failed_completion(&log),
-                ErrorKind::ProviderResponse,
-                404,
-            );
-            let errors = recorded_stream_errors(&log);
-            assert_eq!(errors.len(), 1, "one recorded error item: {errors:?}");
-            assert_eq!(errors[0].0, 0, "the error is the stream's first item");
-        },
-    )
-    .await;
+pub(super) fn scripted_client(chunks: Vec<Bytes>) -> (GeminiConfig, SequencedStreamingHttpClient) {
+    (GeminiConfig::new(SCRIPTED_KEY), scripted(chunks))
 }
 
 /// A refused prompt is the provider's verdict, not a transport truncation:
@@ -101,10 +51,9 @@ async fn setup_failure_fails_the_run_with_the_recorded_status() {
 /// and the record holds that error rather than "ended before its terminal".
 #[tokio::test]
 async fn blocked_prompt_is_a_provider_refusal_not_a_truncation() {
-    let client = scripted_client(vec![gemini_sse(&[BLOCKED_FRAME])]);
+    let (client, http) = scripted_client(vec![gemini_sse(&[BLOCKED_FRAME])]);
     let recorder = rig_cassette::effect_log::EffectLogRecorder::keeping_stream_events();
-    let agent = client
-        .agent(GEMINI_2_5_FLASH)
+    let agent = rig::AgentBuilder::new(client.connect(http.clone()).completion(GEMINI_2_5_FLASH))
         .record_to(recorder.clone())
         .build();
     let mut stream = agent.prompt("pong?").stream();
@@ -142,10 +91,9 @@ async fn blocked_prompt_is_a_provider_refusal_not_a_truncation() {
 /// is assembled, and the record holds the truncation.
 #[tokio::test]
 async fn truncation_after_content_fails_the_run_and_keeps_the_prefix() {
-    let client = scripted_client(vec![gemini_sse(&[CONTENT_FRAME])]);
+    let (client, http) = scripted_client(vec![gemini_sse(&[CONTENT_FRAME])]);
     let recorder = rig_cassette::effect_log::EffectLogRecorder::keeping_stream_events();
-    let agent = client
-        .agent(GEMINI_2_5_FLASH)
+    let agent = rig::AgentBuilder::new(client.connect(http.clone()).completion(GEMINI_2_5_FLASH))
         .record_to(recorder.clone())
         .build();
     let mut stream = agent.prompt("pong?").stream();
@@ -159,7 +107,9 @@ async fn truncation_after_content_fails_the_run_and_keeps_the_prefix() {
     for report in &drained.errors {
         assert_eq!(report.kind, ErrorKind::Response, "{report:?}");
         assert!(
-            report.message.contains("terminal record"),
+            report
+                .message
+                .contains("ended before the provider ended it"),
             "a truncation, by name: {report:?}"
         );
     }
@@ -175,10 +125,9 @@ async fn truncation_after_content_fails_the_run_and_keeps_the_prefix() {
 /// delivered, and the error item sits after the content items.
 #[tokio::test]
 async fn in_band_error_after_content_fails_with_the_envelope() {
-    let client = scripted_client(vec![gemini_sse(&[CONTENT_FRAME, IN_BAND_ERROR_FRAME])]);
+    let (client, http) = scripted_client(vec![gemini_sse(&[CONTENT_FRAME, IN_BAND_ERROR_FRAME])]);
     let recorder = rig_cassette::effect_log::EffectLogRecorder::keeping_stream_events();
-    let agent = client
-        .agent(GEMINI_2_5_FLASH)
+    let agent = rig::AgentBuilder::new(client.connect(http.clone()).completion(GEMINI_2_5_FLASH))
         .record_to(recorder.clone())
         .build();
     let mut stream = agent.prompt("pong?").stream();
@@ -227,10 +176,11 @@ async fn in_band_error_after_content_fails_with_the_envelope() {
 #[tokio::test]
 async fn multi_frame_stream_recording() {
     with_gemini_cassette("stream_faults/multi_frame_stream", |client| async move {
-        let agent = client
-            .agent(rig::providers::gemini::completion::GEMINI_3_FLASH_PREVIEW)
-            .preamble(crate::support::STREAMING_PREAMBLE)
-            .build();
+        let agent = rig::AgentBuilder::new(
+            client.completion(rig::providers::gemini::completion::GEMINI_3_FLASH_PREVIEW),
+        )
+        .preamble(crate::support::STREAMING_PREAMBLE)
+        .build();
         let mut stream = agent
             .prompt(
                 "Write four short paragraphs about the history of the Rust programming language.",
@@ -261,10 +211,9 @@ async fn multi_frame_stream_cut_before_its_terminal_is_a_truncation() {
                 .map(str::to_owned)
         })
         .collect();
-    let client = scripted_client(vec![crate::stream_faults::sse_bytes(&prefix)]);
+    let (client, http) = scripted_client(vec![crate::stream_faults::sse_bytes(&prefix)]);
     let recorder = rig_cassette::effect_log::EffectLogRecorder::keeping_stream_events();
-    let agent = client
-        .agent(GEMINI_2_5_FLASH)
+    let agent = rig::AgentBuilder::new(client.connect(http.clone()).completion(GEMINI_2_5_FLASH))
         .record_to(recorder.clone())
         .build();
     let mut stream = agent.prompt("pong?").stream();

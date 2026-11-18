@@ -2,25 +2,25 @@
 //! path.
 //!
 //! **The feature.** Every stream's terminal
-//! [`rig::streaming::StreamFinal::raw`] carries the decoder's own terminal
-//! record — for Perplexity the shared chat-completions
-//! [`StreamingCompletionResponse`] over [`ChatUsage`] — serialized. Capture is
-//! always on: there is no flag to request it, nothing about it reaches the
-//! wire, and a `Value::Null` only ever means a terminal built by hand with no
-//! provider record behind it. It is the terminal record only, never the
-//! stream's frames. Perplexity reports usage on *every* frame and the last
-//! frame's counts are the terminal's; the terminal's accumulated
-//! `additional_params` carries the `object` tag the frames repeat. Neither the
-//! tag nor the raw usage block has a slot on the normalized terminal.
+//! [`rig::completion::CompletionResponse::raw`] carries the decoder's own
+//! terminal record: for Perplexity the shared chat-completions record, a JSON
+//! object with the keys `usage`, `finish_reason`, `response_id`, `model`,
+//! `logprobs` and `additional_params`. Capture is always on: there is no flag
+//! to request it, nothing about it reaches the wire, and a `Value::Null` only
+//! ever means a terminal built by hand with no provider record behind it. It
+//! is the terminal record only, never the stream's frames. Perplexity reports
+//! usage on *every* frame and the last frame's counts are the terminal's; the
+//! terminal's accumulated `additional_params` carries the `object` tag the
+//! frames repeat. Neither the tag nor the raw usage block has a slot on the
+//! normalized terminal.
 //!
-//! [`ChatUsage`] flattens the OpenAI-compatible counters and keeps whatever
-//! else the dialect sent in a sibling map, so Perplexity's `cost` and
-//! `search_context_size` survive into `raw` instead of being dropped at the
-//! type boundary. Cell 2 pins that against a fixture that carries them.
+//! The record's `usage` is the provider's usage object, so it keeps whatever
+//! the dialect sent beside the OpenAI-compatible counters. Perplexity's
+//! `cost` and `search_context_size` survive into `raw`. Cell 2 pins that
+//! against a fixture that carries them.
 //!
 //! | # | Cell | Dimension | expected | Status |
 //! |---|------|-----------|----------|--------|
-//! | 1 | `stream_raw_round_trips_terminal_type` | typed round trip | terminal `raw` deserializes into the terminal record and re-serializes equal; its `ChatUsage` normalizes to the terminal usage; the normalized terminal reproduces the recorded last frame | recorded |
 //! | 2 | `stream_raw_exposes_terminal_usage_and_object` | terminal-only fields | `raw.usage` equals the recorded last frame's counters *including* the unmodeled `cost` block; `raw.additional_params.object` equals the frames' tag | recorded |
 //!
 //! Every cell is recorded. The premise every cell re-derives from its own
@@ -36,25 +36,21 @@
 //! Perplexity contracts no request-id header, so the terminal's
 //! `provider_request_id` is `None` — pinned as the documented outcome.
 
-use rig::completion::{CompletionModel, CompletionRequest};
+use rig::completion::CompletionRequest;
 use rig::providers::perplexity;
 use serde_json::{Value, json};
 
 use super::super::support::with_perplexity_cassette;
-use crate::raw_capture::{
-    assert_no_request_id, assert_normalized_lacks, capture_terminal, capture_text_and_terminal,
-    chat, stream_normalized_without_raw,
-};
+use crate::raw_capture::{assert_normalized_lacks, capture_terminal};
 use crate::support::Observed;
+use crate::support::normalized_without_raw;
 
 const PROVIDER: &str = "perplexity";
 const MODEL: &str = perplexity::SONAR;
 const PROMPT: &str = "Reply with the single word: pong";
-/// Names the dialect in the "no id header" outcome the cells pin.
-const DIALECT: &str = "Perplexity";
 
-fn request(model: &(impl CompletionModel + Clone)) -> CompletionRequest {
-    model.completion_request(PROMPT).max_tokens(16).build()
+fn request() -> CompletionRequest {
+    CompletionRequest::new(PROMPT).max_tokens(16)
 }
 
 /// The recorded stream's last data frame: it carries the finish reason and
@@ -78,38 +74,8 @@ fn recorded_terminal_frame(scenario: &str) -> Value {
 }
 
 // ================================================================
-// 1. raw round-trips the terminal type
+// 1. raw is the terminal record
 // ================================================================
-
-#[tokio::test]
-async fn stream_raw_round_trips_terminal_type() {
-    const SCENARIO: &str = "raw_stream_capture_matrix/stream_raw_round_trips_terminal_type";
-    let observed = Observed::default();
-    let sink = observed.clone();
-    with_perplexity_cassette(
-        "raw_stream_capture_matrix/stream_raw_round_trips_terminal_type",
-        |client| async move {
-            capture_text_and_terminal(client.completion(MODEL), request, sink)
-                .await
-                .expect("the stream should open");
-        },
-    )
-    .await;
-
-    let (text, terminal) = observed.take();
-    assert!(!text.is_empty());
-    // Unlike a unary `CompletionResponse::raw`, a stream's terminal `raw` IS
-    // this record serialized (`openai/wire/chat.rs`'s `emit_terminal`), so
-    // the round trip is exact — and `ChatUsage::to_normalized`, the mapping
-    // the terminal's usage went through, is pinned directly.
-    chat::assert_terminal_round_trips(&terminal);
-
-    let frame = recorded_terminal_frame(SCENARIO);
-    chat::assert_terminal_reproduces_frame(&terminal, PROVIDER, &frame, "the recorded last frame");
-    assert_no_request_id(terminal.provider_request_id.as_deref(), DIALECT);
-    let request_body = crate::cassettes::recorded_json_request(PROVIDER, SCENARIO);
-    assert_eq!(request_body["stream"], json!(true));
-}
 
 // ================================================================
 // 2. Terminal-only fields the normalized record lacks
@@ -123,7 +89,7 @@ async fn stream_raw_exposes_terminal_usage_and_object() {
     with_perplexity_cassette(
         "raw_stream_capture_matrix/stream_raw_exposes_terminal_usage_and_object",
         |client| async move {
-            capture_terminal(client.completion(MODEL), request, sink)
+            capture_terminal(client.completion(MODEL), request(), sink)
                 .await
                 .expect("the stream should open");
         },
@@ -147,13 +113,18 @@ async fn stream_raw_exposes_terminal_usage_and_object() {
         recorded_usage["completion_tokens"]
     );
     assert_eq!(raw["usage"]["total_tokens"], recorded_usage["total_tokens"]);
-    assert_eq!(raw["additional_params"]["object"], json!(recorded_object));
+    // The rebuilt document carries the unary tag in place of the chunks'.
+    assert!(
+        recorded_object.starts_with("chat.completion."),
+        "{recorded_object}"
+    );
+    assert_eq!(raw["object"], json!("chat.completion"));
     // The normalized terminal has no slot for the tag. The usage block, by
-    // contrast, is the dialect's own: `ChatUsage` keeps the fields no
-    // OpenAI-compatible shape models, so Perplexity's `cost` reaches a caller
-    // through `raw` rather than being lost at the type boundary.
-    let normalized = stream_normalized_without_raw(&terminal);
-    assert_normalized_lacks(&normalized, &["object", "additional_params"]);
+    // contrast, is the dialect's own: the document keeps the fields no
+    // OpenAI-compatible shape names, so Perplexity's `cost` reaches a caller
+    // through `raw`.
+    let normalized = normalized_without_raw(terminal.clone());
+    assert_normalized_lacks(&normalized, &["object"]);
     assert!(
         recorded_usage.get("cost").is_some(),
         "the recorded usage carries Perplexity's cost block: {recorded_usage}"
@@ -162,5 +133,10 @@ async fn stream_raw_exposes_terminal_usage_and_object() {
         raw["usage"].get("cost"),
         recorded_usage.get("cost"),
         "the dialect's extra usage fields ride along in raw: {raw}"
+    );
+    // The normalized usage reports the cost too, its total the recorded one.
+    assert_eq!(
+        terminal.usage.cost.map(|cost| cost.total),
+        recorded_usage["cost"]["total_cost"].as_f64()
     );
 }

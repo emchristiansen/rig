@@ -3,10 +3,13 @@
 //! selected check executes; nothing is reused or certified across runs.
 mod checks;
 mod execute;
+mod extras;
+pub(crate) mod guards;
 mod preflight;
 mod selection;
 #[cfg(test)]
 mod tests;
+use crate::support::output;
 use serde_json::Value;
 use std::{collections::BTreeMap, path::Path, process::Command};
 
@@ -18,6 +21,11 @@ pub(crate) enum Error {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+}
+impl From<String> for Error {
+    fn from(message: String) -> Self {
+        Self::Invalid(message)
+    }
 }
 type Result<T> = std::result::Result<T, Error>;
 fn invalid(message: impl Into<String>) -> Error {
@@ -32,6 +40,9 @@ enum Mode {
     Check,
     /// Print which slow lanes the PR diff selects; CI's plan job reads it.
     Lanes,
+    /// Run every test the diff can break: the tests of each package it
+    /// changes and of every package that depends on one.
+    Affected,
 }
 #[derive(Debug)]
 struct Options {
@@ -49,10 +60,11 @@ impl Options {
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             match arg.as_str() {
-                "--changed" | "--pr" | "--full" | "--check" | "--lanes" => {
+                "--changed" | "--pr" | "--full" | "--check" | "--lanes" | "--affected" => {
                     if mode.is_some() {
                         return Err(invalid(
-                            "select exactly one of --changed, --pr, --full, --lanes, --check ID",
+                            "select exactly one of --changed, --pr, --full, --lanes, --affected, \
+                             --check ID",
                         ));
                     }
                     mode = Some(match arg.as_str() {
@@ -60,6 +72,7 @@ impl Options {
                         "--pr" => Mode::Pr,
                         "--full" => Mode::Full,
                         "--lanes" => Mode::Lanes,
+                        "--affected" => Mode::Affected,
                         _ => Mode::Check,
                     });
                     if arg == "--check" {
@@ -80,11 +93,15 @@ impl Options {
             }
         }
         let mode = mode.ok_or_else(|| {
-            invalid("verify requires --changed, --pr --base REF, --full, --lanes --base REF, or --check ID")
+            invalid(
+                "verify requires --changed, --pr --base REF, --full, --lanes --base REF, \
+                 --affected --base REF, or --check ID",
+            )
         })?;
-        if matches!(mode, Mode::Pr | Mode::Lanes) && base.is_none() {
+        if matches!(mode, Mode::Pr | Mode::Lanes | Mode::Affected) && base.is_none() {
             return Err(invalid(
-                "--pr and --lanes require --base REF (for example origin/feat/effect-bus); no implicit main",
+                "--pr, --lanes and --affected require --base REF (for example origin/main); no \
+                 implicit main",
             ));
         }
         Ok(Self {
@@ -94,20 +111,6 @@ impl Options {
             check,
         })
     }
-}
-fn output(root: &Path, program: &str, args: &[&str]) -> Result<String> {
-    let result = Command::new(program)
-        .args(args)
-        .current_dir(root)
-        .output()?;
-    if !result.status.success() {
-        return Err(invalid(format!(
-            "{program} {args:?} failed: {}",
-            String::from_utf8_lossy(&result.stderr)
-        )));
-    }
-    String::from_utf8(result.stdout)
-        .map_err(|_| invalid("non-UTF-8 command output; cannot safely plan"))
 }
 pub(crate) fn run(root: &Path, args: Vec<String>) -> Result<()> {
     let opts = Options::parse(args)?;

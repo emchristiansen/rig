@@ -1,35 +1,37 @@
 //! Native ChatGPT OAuth and token cache implementation.
 
-use super::{AuthContext, AuthError, DeviceCodeHandler, DeviceCodePrompt};
-use crate::http_client::HttpClientExt;
-use crate::providers::internal::auth::{request, send_json};
-use crate::providers::internal::device_auth::{
-    emit_device_code_prompt, read_json_record, token_expired, write_json_record,
+use super::{
+    AuthContext, AuthError, Authenticator, BrowserSignInPrompt, DeviceCodePrompt, STORE_KEY,
+    SignInMethod, SignInPrompt, SignedOut,
 };
-use crate::providers::openai::wire::CallerIdentity;
+use crate::http_client::HttpClientExt;
+use crate::json_utils::Lenient;
+use crate::providers::internal::auth::{
+    load_record, request, save_record, send_bytes, send_json, token_expired,
+};
+use crate::wasm_compat::WasmCompatSend;
 use base64::Engine;
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use http::Method;
-use serde::{Deserialize, Deserializer, Serialize};
-use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
+
+mod browser;
 
 const CHATGPT_AUTH_BASE: &str = "https://auth.openai.com";
 const CHATGPT_DEVICE_CODE_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/usercode";
 const CHATGPT_DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
 const CHATGPT_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+/// The `revocation_endpoint` of the provider's discovery document,
+/// `https://auth.openai.com/.well-known/openid-configuration` (RFC 7009,
+/// no client secret).
+const CHATGPT_OAUTH_REVOKE_URL: &str = "https://auth.openai.com/api/accounts/oauth/revoke";
 const CHATGPT_DEVICE_VERIFY_URL: &str = "https://auth.openai.com/codex/device";
 const CHATGPT_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const TOKEN_EXPIRY_SKEW_SECONDS: i64 = 60;
 const DEVICE_CODE_TIMEOUT_SECONDS: i64 = 15 * 60;
+const BROWSER_SIGN_IN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 const DEVICE_CODE_POLL_SLEEP_SECONDS: u64 = 5;
-
-#[derive(Debug, Clone)]
-pub(super) struct PlatformAuthenticator {
-    auth_file: Option<PathBuf>,
-    device_code_handler: DeviceCodeHandler,
-    allow_device_flow: bool,
-}
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 struct AuthRecord {
@@ -45,23 +47,15 @@ struct DeviceCodeResponse {
     device_auth_id: String,
     #[serde(alias = "usercode")]
     user_code: String,
-    #[serde(default, deserialize_with = "deserialize_optional_u64")]
-    interval: Option<u64>,
+    /// Seconds between polls, a number or a numeric string.
+    #[serde(default)]
+    interval: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
 struct DeviceTokenResponse {
     authorization_code: String,
     code_verifier: String,
-}
-
-/// The official client's token refresh body: exactly these members, in this
-/// order, sent as JSON.
-#[derive(Serialize)]
-struct RefreshRequest<'a> {
-    client_id: &'a str,
-    grant_type: &'a str,
-    refresh_token: &'a str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,32 +76,35 @@ enum RefreshTokensError {
     Auth(AuthError),
 }
 
-impl PlatformAuthenticator {
-    pub(super) fn new(
-        auth_file: Option<PathBuf>,
-        device_code_handler: DeviceCodeHandler,
-        allow_device_flow: bool,
-    ) -> Self {
-        Self {
-            auth_file,
-            device_code_handler,
-            allow_device_flow,
+impl SignInMethod {
+    /// The browser when one opened here would reach the user and
+    /// `device_asked` is false: not over SSH, and on Linux and the BSDs
+    /// only inside an X11 or Wayland session. Otherwise the device code.
+    /// Native only.
+    pub fn detect(device_asked: bool) -> Self {
+        let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+        let graphical = !(set("SSH_CONNECTION") || set("SSH_TTY"))
+            && (cfg!(any(target_os = "macos", windows))
+                || set("DISPLAY")
+                || set("WAYLAND_DISPLAY"));
+        if device_asked || !graphical {
+            Self::DeviceCode
+        } else {
+            Self::Browser
         }
     }
+}
 
-    /// Resolve the cached or refreshed credential, signing in when needed.
-    /// A token refresh carries `identity` exactly, as the official client's
-    /// does; the device sign-in carries none, as the official client's
-    /// does not.
-    pub(super) async fn auth_context_oauth<H>(
-        &self,
-        http: &H,
-        identity: &CallerIdentity,
-    ) -> Result<AuthContext, AuthError>
+impl Authenticator {
+    pub(super) async fn auth_context_oauth<H>(&self, http: &H) -> Result<AuthContext, AuthError>
     where
         H: HttpClientExt,
     {
-        let mut record: AuthRecord = read_json_record(self.auth_file.as_deref())?;
+        if let Some(context) = self.0.remembered.live(TOKEN_EXPIRY_SKEW_SECONDS) {
+            return Ok(context);
+        }
+        let _held = self.0.hold(STORE_KEY).await?;
+        let mut record: AuthRecord = load_record(&*self.0.store, STORE_KEY).await?;
 
         if let Some(access_token) = record.access_token.clone()
             && !token_expired(record.expires_at, TOKEN_EXPIRY_SKEW_SECONDS)
@@ -118,30 +115,34 @@ impl PlatformAuthenticator {
                 .or_else(|| extract_account_id(record.id_token.as_deref()))
                 .or_else(|| extract_account_id(Some(&access_token)));
             if account_id != record.account_id {
-                record.account_id.clone_from(&account_id);
-                write_json_record(self.auth_file.as_deref(), &record)?;
+                record.account_id = account_id;
+                save_record(&*self.0.store, STORE_KEY, &record).await?;
             }
-            return Ok(AuthContext {
-                access_token: access_token.into(),
-                account_id,
-            });
+            return Ok(self.remember(record));
         }
 
         if let Some(refresh_token) = record.refresh_token.clone() {
-            match self.refresh_tokens(http, identity, &refresh_token).await {
+            match self.refresh_tokens(http, &refresh_token).await {
                 Ok(refreshed) => {
-                    write_json_record(self.auth_file.as_deref(), &refreshed)?;
-                    return Ok(AuthContext {
-                        access_token: refreshed.access_token.unwrap_or_default().into(),
-                        account_id: refreshed.account_id,
-                    });
+                    save_record(&*self.0.store, STORE_KEY, &refreshed).await?;
+                    return Ok(self.remember(refreshed));
                 }
-                Err(RefreshTokensError::Reauthenticate) => {}
+                Err(RefreshTokensError::Reauthenticate) => {
+                    // Another client may have spent this refresh token and
+                    // kept what it got.
+                    let kept: AuthRecord = load_record(&*self.0.store, STORE_KEY).await?;
+                    if kept.refresh_token != record.refresh_token
+                        && kept.access_token.is_some()
+                        && !token_expired(kept.expires_at, TOKEN_EXPIRY_SKEW_SECONDS)
+                    {
+                        return Ok(self.remember(kept));
+                    }
+                }
                 Err(RefreshTokensError::Auth(err)) => return Err(err),
             }
         }
 
-        if !self.allow_device_flow {
+        if !self.0.allow_device_flow {
             return Err(AuthError::Message(
                 "ChatGPT sign-in required. Reconnect ChatGPT in Settings before using this provider."
                     .into(),
@@ -149,15 +150,161 @@ impl PlatformAuthenticator {
         }
 
         let fresh = self.login_device_flow(http).await?;
-        write_json_record(self.auth_file.as_deref(), &fresh)?;
-        Ok(AuthContext {
-            access_token: fresh.access_token.unwrap_or_default().into(),
-            account_id: fresh.account_id,
+        self.keep(fresh).await
+    }
+
+    /// Sign in again by `method`, whatever is cached, telling `prompt` what
+    /// the user must do. A browser sign-in whose callback ports are taken
+    /// says so and falls back to the device code. The credential is kept in
+    /// the token store. Native only.
+    pub async fn sign_in<H, F>(
+        &self,
+        http: &H,
+        method: SignInMethod,
+        mut prompt: F,
+    ) -> Result<AuthContext, AuthError>
+    where
+        H: HttpClientExt,
+        F: FnMut(SignInPrompt) + WasmCompatSend,
+    {
+        if method == SignInMethod::Browser {
+            let browser = self
+                .sign_in_with_browser(http, |page| prompt(SignInPrompt::Browser(page)))
+                .await;
+            match browser {
+                Err(AuthError::Io(error)) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                    prompt(SignInPrompt::BrowserUnavailable(error.to_string()));
+                }
+                other => return other,
+            }
+        }
+        self.sign_in_with_device_code(http).await
+    }
+
+    /// Sign in again with the device-code flow, whatever is cached: the
+    /// handler shows the code to enter, and the credential is kept in the
+    /// token store. Native only.
+    pub async fn sign_in_with_device_code<H>(&self, http: &H) -> Result<AuthContext, AuthError>
+    where
+        H: HttpClientExt,
+    {
+        let fresh = self.login_device_flow(http).await?;
+        let _held = self.0.hold(STORE_KEY).await?;
+        self.keep(fresh).await
+    }
+
+    /// Sign in again in the browser, whatever is cached: an authorization
+    /// code with PKCE, returned to a one-shot listener on `127.0.0.1` port
+    /// 1455, or 1457 when that is taken. The default browser is opened on
+    /// the sign-in page and `prompt` receives its URL, for the user to open
+    /// when the browser did not. The credential is kept in the token store.
+    /// Native only.
+    ///
+    /// When both ports are taken, fails with [`AuthError::Io`] of kind
+    /// [`std::io::ErrorKind::AddrInUse`], before prompting, so the caller can
+    /// fall back to [`Self::sign_in_with_device_code`]. Gives up after 15
+    /// minutes. Dropping the future stops the listener within a fraction of
+    /// a second and frees its port.
+    pub async fn sign_in_with_browser<H, F>(
+        &self,
+        http: &H,
+        prompt: F,
+    ) -> Result<AuthContext, AuthError>
+    where
+        H: HttpClientExt,
+        F: FnOnce(BrowserSignInPrompt) + WasmCompatSend,
+    {
+        let (listener, port) = browser::bind()?;
+        let redirect_uri = browser::redirect_uri(port);
+        let pkce = browser::Pkce::generate();
+        let state = browser::random_token(2);
+        let authorize_url =
+            browser::authorize_url(&redirect_uri, &pkce.challenge, &state, &originator());
+        let callback = browser::spawn_listener(
+            listener,
+            state,
+            std::time::Instant::now() + BROWSER_SIGN_IN_TIMEOUT,
+        )?;
+        let browser_launched = browser::open_browser(&authorize_url);
+        prompt(BrowserSignInPrompt {
+            authorize_url,
+            browser_launched,
+        });
+
+        let received = callback.await.map_err(|_| {
+            AuthError::Message("the sign-in listener stopped unexpectedly".into())
+        })??;
+        let exchanged =
+            exchange_authorization_code(http, &received.code, &pkce.verifier, &redirect_uri).await;
+        received.finish(
+            exchanged
+                .as_ref()
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+        );
+        let fresh = exchanged?;
+        let _held = self.0.hold(STORE_KEY).await?;
+        self.keep(fresh).await
+    }
+
+    /// Sign out: the provider revokes the stored refresh token and access
+    /// token, then the record is deleted from the store and forgotten here,
+    /// whether or not the provider confirmed. Native only.
+    ///
+    /// # Errors
+    ///
+    /// When the store cannot be read, or the record cannot be deleted. A
+    /// revocation that failed is not an error: [`SignedOut::Forgotten`]
+    /// says why.
+    pub async fn sign_out<H>(&self, http: &H) -> Result<SignedOut, AuthError>
+    where
+        H: HttpClientExt,
+    {
+        let _held = self.0.hold(STORE_KEY).await?;
+        let record: AuthRecord = load_record(&*self.0.store, STORE_KEY).await?;
+        let tokens = [
+            (record.refresh_token.as_deref(), "refresh_token"),
+            (record.access_token.as_deref(), "access_token"),
+        ];
+        let mut revoked = None;
+        for (token, hint) in tokens {
+            let Some(token) = token else { continue };
+            let result = revoke(http, token, hint).await;
+            let result = result.map_err(|error| format!("revoking the {hint} failed: {error}"));
+            revoked = Some(match revoked {
+                Some(Err(earlier)) => Err(earlier),
+                _ => result,
+            });
+        }
+        self.0
+            .store
+            .delete(STORE_KEY)
+            .await
+            .map_err(AuthError::Store)?;
+        self.0.remembered.forget();
+        Ok(match revoked {
+            Some(revoked) => SignedOut::Forgotten { revoked },
+            None => SignedOut::NotSignedIn,
         })
     }
 
-    /// Sign in with the device flow. Like the official client's, these
-    /// requests carry no caller identity.
+    /// Keep a fresh sign-in and return its context.
+    async fn keep(&self, fresh: AuthRecord) -> Result<AuthContext, AuthError> {
+        save_record(&*self.0.store, STORE_KEY, &fresh).await?;
+        Ok(self.remember(fresh))
+    }
+
+    /// `record`'s context, remembered until the record expires.
+    fn remember(&self, record: AuthRecord) -> AuthContext {
+        let context = AuthContext {
+            api_key: record.access_token.unwrap_or_default().into(),
+            account_id: record.account_id,
+            api_base: None,
+        };
+        self.0.remembered.keep(&context, record.expires_at);
+        context
+    }
+
     async fn login_device_flow<H>(&self, http: &H) -> Result<AuthRecord, AuthError>
     where
         H: HttpClientExt,
@@ -172,8 +319,7 @@ impl PlatformAuthenticator {
         )
         .await?;
 
-        emit_device_code_prompt(
-            self.device_code_handler.0.as_ref(),
+        self.0.device_code_handler.show(
             DeviceCodePrompt {
                 verification_uri: CHATGPT_DEVICE_VERIFY_URL.to_string(),
                 user_code: device.user_code.clone(),
@@ -184,7 +330,11 @@ impl PlatformAuthenticator {
             ),
         );
 
-        let interval = device.interval.unwrap_or(DEVICE_CODE_POLL_SLEEP_SECONDS);
+        let interval = device
+            .interval
+            .as_ref()
+            .and_then(Lenient::as_u64_lenient)
+            .unwrap_or(DEVICE_CODE_POLL_SLEEP_SECONDS);
         let start = std::time::Instant::now();
         let code = loop {
             if start.elapsed().as_secs() as i64 >= DEVICE_CODE_TIMEOUT_SECONDS {
@@ -228,52 +378,41 @@ impl PlatformAuthenticator {
             }
         };
 
-        let redirect_uri = format!("{CHATGPT_AUTH_BASE}/deviceauth/callback");
+        exchange_authorization_code(
+            http,
+            &code.authorization_code,
+            &code.code_verifier,
+            &format!("{CHATGPT_AUTH_BASE}/deviceauth/callback"),
+        )
+        .await
+    }
+
+    async fn refresh_tokens<H>(
+        &self,
+        http: &H,
+        refresh_token: &str,
+    ) -> Result<AuthRecord, RefreshTokensError>
+    where
+        H: HttpClientExt,
+    {
         let form = [
-            ("grant_type", "authorization_code"),
-            ("code", code.authorization_code.as_str()),
-            ("redirect_uri", redirect_uri.as_str()),
             ("client_id", CHATGPT_CLIENT_ID),
-            ("code_verifier", code.code_verifier.as_str()),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("scope", "openid profile email"),
         ];
+
         let body = url::form_urlencoded::Serializer::new(String::new())
             .extend_pairs(form)
             .finish();
 
-        let tokens: OAuthTokenResponse = send_json(
+        let response = send_json::<_, OAuthTokenResponse>(
             http,
             request(Method::POST, CHATGPT_OAUTH_TOKEN_URL)
                 .header(
                     http::header::CONTENT_TYPE,
                     "application/x-www-form-urlencoded",
                 )
-                .body(Bytes::from(body)),
-        )
-        .await?;
-
-        Ok(build_auth_record(tokens, None))
-    }
-
-    async fn refresh_tokens<H>(
-        &self,
-        http: &H,
-        identity: &CallerIdentity,
-        refresh_token: &str,
-    ) -> Result<AuthRecord, RefreshTokensError>
-    where
-        H: HttpClientExt,
-    {
-        let body = serde_json::to_vec(&RefreshRequest {
-            client_id: CHATGPT_CLIENT_ID,
-            grant_type: "refresh_token",
-            refresh_token,
-        })
-        .map_err(|error| RefreshTokensError::Auth(error.into()))?;
-
-        let response = send_json::<_, OAuthTokenResponse>(
-            http,
-            identified(identity, Method::POST, CHATGPT_OAUTH_TOKEN_URL)
-                .header(http::header::CONTENT_TYPE, "application/json")
                 .body(Bytes::from(body)),
         )
         .await;
@@ -304,12 +443,81 @@ impl PlatformAuthenticator {
     }
 }
 
-/// A request to the sign-in service carrying the caller's `originator` and
-/// `user-agent` exactly, as the official client's token refresh does. A
-/// `version` the identity names is a model request header, which the
-/// official refresh does not send.
-fn identified(identity: &CallerIdentity, method: Method, url: &str) -> http::request::Builder {
-    identity.stamp_client(request(method, url))
+/// Asks the provider to revoke `token`, of the kind `hint` names
+/// (`refresh_token` or `access_token`).
+async fn revoke<H>(http: &H, token: &str, hint: &str) -> Result<(), AuthError>
+where
+    H: HttpClientExt,
+{
+    let form = [
+        ("token", token),
+        ("token_type_hint", hint),
+        ("client_id", CHATGPT_CLIENT_ID),
+    ];
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(form)
+        .finish();
+    send_bytes(
+        http,
+        request(Method::POST, CHATGPT_OAUTH_REVOKE_URL)
+            .header(
+                http::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(Bytes::from(body)),
+    )
+    .await
+    .map(drop)
+}
+
+/// Exchange an authorization code and its PKCE verifier for tokens.
+async fn exchange_authorization_code<H>(
+    http: &H,
+    code: &str,
+    code_verifier: &str,
+    redirect_uri: &str,
+) -> Result<AuthRecord, AuthError>
+where
+    H: HttpClientExt,
+{
+    let form = [
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("redirect_uri", redirect_uri),
+        ("client_id", CHATGPT_CLIENT_ID),
+        ("code_verifier", code_verifier),
+    ];
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(form)
+        .finish();
+
+    let tokens: OAuthTokenResponse = send_json(
+        http,
+        request(Method::POST, CHATGPT_OAUTH_TOKEN_URL)
+            .header(
+                http::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(Bytes::from(body)),
+    )
+    .await?;
+
+    Ok(build_auth_record(tokens, None))
+}
+
+/// The originator the ChatGPT dialect sends, named to the sign-in page too.
+fn originator() -> String {
+    let identity = crate::providers::chatgpt::DIALECT.quirks.identity;
+    identity
+        .and_then(|identity| std::env::var(identity.originator_env).ok())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            identity
+                .map_or(crate::providers::chatgpt::DEFAULT_ORIGINATOR, |identity| {
+                    identity.originator
+                })
+                .to_owned()
+        })
 }
 
 fn build_auth_record(
@@ -392,35 +600,6 @@ fn format_refresh_error(
     }
 
     format!("ChatGPT token refresh failed: {status}")
-}
-
-fn deserialize_optional_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum U64OrString {
-        U64(u64),
-        String(String),
-    }
-
-    let value = Option::<U64OrString>::deserialize(deserializer)?;
-    match value {
-        None => Ok(None),
-        Some(U64OrString::U64(value)) => Ok(Some(value)),
-        Some(U64OrString::String(value)) => {
-            let value = value.trim();
-            if value.is_empty() {
-                Ok(None)
-            } else {
-                value
-                    .parse::<u64>()
-                    .map(Some)
-                    .map_err(serde::de::Error::custom)
-            }
-        }
-    }
 }
 
 #[cfg(test)]

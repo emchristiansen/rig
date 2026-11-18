@@ -1,7 +1,7 @@
 //! Structural guard: every streaming triage site runs on the single-policy
 //! driver.
 //!
-//! `WireDriver` (and its factored `triage_frame` helper for the one-frame
+//! The driver's read loop (and its factored `triage` helper for the one-frame
 //! surfaces) in `driver.rs` is the ONLY place allowed to decide what happens
 //! to `WireEvent::Unknown` / `WireEvent::Corrupt` frames. The websocket
 //! divergence fixed on this branch is the standing proof that hand-copied
@@ -10,7 +10,7 @@
 //! Mechanism: non-test provider source may *classify* (produce a `WireEvent`)
 //! but never *triage* it — and triage requires matching the `Unknown`/`Corrupt`
 //! variants. So any mention of `WireEvent::Unknown` or `WireEvent::Corrupt`
-//! outside the driver (`adapter.rs`), the classify layer (`wire.rs`), and test
+//! outside the driver (`driver.rs`), the classify layer (`wire.rs`), and test
 //! code is a restated policy table.
 
 #![allow(clippy::expect_used)]
@@ -23,9 +23,11 @@ use std::path::PathBuf;
 /// hand-rolls a `WireEvent` policy table is scanned like any other file
 /// instead of inheriting the core driver's exemption.
 const ALLOWED_POLICY_HOMES: &[&str] = &[
-    // The one driver: `WireDriver` is where the policy table lives now, and
-    // `call`/`stream` are the only consumers of it.
+    // The one driver: its read loop is where the policy table lives, and
+    // `Model::call`/`Model::stream` are the only consumers of it. The HTTP
+    // transport is the driver's framing half.
     "rig-core/src/driver.rs",
+    "rig-core/src/driver/http_transport.rs",
     // The trait definitions and the "write a provider" page: `Decoder`'s
     // contract names the variants it is defined over, and `WireFrame` — the
     // framed-but-undecoded payload the variants are about — is defined here.
@@ -33,7 +35,7 @@ const ALLOWED_POLICY_HOMES: &[&str] = &[
     "rig-core/src/providers/internal/wire.rs",
 ];
 
-/// Whether `path` is one of the three files [`ALLOWED_POLICY_HOMES`] names:
+/// Whether `path` is one of the files [`ALLOWED_POLICY_HOMES`] names:
 /// the exemption BOTH guards share.
 fn is_named_policy_home(path: &std::path::Path) -> bool {
     let unix_path = path.to_string_lossy().replace('\\', "/");
@@ -376,7 +378,7 @@ fn is_test_only_module(path: &std::path::Path) -> bool {
 /// by [`shipped_portion`].
 fn for_each_shipped_source(mut visit: impl FnMut(&std::path::Path, &str)) {
     // rig-core/tests -> workspace crates/ directory, so the guards also cover
-    // the out-of-core adapter crates (bedrock, candle, gemini-grpc).
+    // the out-of-core adapter crates (bedrock, candle, vertexai).
     let crates_dir: PathBuf = [env!("CARGO_MANIFEST_DIR"), ".."].iter().collect();
 
     let mut pending = vec![crates_dir];
@@ -422,7 +424,6 @@ const WALK_FLOOR_FILES: &[&str] = &[
     "rig-core/src/providers/anthropic/streaming.rs",
     "rig-core/src/providers/openai/responses_api/streaming.rs",
     "rig-bedrock/src/streaming.rs",
-    "rig-gemini-grpc/src/streaming.rs",
 ];
 
 /// Assert the walk saw every floor file; `walked` holds normalized paths.
@@ -474,8 +475,8 @@ fn every_triage_site_runs_on_the_single_policy_driver() {
     assert!(
         violations.is_empty(),
         "Unknown/Corrupt triage restated outside the driver (driver.rs) and \
-         classify layer (wire.rs) — route it through WireDriver / \
-         run_wire_stream / triage_frame instead:\n{}",
+         classify layer (wire.rs) — route it through the driver's read \
+         loop / `triage` instead:\n{}",
         violations.join("\n")
     );
 }
@@ -516,7 +517,7 @@ const RAW_SERDE_MARKERS: &[&str] = &[
 /// 3. **fail-closed content scoping**: its shipped content references the
 ///    wire/classify/adapter machinery ([`WIRE_MACHINERY_MARKERS`]). This is
 ///    what closes the "compat helper" hole: a helper like
-///    `internal/openai_chat_completions_compatible.rs` (or any future
+///    `openai/wire/chat/finish.rs` (or any future
 ///    `compat.rs`/`sse.rs`) has a basename the pattern misses, but it cannot
 ///    participate in wire handling without naming the machinery, so touching
 ///    the machinery is what opts a file into the scan. A helper that decodes
@@ -536,20 +537,11 @@ const RAW_SERDE_MARKERS: &[&str] = &[
 /// drift, not security boundaries: an aliased import could evade them, and
 /// that aliasing would itself be reviewable. AST-grade enforcement is
 /// deliberately not attempted.
-const SINGLE_FILE_STREAMING_MODULES: &[&str] = &[
-    "providers/ollama.rs",
-    "providers/copilot/mod.rs",
-    "providers/chatgpt/mod.rs",
-];
+const SINGLE_FILE_STREAMING_MODULES: &[&str] =
+    &["providers/copilot/mod.rs", "providers/chatgpt/mod.rs"];
 
 /// Identifiers a file cannot mention without participating in wire handling.
-const WIRE_MACHINERY_MARKERS: &[&str] = &[
-    "WireEvent",
-    "WireDriver",
-    "WireFrame",
-    "run_wire_stream",
-    "triage_frame",
-];
+const WIRE_MACHINERY_MARKERS: &[&str] = &["WireEvent", "WireFrame", "triage("];
 
 fn is_serde_wall_target(path: &std::path::Path, shipped: &str) -> bool {
     let unix_path = path.to_string_lossy().replace('\\', "/");
@@ -572,9 +564,16 @@ fn is_serde_wall_target(path: &std::path::Path, shipped: &str) -> bool {
     {
         return true;
     }
+    // A wire declaring the frame type its transport delivers names the type
+    // without handling a frame.
+    let machinery: String = shipped
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("type Frame ="))
+        .collect::<Vec<_>>()
+        .join("\n");
     WIRE_MACHINERY_MARKERS
         .iter()
-        .any(|marker| shipped.contains(marker))
+        .any(|marker| machinery.contains(marker))
 }
 
 /// One allowlist entry: `path suffix | line snippet | justification`.
@@ -835,7 +834,8 @@ fn body_debug_captures(body: &str) -> bool {
 /// `streaming::UnknownPayload` Debug-redacts itself, so `warn!(?value)` on
 /// that channel leaks nothing by construction. This scan's remaining
 /// load-bearing scope is payloads rig does not own the type of: SDK frame
-/// enums and typed events (bedrock's Converse types, gemini-grpc's protos)
+/// enums and typed events (bedrock's Converse types, Vertex AI's SDK messages,
+/// gemini-grpc's protos)
 /// whose derived `Debug` prints wire content. The type system cannot
 /// withhold `Debug` on foreign types, so the scan stays for them.
 #[test]
@@ -1013,7 +1013,6 @@ fn provider_streaming_modules_never_raw_parse_the_wire() {
     // basename pattern, broken content scoping) is a vacuous pass.
     for suffix in [
         "rig-core/src/providers/anthropic/streaming.rs",
-        "rig-core/src/providers/ollama.rs",
         "rig-core/src/providers/openai/responses_api/streaming.rs",
         "rig-bedrock/src/streaming.rs",
         // A provider's classify layer: guard 1's policy home is guard 2's
@@ -1108,16 +1107,17 @@ fn serde_policy_scanner_catches_raw_parses() {
 /// doesn't.
 #[test]
 fn serde_wall_scopes_by_machinery_content() {
-    let compat = std::path::Path::new(
-        "crates/rig-core/src/providers/internal/openai_chat_completions_compatible.rs",
-    );
+    let compat = std::path::Path::new("crates/rig-core/src/providers/openai/wire/chat/finish.rs");
     assert!(
-        is_serde_wall_target(compat, "use crate::driver::run_wire_stream;"),
+        is_serde_wall_target(compat, "use crate::wire::WireFrame;"),
         "a compat helper referencing the machinery must be scanned"
     );
     let future_helper = std::path::Path::new("crates/rig-core/src/providers/somegateway/sse.rs");
     assert!(
-        is_serde_wall_target(future_helper, "let mut driver = WireDriver::new(decoder);"),
+        is_serde_wall_target(
+            future_helper,
+            "fn classify(&self, frame: WireFrame) -> WireEvent<Chunk> {"
+        ),
         "any future compat/sse helper opts in the moment it names the machinery"
     );
     assert!(
@@ -1310,7 +1310,7 @@ pub(super) fn gated_helper() -> u8 {
     7
 }
 
-fn after() { let _ = run_wire_stream(); }
+fn after() { let _ = drive_frames(); }
 
 #[cfg(test)]
 mod tests {
@@ -1322,7 +1322,7 @@ fn last() { let _ = triage_frame(); }
     let shipped = shipped_portion(source);
     assert!(shipped.contains("WireEvent::Unknown"), "{shipped}");
     assert!(
-        shipped.contains("run_wire_stream"),
+        shipped.contains("drive_frames"),
         "shipped code AFTER a gated helper must stay visible: {shipped}"
     );
     assert!(
@@ -1352,4 +1352,89 @@ fn last() { let _ = triage_frame(); }
     // A brace-less gated item ends at its semicolon, not at end of file.
     let brace_less = "#[cfg(test)]\nuse std::fmt;\nfn after() { let _ = WireEvent::Unknown; }\n";
     assert!(shipped_portion(brace_less).contains("WireEvent::Unknown"));
+}
+
+/// Runtimes never build an assistant turn by hand: a turn that enters
+/// history comes from a fold (`CompletionResponse::message`, `head`,
+/// `continued`), so it keeps its origin and provider items. A hand-built
+/// turn has no origin and would replay a same-model turn as another model's.
+#[test]
+fn runtime_turns_come_from_folds() {
+    let mut walked = Vec::new();
+    let mut offenders = Vec::new();
+    for_each_shipped_source(|path, shipped| {
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        walked.push(normalized.clone());
+        let runtime = normalized.contains("/rig-agent/src/");
+        if runtime && mask_literals_and_comments(shipped).contains("AssistantMessage::new(") {
+            offenders.push(normalized);
+        }
+    });
+    assert!(
+        walked
+            .iter()
+            .any(|path| path.ends_with("rig-agent/src/run/streamed.rs")),
+        "the walk covers the runtime"
+    );
+    assert!(
+        offenders.is_empty(),
+        "runtime code builds assistant turns by hand: {offenders:?}"
+    );
+}
+
+/// Provider files that still read provider items directly. Each family
+/// moves its encoder onto `AssistantContent::replay` and deletes its entry;
+/// the list only shrinks.
+const PENDING_REPLAY_ADOPTION: &[&str] = &[];
+
+/// Encoders read provider items only through `AssistantContent::replay`, so
+/// the core alone decides what a current, edited or foreign item becomes.
+#[test]
+fn encoders_read_provider_items_only_through_replay() {
+    let roots = [
+        "/rig-core/src/providers/",
+        "/rig-bedrock/src/",
+        "/rig-vertexai/src/",
+        "/rig-gemini-grpc/src/",
+        "/rig-candle/src/",
+    ];
+    let mut offenders = Vec::new();
+    for_each_shipped_source(|path, shipped| {
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        if !roots.iter().any(|root| normalized.contains(root)) {
+            return;
+        }
+        let masked = mask_literals_and_comments(shipped);
+        let reads = masked.contains("native_item(")
+            || masked.contains("stale_item(")
+            || masked.match_indices(".native").any(|(at, _)| {
+                let rest = &masked[at + ".native".len()..];
+                !rest.starts_with('_')
+                    && !rest.trim_start().starts_with('=')
+                    && !rest.starts_with("::")
+            });
+        if reads {
+            offenders.push(normalized);
+        }
+    });
+    let unlisted: Vec<&String> = offenders
+        .iter()
+        .filter(|path| {
+            !PENDING_REPLAY_ADOPTION
+                .iter()
+                .any(|entry| path.ends_with(entry))
+        })
+        .collect();
+    assert!(
+        unlisted.is_empty(),
+        "encoders read provider items directly instead of through `replay`: {unlisted:?}"
+    );
+    let stale: Vec<&&str> = PENDING_REPLAY_ADOPTION
+        .iter()
+        .filter(|entry| !offenders.iter().any(|path| path.ends_with(*entry)))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "these files no longer read provider items; delete their entries: {stale:?}"
+    );
 }

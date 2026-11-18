@@ -21,7 +21,7 @@ fn transcription_request() -> transcription::TranscriptionRequest {
 #[test]
 fn the_wire_encodes_the_recorded_generate_content_request() {
     let wire = Transcriptions::new(
-        crate::providers::gemini::Gemini::new("test-key"),
+        crate::providers::gemini::GeminiConfig::new("test-key"),
         GEMINI_3_FLASH_PREVIEW,
     );
 
@@ -29,7 +29,7 @@ fn the_wire_encodes_the_recorded_generate_content_request() {
         .encode(transcription_request(), Mode::Unary)
         .expect("the request encodes");
 
-    let request = encoded.requests.first().expect("exactly one request");
+    let request = &encoded.request;
     assert_eq!(request.method().as_str(), "POST");
     assert_eq!(
         request.uri().path(),
@@ -45,11 +45,8 @@ fn the_wire_encodes_the_recorded_generate_content_request() {
     );
     assert_eq!(encoded.request_id_header, None);
 
-    let crate::wire::Body::Bytes(body) = request.body() else {
-        panic!("the transcription body is JSON, not a multipart form")
-    };
     assert_eq!(
-        serde_json::from_slice::<Value>(body).expect("the body is JSON"),
+        crate::test_utils::json_body(request),
         serde_json::json!({
             "contents": [{
                 "parts": [{
@@ -69,5 +66,20 @@ fn the_wire_encodes_the_recorded_generate_content_request() {
             },
             "toolConfig": null
         })
+    );
+}
+
+/// `additional_params` become the generation config, so anything but an
+/// object (or nothing) is refused before a request is sent.
+#[test]
+fn additional_params_that_are_not_an_object_are_refused() {
+    let request = transcription::TranscriptionRequest {
+        additional_params: Some(serde_json::json!([1])),
+        ..transcription_request()
+    };
+    let error = transcription_body(request).expect_err("an array is no config");
+    assert!(
+        error.to_string().contains("should be an object, got [1]"),
+        "{error}"
     );
 }

@@ -3,7 +3,6 @@
 use futures::StreamExt;
 use rig::agent::AgentBuilder;
 use rig::completion::AssistantContent;
-use rig::prelude::*;
 use rig::streaming::StreamEvent;
 use serde_json::json;
 
@@ -11,6 +10,7 @@ use super::{
     anthropic_adaptive_model, anthropic_signature_only_model, client,
     support::{ALPHA_SIGNAL_OUTPUT, AlphaSignal, assert_contains_all_case_insensitive},
 };
+use rig::completion::CompletionRequest;
 
 fn adaptive_thinking_params() -> serde_json::Value {
     json!({
@@ -23,10 +23,12 @@ fn adaptive_thinking_params() -> serde_json::Value {
 #[tokio::test]
 #[ignore = "requires AWS credentials and Bedrock Anthropic adaptive-thinking model access"]
 async fn adaptive_thinking_prompt_caching_tool_roundtrip_regression() {
-    let model = client()
-        .completion(anthropic_adaptive_model())
-        .with_prompt_caching();
+    let model = client().completion(anthropic_adaptive_model());
+    // A checkpoint after the reasoning turn is refused by default; this
+    // round trip skips it with a warning and checks the rest still works.
     let agent = AgentBuilder::new(model)
+        .cache(rig::completion::CacheRetention::Short)
+        .on_unsupported(rig::completion::OnUnsupported::Ignore)
         .preamble(
             "You must call tools when the user asks for their result. \
              After a tool result is available, answer with the exact result.",
@@ -40,7 +42,7 @@ async fn adaptive_thinking_prompt_caching_tool_roundtrip_regression() {
         .prompt("Call `lookup_harbor_label` exactly once, then answer with the exact tool output.")
         .await
         .expect("adaptive-thinking prompt-caching tool roundtrip should succeed")
-        .output;
+        .output();
 
     assert_contains_all_case_insensitive(&response, &[ALPHA_SIGNAL_OUTPUT]);
 }
@@ -49,41 +51,39 @@ async fn adaptive_thinking_prompt_caching_tool_roundtrip_regression() {
 #[ignore = "requires AWS credentials and Bedrock Anthropic adaptive-thinking model access"]
 async fn streaming_emits_signature_only_adaptive_reasoning_regression() {
     let model = client().completion(anthropic_signature_only_model());
-    let request = model
-        .completion_request("What is 2 + 2? Answer with only the number.")
+    let request = CompletionRequest::new("What is 2 + 2? Answer with only the number.")
         .max_tokens(2048)
-        .additional_params(adaptive_thinking_params())
-        .build();
+        .additional_params(adaptive_thinking_params());
     let mut stream = model
         .stream(request)
-        .await
         .expect("adaptive-thinking Bedrock stream should start");
 
     let mut reasoning_chunks = 0;
     let mut signature_chunks = 0;
     let mut signature_only_chunks = 0;
-    let mut got_final = false;
 
     while let Some(item) = stream.next().await {
-        match item.expect("adaptive-thinking Bedrock stream item should succeed") {
-            StreamEvent::BlockEnd {
-                block: Some(AssistantContent::Reasoning(reasoning)),
-                ..
-            } => {
-                reasoning_chunks += 1;
-                if reasoning.first_signature().is_some() {
-                    signature_chunks += 1;
-                    if reasoning.display_text().is_empty() {
-                        signature_only_chunks += 1;
-                    }
+        if let rig::streaming::Item::Event(StreamEvent::End {
+            content: content @ AssistantContent::Reasoning(_),
+            ..
+        }) = item.expect("adaptive-thinking Bedrock stream item should succeed")
+        {
+            reasoning_chunks += 1;
+            let signed = content
+                .native_item()
+                .is_some_and(|item| item.get("signature").is_some());
+            if signed {
+                signature_chunks += 1;
+                if matches!(&content, AssistantContent::Reasoning(r) if r.text.is_empty()) {
+                    signature_only_chunks += 1;
                 }
             }
-            StreamEvent::Final(_) => got_final = true,
-            _ => {}
         }
     }
-
-    assert!(got_final, "stream should emit a final response");
+    stream
+        .finish()
+        .await
+        .expect("stream should emit a final response");
     assert!(
         reasoning_chunks > 0,
         "expected at least one adaptive-thinking reasoning chunk"

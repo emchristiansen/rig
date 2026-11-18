@@ -1,0 +1,367 @@
+{
+  "context/document_metadata_and_multiple_documents_are_accepted.yaml#0": {
+    "mode": "unary",
+    "choice": [
+      {
+        "text": "According to the information provided in **harbor-record-1**, beacon code **amber-73** is assigned to **Dock Seven**.",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 100,
+      "output_tokens": 29,
+      "total_tokens": 129,
+      "cached_input_tokens": 0,
+      "reasoning_tokens": 0
+    },
+    "response_id": "bbcd3dd0-d581-4bbb-8dca-058d4b22a52b",
+    "finish_reason": "length",
+    "model": "command-a-03-2025",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "length",
+          "index": 0,
+          "logprobs": null,
+          "message": {
+            "content": "According to the information provided in **harbor-record-1**, beacon code **amber-73** is assigned to **Dock Seven**.",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 0,
+      "id": "bbcd3dd0-d581-4bbb-8dca-058d4b22a52b",
+      "model": "command-a-03-2025",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 29,
+        "completion_tokens_details": {
+          "accepted_prediction_tokens": 0,
+          "audio_tokens": 0,
+          "reasoning_tokens": 0,
+          "rejected_prediction_tokens": 0
+        },
+        "prompt_tokens": 100,
+        "prompt_tokens_details": {
+          "audio_tokens": 0,
+          "cached_tokens": 0
+        },
+        "total_tokens": 129
+      }
+    }
+  },
+  "streaming/streaming_smoke.yaml#0": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "text": "A solar eclipse occurs when the Moon passes between the Sun and the Earth, casting a shadow on the Earth and fully or partially blocking the Sun's light in certain areas. This celestial event can only happen during a new moon, when the Moon is positioned between the Sun and Earth, and the three bodies are aligned in",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 24,
+      "output_tokens": 63,
+      "total_tokens": 87,
+      "cached_input_tokens": 0,
+      "reasoning_tokens": 0
+    },
+    "response_id": "43da33bd-da34-4183-b6b0-4f39c3f6d3b7",
+    "finish_reason": "length",
+    "model": "command-a-03-2025",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": "A solar eclipse occurs when the Moon passes between the Sun and the Earth, casting a shadow on the Earth and fully or partially blocking the Sun's light in certain areas. This celestial event can only happen during a new moon, when the Moon is positioned between the Sun and Earth, and the three bodies are aligned in",
+            "role": "assistant"
+          },
+          "finish_reason": "length",
+          "index": 0,
+          "logprobs": null
+        }
+      ],
+      "created": 0,
+      "id": "43da33bd-da34-4183-b6b0-4f39c3f6d3b7",
+      "model": "command-a-03-2025",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 63,
+        "completion_tokens_details": {
+          "accepted_prediction_tokens": 0,
+          "audio_tokens": 0,
+          "reasoning_tokens": 0,
+          "rejected_prediction_tokens": 0
+        },
+        "prompt_tokens": 24,
+        "prompt_tokens_details": {
+          "audio_tokens": 0,
+          "cached_tokens": 0
+        },
+        "total_tokens": 87
+      }
+    }
+  },
+  "streaming_grammar/none_tool_choice_streams_text.yaml#0": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "text": "5",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 70,
+      "output_tokens": 1,
+      "total_tokens": 71,
+      "cached_input_tokens": 0,
+      "reasoning_tokens": 0
+    },
+    "response_id": "28556a08-7b5b-44d5-b840-74975eb4f984",
+    "finish_reason": "stop",
+    "model": "command-a-03-2025",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": "5",
+            "role": "assistant"
+          },
+          "finish_reason": "stop",
+          "index": 0,
+          "logprobs": null
+        }
+      ],
+      "created": 0,
+      "id": "28556a08-7b5b-44d5-b840-74975eb4f984",
+      "model": "command-a-03-2025",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 1,
+        "completion_tokens_details": {
+          "accepted_prediction_tokens": 0,
+          "audio_tokens": 0,
+          "reasoning_tokens": 0,
+          "rejected_prediction_tokens": 0
+        },
+        "prompt_tokens": 70,
+        "prompt_tokens_details": {
+          "audio_tokens": 0,
+          "cached_tokens": 0
+        },
+        "total_tokens": 71
+      }
+    }
+  },
+  "streaming_tools/streaming_tool_call_roundtrip.yaml#0": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "tool_call": {
+          "id": "subtract_1z6130gr5k38",
+          "name": "subtract",
+          "arguments": {
+            "x": 2,
+            "y": 5
+          },
+          "native": {
+            "item": {
+              "function": {
+                "name": "subtract",
+                "arguments": "{\"x\":2,\"y\":5}"
+              },
+              "id": "subtract_1z6130gr5k38",
+              "type": "function"
+            },
+            "fingerprint": "3ca422d53dee1f21"
+          }
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 125,
+      "output_tokens": 24,
+      "total_tokens": 149,
+      "cached_input_tokens": 0,
+      "reasoning_tokens": 0
+    },
+    "response_id": "3c48dacd-e4c5-4de0-a3bc-c0d0e60f5498",
+    "finish_reason": "tool_calls",
+    "model": "command-a-03-2025",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "name": "subtract",
+                  "arguments": "{\"x\":2,\"y\":5}"
+                },
+                "id": "subtract_1z6130gr5k38",
+                "type": "function"
+              }
+            ]
+          },
+          "finish_reason": "tool_calls",
+          "index": 0,
+          "logprobs": null
+        }
+      ],
+      "created": 0,
+      "id": "3c48dacd-e4c5-4de0-a3bc-c0d0e60f5498",
+      "model": "command-a-03-2025",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 24,
+        "completion_tokens_details": {
+          "accepted_prediction_tokens": 0,
+          "audio_tokens": 0,
+          "reasoning_tokens": 0,
+          "rejected_prediction_tokens": 0
+        },
+        "prompt_tokens": 125,
+        "prompt_tokens_details": {
+          "audio_tokens": 0,
+          "cached_tokens": 0
+        },
+        "total_tokens": 149
+      }
+    }
+  },
+  "tools/required_tool_choice_is_accepted.yaml#0": {
+    "mode": "unary",
+    "choice": [
+      {
+        "tool_call": {
+          "id": "subtract_6mqfpchysx7h",
+          "name": "subtract",
+          "arguments": {
+            "x": 2,
+            "y": 5
+          },
+          "native": {
+            "item": {
+              "function": {
+                "arguments": "{\"x\":2,\"y\":5}",
+                "name": "subtract"
+              },
+              "id": "subtract_6mqfpchysx7h",
+              "type": "function"
+            },
+            "fingerprint": "46f8dc5f5dabdeea"
+          }
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 87,
+      "output_tokens": 24,
+      "total_tokens": 111,
+      "cached_input_tokens": 0,
+      "reasoning_tokens": 0
+    },
+    "response_id": "4740a315-99ad-4c61-b2f9-49dde3e0fb20",
+    "finish_reason": "tool_calls",
+    "model": "command-a-03-2025",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "tool_calls",
+          "index": 0,
+          "logprobs": null,
+          "message": {
+            "content": null,
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"x\":2,\"y\":5}",
+                  "name": "subtract"
+                },
+                "id": "subtract_6mqfpchysx7h",
+                "type": "function"
+              }
+            ]
+          }
+        }
+      ],
+      "created": 0,
+      "id": "4740a315-99ad-4c61-b2f9-49dde3e0fb20",
+      "model": "command-a-03-2025",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 24,
+        "completion_tokens_details": {
+          "accepted_prediction_tokens": 0,
+          "audio_tokens": 0,
+          "reasoning_tokens": 0,
+          "rejected_prediction_tokens": 0
+        },
+        "prompt_tokens": 87,
+        "prompt_tokens_details": {
+          "audio_tokens": 0,
+          "cached_tokens": 0
+        },
+        "total_tokens": 111
+      }
+    }
+  },
+  "tools/tool_call_roundtrip.yaml#1": {
+    "mode": "unary",
+    "choice": [
+      {
+        "text": "-3",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 139,
+      "output_tokens": 2,
+      "total_tokens": 141,
+      "cached_input_tokens": 0,
+      "reasoning_tokens": 0
+    },
+    "response_id": "f4cf5560-63c3-423b-a9a6-a46d67420074",
+    "finish_reason": "stop",
+    "model": "command-a-03-2025",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "logprobs": null,
+          "message": {
+            "content": "-3",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 0,
+      "id": "f4cf5560-63c3-423b-a9a6-a46d67420074",
+      "model": "command-a-03-2025",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 2,
+        "completion_tokens_details": {
+          "accepted_prediction_tokens": 0,
+          "audio_tokens": 0,
+          "reasoning_tokens": 0,
+          "rejected_prediction_tokens": 0
+        },
+        "prompt_tokens": 139,
+        "prompt_tokens_details": {
+          "audio_tokens": 0,
+          "cached_tokens": 0
+        },
+        "total_tokens": 141
+      }
+    }
+  }
+}

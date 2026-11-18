@@ -1,14 +1,11 @@
 //! Anthropic structured output smoke test.
 
 use rig::agent::OutputMode;
-use rig::driver::Bind;
-use rig::prelude::*;
 use rig::providers::anthropic::completion::CLAUDE_SONNET_4_6;
-use rig::providers::anthropic::wire::Anthropic;
+use rig::providers::anthropic::wire::AnthropicConfig;
 use rig::test_utils::RecordingHttpClient;
 use rig_agent::test_utils::decode_structured_output;
 
-use super::super::support::with_anthropic_cassette;
 use crate::support::{
     STRUCTURED_OUTPUT_PROMPT, SmokeStructuredOutput, assert_smoke_structured_output,
     smoke_structured_output_value,
@@ -58,36 +55,10 @@ fn output_tool_response(name: &str) -> String {
 }
 
 #[tokio::test]
-async fn structured_output_smoke() {
-    with_anthropic_cassette(
-        "structured_output/structured_output_smoke",
-        |client| async move {
-            let agent = client
-                .agent(CLAUDE_SONNET_4_6)
-                .output_schema::<SmokeStructuredOutput>()
-                .build();
-
-            let response = agent
-                .prompt(STRUCTURED_OUTPUT_PROMPT)
-                .await
-                .expect("structured output prompt should succeed")
-                .output;
-            let structured: SmokeStructuredOutput =
-                decode_structured_output("anthropic_structured_output_smoke", &response)
-                    .expect("structured output should deserialize");
-
-            assert_smoke_structured_output(&structured);
-        },
-    )
-    .await;
-}
-
-#[tokio::test]
 async fn classic_tool_mode_maps_through_anthropic_messages() {
     let http = RecordingHttpClient::new(output_tool_response("final_result"));
-    let client = Anthropic::new("test-key").bind(http.clone());
-    let agent = client
-        .agent(CLAUDE_SONNET_4_6)
+    let client = AnthropicConfig::new("test-key");
+    let agent = rig::AgentBuilder::new(client.connect(http.clone()).completion(CLAUDE_SONNET_4_6))
         .output_schema::<SmokeStructuredOutput>()
         .output_mode(OutputMode::Tool)
         .build();
@@ -96,7 +67,7 @@ async fn classic_tool_mode_maps_through_anthropic_messages() {
         .prompt(STRUCTURED_OUTPUT_PROMPT)
         .await
         .expect("classic Anthropic Tool-mode run should succeed")
-        .output;
+        .output();
     let structured: SmokeStructuredOutput =
         decode_structured_output("anthropic_classic_tool_mode", &response)
             .expect("output-tool arguments should deserialize");
@@ -114,9 +85,8 @@ async fn classic_tool_mode_maps_through_anthropic_messages() {
 async fn classic_prompted_mode_maps_through_anthropic_messages() {
     let output = smoke_structured_output_value();
     let http = RecordingHttpClient::new(text_response(&output.to_string()));
-    let client = Anthropic::new("test-key").bind(http.clone());
-    let agent = client
-        .agent(CLAUDE_SONNET_4_6)
+    let client = AnthropicConfig::new("test-key");
+    let agent = rig::AgentBuilder::new(client.connect(http.clone()).completion(CLAUDE_SONNET_4_6))
         .output_schema::<SmokeStructuredOutput>()
         .output_mode(OutputMode::Prompted)
         .build();
@@ -125,7 +95,7 @@ async fn classic_prompted_mode_maps_through_anthropic_messages() {
         .prompt(STRUCTURED_OUTPUT_PROMPT)
         .await
         .expect("classic Anthropic Prompted-mode run should succeed")
-        .output;
+        .output();
     let structured: SmokeStructuredOutput =
         decode_structured_output("anthropic_classic_prompted_mode", &response)
             .expect("prompted JSON should deserialize");

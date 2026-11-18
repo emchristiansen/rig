@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 10072942899351225430,
+    "run_spec": 11761598427705777809,
     "handlers": [
       {
         "key": "golden/model:default",
@@ -92,7 +92,14 @@
           "choice": [
             {
               "type": "text",
-              "text": "ready"
+              "text": "ready",
+              "native": {
+                "item": {
+                  "text": "ready",
+                  "type": "text"
+                },
+                "fingerprint": "0cd5e8fd3135ad2a"
+              }
             }
           ],
           "usage": {
@@ -100,14 +107,24 @@
             "output_tokens": 4,
             "total_tokens": 30,
             "cached_input_tokens": 0,
-            "cache_creation_input_tokens": 0
+            "cache_creation_input_tokens": 0,
+            "cost": {
+              "input": 0.000078,
+              "output": 0.00006,
+              "cache_read": 0.0,
+              "cache_write": 0.0,
+              "total": 0.000138
+            }
           },
-          "message_id": "msg_011CfLcYU25fFWTpMoY72jwn",
-          "response_id": null,
+          "origin": {
+            "api": "anthropic.messages",
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-6",
+            "response_model": "claude-sonnet-4-6",
+            "response_id": "msg_011CfLcYU25fFWTpMoY72jwn"
+          },
           "provider_request_id": "req_011CfLcYTYK8f2sJQSYUqnqx",
           "finish_reason": "stop",
-          "provider": "anthropic",
-          "model": "claude-sonnet-4-6",
           "raw": {
             "container": null,
             "content": [

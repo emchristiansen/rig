@@ -79,12 +79,12 @@ impl ToolOutput {
     /// Constructs explicit model content, rejecting an empty block list.
     /// Use [`Self::text`] with `""` to represent an empty text result.
     pub fn content(content: Vec<ToolResultContent>) -> Result<Self, ToolExecutionError> {
-        let content = crate::message::require_non_empty(content, || {
-            ToolExecutionError::other(
+        if content.is_empty() {
+            return Err(ToolExecutionError::other(
                 "tool output has no content blocks; return at least one block — \
                  an empty text block is valid",
-            )
-        })?;
+            ));
+        }
         Ok(Self { content })
     }
 
@@ -102,10 +102,7 @@ impl ToolOutput {
         }
 
         match self.content.first()? {
-            // `Some` params always carry data (`AdditionalParams` is
-            // non-empty by construction), so plain `is_none` is the whole
-            // annotation check.
-            ToolResultContent::Text(text) if text.additional_params.is_none() => Some(&text.text),
+            ToolResultContent::Text(text) if text.native.is_none() => Some(&text.text),
             ToolResultContent::Text(_)
             | ToolResultContent::Image(_)
             | ToolResultContent::Json { .. } => None,
@@ -187,7 +184,7 @@ impl TryFrom<Vec<ToolResultContent>> for ToolOutput {
 /// A blanket implementation keeps ordinary [`Serialize`] outputs ergonomic.
 /// Because that blanket implementation already covers every serializable type,
 /// it cannot be overridden with another implementation for a serializable
-/// custom type. Return [`ToolOutput`] from [`PortableTool::call`](crate::tool::PortableTool::call)
+/// custom type. Return [`ToolOutput`] from [`Tool::call`](crate::tool::Tool::call)
 /// when that type needs a custom presentation. Implement this trait directly
 /// only for output types that do not implement [`Serialize`].
 pub trait IntoToolOutput {
@@ -203,23 +200,29 @@ where
     T: Serialize + 'static,
 {
     fn into_tool_output(self) -> Result<ToolOutput, ToolExecutionError> {
-        // Preserve explicit content types before the serialization fallback so
-        // multimodal blocks are not converted into JSON objects.
-        let value = &self as &dyn Any;
-        if let Some(output) = value.downcast_ref::<ToolOutput>() {
-            return Ok(output.clone());
+        // Take explicit content types and text as they are, before the
+        // serialization fallback, so multimodal blocks are not converted
+        // into JSON objects and nothing is copied.
+        let mut value = Some(self);
+        let slot = &mut value as &mut dyn Any;
+        if let Some(output) = take::<ToolOutput>(slot) {
+            return Ok(output);
         }
-        if let Some(content) = value.downcast_ref::<ToolResultContent>() {
-            return Ok(ToolOutput::one(content.clone()));
+        if let Some(content) = take::<ToolResultContent>(slot) {
+            return Ok(ToolOutput::one(content));
         }
-        if let Some(content) = value.downcast_ref::<Vec<ToolResultContent>>() {
+        if let Some(content) = take::<Vec<ToolResultContent>>(slot) {
             // Reject empty rich output as a tool failure rather than inventing
             // text or allowing an invalid result into history.
-            return ToolOutput::content(content.clone());
+            return ToolOutput::content(content);
         }
-        let is_explicit_json = value.is::<serde_json::Value>();
+        if let Some(text) = take::<String>(slot) {
+            return Ok(ToolOutput::text(text));
+        }
+        let is_explicit_json = slot.is::<Option<serde_json::Value>>();
 
-        serde_json::to_value(self)
+        // `Some(value)` serializes as `value`.
+        serde_json::to_value(value)
             .map(|value| match value {
                 serde_json::Value::String(text) if !is_explicit_json => ToolOutput::text(text),
                 value => ToolOutput::json(value),
@@ -229,6 +232,11 @@ where
                     .with_source(error)
             })
     }
+}
+
+/// The `T` in `slot`, an `Option<T>`, taken; `None` for another type.
+fn take<T: 'static>(slot: &mut dyn Any) -> Option<T> {
+    slot.downcast_mut::<Option<T>>().and_then(Option::take)
 }
 
 #[cfg(test)]

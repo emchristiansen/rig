@@ -17,9 +17,6 @@ use crate::profile::ConversationProtocol;
 /// Why a local Candle completion failed.
 #[derive(Debug, Error, Clone)]
 pub enum CandleError {
-    /// An opaque content part this prompt format cannot represent.
-    #[error(transparent)]
-    UnrepresentableOpaqueContent(#[from] rig_core::message::UnrepresentableOpaqueContent),
     /// A required artifact buffer was empty.
     #[error("the {artifact} buffer is empty")]
     EmptyBuffer { artifact: &'static str },
@@ -104,13 +101,6 @@ pub enum CandleError {
     /// A message contains content that the selected text-only prompt renderer cannot represent.
     #[error("unsupported prompt content: {0}")]
     UnsupportedPromptContent(&'static str),
-    /// A historical tool call the local prompt formats cannot express: a
-    /// namespaced call or a custom call. The shared JSON-only wire refusal.
-    #[error(transparent)]
-    UnrepresentableToolCall(#[from] rig_core::message::UnrepresentableToolCall),
-    /// A provider item in history, which a local model cannot replay.
-    #[error(transparent)]
-    UnreplayableProviderItem(#[from] rig_core::message::UnreplayableProviderItem),
     /// Caller-controlled content contains a delimiter reserved by the selected chat template.
     #[error("{field} contains reserved protocol marker `{marker}`")]
     ReservedProtocolMarker {
@@ -178,6 +168,13 @@ pub enum CandleError {
         /// Original portable value.
         value: u64,
     },
+    /// A pose frame's size or pixel buffer is invalid, or a request has no
+    /// frames.
+    #[error("invalid image: {0}")]
+    InvalidImage(String),
+    /// A pose model setting is out of range.
+    #[error("invalid pose setting: {0}")]
+    InvalidPoseSetting(String),
     /// The native inference concurrency limit is invalid.
     #[error("max_concurrent_requests must be greater than zero")]
     InvalidConcurrencyLimit,
@@ -211,11 +208,6 @@ pub enum CandleError {
         /// Result/call identifier supplied in history.
         result_id: String,
     },
-    /// `CompletionModel::make` cannot load a byte-backed model.
-    #[error(
-        "`CompletionModel::make` is unsupported for rig-candle; use a byte-backed `CandleModel` constructor or builder"
-    )]
-    UnsupportedMake,
     /// A native blocking inference task could not be joined.
     #[cfg(not(target_family = "wasm"))]
     #[error("Candle blocking task failed: {0}")]
@@ -228,15 +220,7 @@ pub enum CandleError {
 
 impl From<CandleError> for ProviderError {
     fn from(error: CandleError) -> Self {
-        match error {
-            // A request the local prompt format cannot express, refused
-            // before any inference: a request failure, as on every other wire.
-            CandleError::UnrepresentableOpaqueContent(refusal) => {
-                ProviderError::Request(refusal.into())
-            }
-            CandleError::UnrepresentableToolCall(refusal) => ProviderError::Request(refusal.into()),
-            error => ProviderError::Provider(error.to_string()),
-        }
+        ProviderError::Provider(error.to_string())
     }
 }
 
@@ -280,16 +264,14 @@ pub const PROVIDER_NAME: &str = "candle";
 
 impl From<&CandleCompletionResponse> for Usage {
     fn from(response: &CandleCompletionResponse) -> Self {
-        Usage {
-            input_tokens: Some(response.prompt_tokens),
-            output_tokens: Some(response.generated_tokens),
-            total_tokens: Some(
+        Usage::new()
+            .input_tokens(response.prompt_tokens)
+            .output_tokens(response.generated_tokens)
+            .total_tokens(
                 response
                     .prompt_tokens
                     .saturating_add(response.generated_tokens),
-            ),
-            ..Usage::default()
-        }
+            )
     }
 }
 

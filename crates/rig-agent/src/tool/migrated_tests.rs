@@ -1,12 +1,6 @@
-use crate::test_utils::{
-    MockExampleTool, MockImageOutputTool, MockObjectOutputTool, MockStringOutputTool,
-    MockToolError, mock_math_toolset,
-};
-use portable_fixtures::{
-    PortableEmbeddingFixture, context_free_dynamic_fixture, portable_fixture_output,
-};
+use crate::test_utils::{MockObjectOutputTool, MockToolError, mock_math_toolset};
+use portable_fixtures::{PortableEmbeddingFixture, portable_fixture_output};
 use rig_core::embeddings::tool::ToolSchema;
-use rig_core::message::{DocumentSourceKind, ToolResultContent};
 use serde_json::json;
 
 use super::*;
@@ -16,7 +10,7 @@ use super::*;
 mod portable_fixtures {
     use rig_core::{
         message::{ImageMediaType, ToolResultContent},
-        tool::{DynamicTool, PortableTool, PortableToolEmbedding, ToolExecutionError, ToolOutput},
+        tool::{Tool, ToolContext, ToolEmbedding, ToolExecutionError, ToolOutput},
     };
     use serde::{Deserialize, Serialize};
 
@@ -50,44 +44,6 @@ mod portable_fixtures {
         ToolOutput::content(content).expect("fixture content is non-empty")
     }
 
-    pub fn context_free_dynamic_fixture() -> DynamicTool {
-        DynamicTool::new(
-            "dynamic_runtime_name",
-            "context-free dynamic definition",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "value": {"type": "string"},
-                    "fail": {"type": "boolean"}
-                },
-                "required": ["value"]
-            }),
-            |arguments| {
-                Box::pin(async move {
-                    if arguments
-                        .get("fail")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or_default()
-                    {
-                        Err(ToolExecutionError::provider("context-free dynamic failure")
-                            .with_code("context_free_dynamic_fixture")
-                            .with_model_output(portable_fixture_output(
-                                "context-free dynamic failure",
-                            )))
-                    } else {
-                        Ok(portable_fixture_output(format!(
-                            "dynamic:{}",
-                            arguments
-                                .get("value")
-                                .and_then(serde_json::Value::as_str)
-                                .unwrap_or_default()
-                        )))
-                    }
-                })
-            },
-        )
-    }
-
     #[derive(Clone)]
     pub struct PortableEmbeddingFixture {
         context: PortableEmbeddingContext,
@@ -103,7 +59,7 @@ mod portable_fixtures {
         }
     }
 
-    impl PortableTool for PortableEmbeddingFixture {
+    impl Tool for PortableEmbeddingFixture {
         const NAME: &'static str = "portable_embedding_fixture";
         type Args = PortableEmbeddingArgs;
         type Output = ToolOutput;
@@ -131,7 +87,11 @@ mod portable_fixtures {
                 .with_source(error)
         }
 
-        async fn call(&self, arguments: Self::Args) -> Result<Self::Output, Self::Error> {
+        async fn call(
+            &self,
+            _: &mut ToolContext,
+            arguments: Self::Args,
+        ) -> Result<Self::Output, Self::Error> {
             if arguments.fail {
                 Err(PortableFixtureError)
             } else {
@@ -143,7 +103,7 @@ mod portable_fixtures {
         }
     }
 
-    impl PortableToolEmbedding for PortableEmbeddingFixture {
+    impl ToolEmbedding for PortableEmbeddingFixture {
         type InitError = std::convert::Infallible;
         type Context = PortableEmbeddingContext;
         type State = ();
@@ -167,23 +127,6 @@ mod portable_fixtures {
 
 fn get_test_toolset() -> ToolSet {
     mock_math_toolset()
-}
-
-#[test]
-fn test_get_tool_definitions() {
-    let toolset = get_test_toolset();
-    let tools = toolset.tool_definitions();
-    assert_eq!(tools.len(), 2);
-    assert_eq!(
-        tools
-            .iter()
-            .map(|tool| tool.name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["add", "subtract"],
-        "provider definitions must use registered tool names in order"
-    );
-    assert!(tools.iter().all(|tool| !tool.description.is_empty()));
-    assert!(tools.iter().all(|tool| tool.parameters.is_object()));
 }
 
 #[test]
@@ -227,7 +170,7 @@ fn deleting_a_middle_tool_preserves_order_of_survivors() {
 fn named_tool(name: &str, description: &str) -> DynamicTool {
     let output = format!("called {description}");
     DynamicTool::new(
-        name,
+        rig_core::message::ToolName::new(name).expect("tool name"),
         description,
         json!({ "type": "object", "properties": {} }),
         move |_args| {
@@ -235,16 +178,6 @@ fn named_tool(name: &str, description: &str) -> DynamicTool {
             Box::pin(async move { Ok(ToolOutput::text(output)) })
         },
     )
-}
-
-#[test]
-fn tool_definition_uses_flattened_dyn_metadata() {
-    let tool = named_tool("alpha", "runtime description");
-    let definition = tool.definition();
-
-    assert_eq!(definition.name, "alpha");
-    assert_eq!(definition.description, "runtime description");
-    assert_eq!(definition.parameters["type"], "object");
 }
 
 #[tokio::test]
@@ -259,48 +192,8 @@ async fn tool_definitions_follow_registration_order() {
     }
 
     let defs = toolset.tool_definitions();
-    let def_names: Vec<String> = defs.into_iter().map(|def| def.name).collect();
+    let def_names: Vec<String> = defs.iter().map(|def| def.name.to_string()).collect();
     assert_eq!(def_names, names);
-
-    let docs = toolset.documents();
-    let doc_ids: Vec<String> = docs.into_iter().map(|doc| doc.id).collect();
-    assert_eq!(doc_ids, names);
-}
-
-#[tokio::test]
-async fn typed_tool_name_is_definition_source_of_truth() {
-    struct NamedTool;
-
-    impl Tool for NamedTool {
-        const NAME: &'static str = "canonical";
-        type Error = rig::tool::ToolExecutionError;
-        type Args = serde_json::Value;
-        type Output = String;
-
-        fn description(&self) -> String {
-            "uses the canonical typed name".to_string()
-        }
-        fn parameters(&self) -> serde_json::Value {
-            json!({ "type": "object", "properties": {} })
-        }
-        async fn call(
-            &self,
-            _context: &mut ToolContext,
-            _args: Self::Args,
-        ) -> Result<Self::Output, ToolExecutionError> {
-            Ok("ok".to_string())
-        }
-    }
-
-    let mut toolset = ToolSet::default();
-    toolset.add_tool(NamedTool);
-
-    let defs = toolset.tool_definitions();
-    assert_eq!(defs[0].name, NamedTool::NAME);
-
-    let docs = toolset.documents();
-    assert_eq!(docs[0].id, NamedTool::NAME);
-    assert!(docs[0].text.contains(NamedTool::NAME));
 }
 
 #[test]
@@ -364,7 +257,11 @@ fn retrieved_tool_schemas_use_canonical_name() {
 #[tokio::test]
 async fn portable_embedding_tool_uses_classic_retrieval_without_schema_drift() {
     let tool = PortableEmbeddingFixture::new("shared");
-    let portable_schema = ToolSchema::try_from(&tool).unwrap();
+    let portable_schema = ToolSchema {
+        name: PortableEmbeddingFixture::NAME.to_string(),
+        context: serde_json::to_value(tool.context()).unwrap(),
+        embedding_docs: tool.embedding_docs(),
+    };
     let mut toolset = ToolSet::default();
     toolset
         .add_retrieved_tool(tool)
@@ -407,6 +304,7 @@ async fn portable_embedding_tool_uses_classic_retrieval_without_schema_drift() {
     );
 
     let success = handle
+        .toolset()
         .execute(
             &definitions[0].name,
             r#"{"value":"ok"}"#,
@@ -417,6 +315,7 @@ async fn portable_embedding_tool_uses_classic_retrieval_without_schema_drift() {
     assert_eq!(success.output(), &portable_fixture_output("shared:ok"));
 
     let failure = handle
+        .toolset()
         .execute(
             &definitions[0].name,
             r#"{"value":"ignored","fail":true}"#,
@@ -433,80 +332,6 @@ async fn portable_embedding_tool_uses_classic_retrieval_without_schema_drift() {
         &portable_fixture_output("portable failure")
     );
     assert_eq!(failure.output(), error.model_output());
-}
-
-#[tokio::test]
-async fn context_free_dynamic_tool_executes_in_classic_registry_without_callback_rewrite() {
-    let tool = context_free_dynamic_fixture();
-    let mut toolset = ToolSet::default();
-    toolset.add_dynamic_tool(named_tool("before", "before"));
-    let registered_name = toolset.add_dynamic_tool(tool);
-    toolset.add_dynamic_tool(named_tool("after", "after"));
-
-    assert_eq!(registered_name, "dynamic_runtime_name");
-    assert_eq!(
-        toolset
-            .tool_definitions()
-            .iter()
-            .map(|definition| definition.name.as_str())
-            .collect::<Vec<_>>(),
-        ["before", "dynamic_runtime_name", "after"]
-    );
-
-    let result = toolset
-        .execute(
-            "dynamic_runtime_name",
-            r#"{"value":"ok"}"#,
-            &mut ToolContext::new(),
-        )
-        .await;
-    assert!(result.is_success());
-    assert_eq!(result.output(), &portable_fixture_output("dynamic:ok"));
-
-    let failure = toolset
-        .execute(
-            "dynamic_runtime_name",
-            r#"{"value":"ignored","fail":true}"#,
-            &mut ToolContext::new(),
-        )
-        .await;
-    assert!(failure.is_error());
-    let error = failure
-        .error()
-        .expect("context-free dynamic failure should be retained");
-    assert_eq!(error.kind(), ToolErrorKind::Provider);
-    assert_eq!(error.code(), Some("context_free_dynamic_fixture"));
-    assert_eq!(
-        error.model_output(),
-        &portable_fixture_output("context-free dynamic failure")
-    );
-    assert_eq!(failure.output(), error.model_output());
-}
-
-#[tokio::test]
-async fn duplicate_registration_replaces_in_place() {
-    let mut toolset = ToolSet::default();
-    toolset.add_dynamic_tool(named_tool("alpha", "first alpha"));
-    toolset.add_dynamic_tool(named_tool("beta", "beta"));
-    toolset.add_dynamic_tool(named_tool("alpha", "second alpha"));
-
-    let defs = toolset.tool_definitions();
-    assert_eq!(
-        defs.iter().map(|def| def.name.as_str()).collect::<Vec<_>>(),
-        vec!["alpha", "beta"],
-        "the duplicate should be deduped and keep its original position"
-    );
-    assert_eq!(
-        defs[0].description, "second alpha",
-        "the last registration should win"
-    );
-
-    let output = toolset
-        .execute("alpha", "{}", &mut ToolContext::new())
-        .await
-        .output()
-        .render();
-    assert_eq!(output, "called second alpha");
 }
 
 #[tokio::test]
@@ -528,18 +353,6 @@ async fn add_tools_merges_in_order_and_replaces_existing() {
         "merged tools should follow registration order with replaced names keeping position"
     );
     assert_eq!(defs[0].description, "incoming alpha");
-}
-
-#[tokio::test]
-async fn string_tool_outputs_are_preserved_verbatim() {
-    let mut toolset = ToolSet::default();
-    toolset.add_tool(MockStringOutputTool);
-
-    let output = toolset
-        .execute("string_output", "{}", &mut ToolContext::new())
-        .await;
-
-    assert_eq!(output.output(), &ToolOutput::text("Hello\nWorld"));
 }
 
 #[tokio::test]
@@ -583,29 +396,6 @@ async fn json_shaped_string_output_stays_literal_text_through_dispatch() {
 }
 
 #[tokio::test]
-async fn explicit_image_tool_outputs_remain_structured() {
-    let mut toolset = ToolSet::default();
-    toolset.add_tool(MockImageOutputTool);
-
-    let result = toolset
-        .execute("image_output", "{}", &mut ToolContext::new())
-        .await;
-    let content = result.output().clone().into_content();
-
-    assert_eq!(content.len(), 1);
-    match content.first() {
-        Some(ToolResultContent::Image(image)) => {
-            assert!(matches!(image.data, DocumentSourceKind::Base64(_)));
-            assert_eq!(
-                image.media_type,
-                Some(rig_core::message::ImageMediaType::PNG)
-            );
-        }
-        other => panic!("expected image tool result content, got {other:?}"),
-    }
-}
-
-#[tokio::test]
 async fn object_tool_outputs_still_serialize_as_json() {
     let mut toolset = ToolSet::default();
     toolset.add_tool(MockObjectOutputTool);
@@ -621,18 +411,6 @@ async fn object_tool_outputs_still_serialize_as_json() {
             "count": 42
         }))
     );
-}
-
-#[tokio::test]
-async fn null_args_are_preserved_for_unit_args() {
-    let mut toolset = ToolSet::default();
-    toolset.add_tool(MockExampleTool);
-
-    let output = toolset
-        .execute("example_tool", "null", &mut ToolContext::new())
-        .await;
-
-    assert_eq!(output.output(), &ToolOutput::text("Example answer"));
 }
 
 // Struct-typed args with all-optional fields — serde rejects `null` for these

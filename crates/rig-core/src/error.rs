@@ -11,17 +11,20 @@
 //! ```
 
 use std::fmt;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    completion::UnsupportedOption,
     http_client,
-    memory::MemoryError,
     observe::AdapterErrorBoundary,
     provider_response::ProviderResponseError,
     tool::{ToolErrorKind, ToolExecutionError},
     vector_store::VectorStoreError,
 };
+
+mod retry;
 
 /// Normalized classification of an [`ErrorReport`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -48,20 +51,13 @@ pub enum ErrorKind {
     ProviderResponse,
     /// A tool failed; the inner kind is the tool's own classification.
     Tool(ToolErrorKind),
-    /// A conversation-memory backend failed.
-    MemoryBackend,
-    /// A conversation-memory policy or filter rejected the history.
-    MemoryPolicy,
     /// An internal invariant was violated.
     Internal,
     /// The operation was cancelled.
     Cancelled,
     /// The operation exceeded its deadline.
     Timeout,
-    /// The effect bus's driver is gone: the owner dropped it, so nothing can
-    /// serve a dispatch. A lifecycle event; never retryable on the same bus.
-    BusClosed,
-    /// No handler serves the requested key and effect family on the live bus.
+    /// No handler serves the requested key and effect family.
     /// The message identifies the key.
     HandlerUnavailable,
     /// Replay requested a different effect or exhausted the log.
@@ -86,12 +82,9 @@ impl ErrorKind {
             Self::Provider => "provider",
             Self::ProviderResponse => "provider_response",
             Self::Tool(_) => "tool",
-            Self::MemoryBackend => "memory_backend",
-            Self::MemoryPolicy => "memory_policy",
             Self::Internal => "internal",
             Self::Cancelled => "cancelled",
             Self::Timeout => "timeout",
-            Self::BusClosed => "bus_closed",
             Self::HandlerUnavailable => "handler_unavailable",
             Self::Divergence => "divergence",
             Self::Denied => "denied",
@@ -119,7 +112,7 @@ pub struct ErrorReport {
     /// A provider- or tool-specific machine code, when one was reported:
     /// for a provider's reply, the transport's own code when it gave one
     /// apart from the body, else the code the body names
-    /// (`provider_response::body_code`).
+    /// ([`ProviderResponseError::machine_code`]).
     pub code: Option<String>,
     /// The HTTP status, when the failure had one.
     pub http_status: Option<u16>,
@@ -135,67 +128,6 @@ pub struct ErrorReport {
     /// headers, and request ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_response: Option<crate::provider_response::ProviderResponseError>,
-    /// Structured diagnostic for failures a consumer may want to *route*
-    /// rather than only display. Absent for the common case; see
-    /// [`ErrorDetail`] for what each variant carries and why.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<ErrorDetail>,
-}
-
-/// Optional structured recovery diagnostic supplementing a report's kind and message.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "detail", rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum ErrorDetail {
-    /// A tool block declared complete contained invalid JSON, rather than
-    /// truncated input. Carries exact accumulated arguments and the parser
-    /// error for recovery or replay.
-    MalformedToolInput(MalformedToolInput),
-    /// A frame of the provider's reply failed to decode. Carries what was
-    /// kept of the frame, labelled by how faithful it is, so a consumer can
-    /// keep it as evidence.
-    CorruptFrame(CorruptFrameDetail),
-}
-
-/// The payload of [`ErrorDetail::CorruptFrame`]: a [`CorruptFrame`] in wire
-/// form.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CorruptFrameDetail {
-    /// The frame's discriminator value (for a Responses frame, its `type`),
-    /// when the classifier read a string one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub event_type: Option<String>,
-    /// What was kept of the frame, and how faithful it is.
-    pub evidence: FrameEvidence,
-    /// Why the frame failed to decode.
-    pub error: String,
-}
-
-impl From<&CorruptFrame> for CorruptFrameDetail {
-    fn from(corrupt: &CorruptFrame) -> Self {
-        Self {
-            event_type: corrupt.event_type.clone(),
-            evidence: corrupt.evidence.clone(),
-            error: corrupt.error.to_string(),
-        }
-    }
-}
-
-/// The payload of [`ErrorDetail::MalformedToolInput`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MalformedToolInput {
-    /// The tool the model named.
-    pub name: String,
-    /// Durable correlation ID retained from the call for recovery actions,
-    /// including tool results and rollback.
-    pub id: crate::message::ToolCallId,
-    /// The provider's own call id(s), when the wire supplied any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<crate::message::ProviderCallId>,
-    /// The raw argument text, byte-for-byte as accumulated.
-    pub raw: String,
-    /// The JSON parser's description of what was wrong.
-    pub error: String,
 }
 
 impl ErrorReport {
@@ -211,7 +143,6 @@ impl ErrorReport {
             source_chain: Vec::new(),
             request_id: None,
             provider_response: None,
-            detail: None,
         }
     }
 
@@ -242,12 +173,6 @@ impl ErrorReport {
     /// Attach the provider's request id.
     pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
         self.request_id = Some(request_id.into());
-        self
-    }
-
-    /// Attach a typed diagnostic.
-    pub fn with_detail(mut self, detail: ErrorDetail) -> Self {
-        self.detail = Some(detail);
         self
     }
 
@@ -312,19 +237,17 @@ pub const fn retryable_status(status: Option<u16>) -> bool {
 }
 
 /// Classifies `StreamEnded` and backend `Instance` errors as retryable.
-/// Protocol, header, and content-type errors are not retryable. Errors carrying
+/// Protocol, header, and content-type errors, and a client that could not be
+/// built (`Unbuilt`), are not retryable. Errors carrying
 /// an HTTP status use [`retryable_status`]. This does not guarantee the server
 /// has not processed the request.
 pub fn transient_transport(error: &http_client::Error) -> bool {
     match error {
         http_client::Error::StreamEnded | http_client::Error::Instance(_) => true,
-        http_client::Error::Protocol(_)
-        | http_client::Error::InvalidHeaderValue(_)
-        | http_client::Error::NoHeaders
-        | http_client::Error::InvalidContentType(_) => false,
         http_client::Error::InvalidStatusCodeWithDetails { status, .. } => {
             retryable_status(Some(status.as_u16()))
         }
+        _ => false,
     }
 }
 
@@ -348,172 +271,15 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 #[cfg(target_family = "wasm")]
 pub type BoxError = Box<dyn std::error::Error + 'static>;
 
-/// A frame the provider sent that this client could not decode, with what
-/// was kept of it, labelled by how faithful it is.
-///
-/// It is invalid JSON, or a frame whose discriminator this client models but
-/// whose payload failed typed decoding. A malformed modeled frame is never
-/// demoted to an unmodeled one; it surfaces as an error, and this record
-/// carries the evidence so a caller can keep the frame. A buffered call fails
-/// on it and a WebSocket session is failed by it; a stream reports it in band,
-/// and a consumer that keeps polling may still receive later events.
-///
-/// ```
-/// use rig_core::error::{FrameEvidence, ProviderError};
-///
-/// fn record(error: &ProviderError) {
-///     if let Some(corrupt) = error.corrupt_frame() {
-///         match corrupt.evidence() {
-///             FrameEvidence::Text(frame) => eprintln!("exact frame: {frame}"),
-///             FrameEvidence::Bytes(bytes) => eprintln!("exact bytes: {bytes:?}"),
-///             FrameEvidence::Decoded(text) => eprintln!("replacement-decoded: {text}"),
-///             FrameEvidence::Absent => eprintln!("no frame: {}", corrupt.error()),
-///         }
-///     }
-/// }
-/// ```
-#[derive(Debug)]
-pub struct CorruptFrame {
-    event_type: Option<String>,
-    evidence: FrameEvidence,
-    error: serde_json::Error,
-}
+/// A request-building failure shared by every clone of the error that holds
+/// it.
+#[cfg(not(target_family = "wasm"))]
+pub type SharedError = Arc<dyn std::error::Error + Send + Sync + 'static>;
 
-/// What a [`CorruptFrame`] kept of the frame, and how faithful it is.
-///
-/// Only [`Self::Text`] and [`Self::Bytes`] are the frame exactly as received.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "frame", rename_all = "snake_case")]
-pub enum FrameEvidence {
-    /// The frame's text, exactly as received.
-    Text(String),
-    /// The frame's bytes, exactly as received. They are not valid UTF-8, so
-    /// there is no exact text.
-    Bytes(Vec<u8>),
-    /// Text decoded from bytes that were not all valid UTF-8, each invalid
-    /// sequence replaced with U+FFFD before this client saw the frame, as the
-    /// `text/event-stream` grammar requires. Not the frame as received; the
-    /// original bytes were not kept.
-    Decoded(String),
-    /// No frame: the transport delivered an already-decoded event.
-    Absent,
-}
-
-impl CorruptFrame {
-    /// A text frame that failed to decode, with the discriminator value the
-    /// classifier read from it, if any.
-    pub(crate) fn text(
-        event_type: Option<String>,
-        frame: impl Into<String>,
-        error: serde_json::Error,
-    ) -> Self {
-        Self {
-            event_type,
-            evidence: FrameEvidence::Text(frame.into()),
-            error,
-        }
-    }
-
-    /// A byte frame that failed to decode.
-    pub(crate) fn bytes(bytes: Vec<u8>, error: serde_json::Error) -> Self {
-        Self {
-            event_type: None,
-            evidence: FrameEvidence::Bytes(bytes),
-            error,
-        }
-    }
-
-    /// A decode failure with no frame: a transport that delivers
-    /// already-decoded events.
-    pub(crate) fn absent(error: serde_json::Error) -> Self {
-        Self {
-            event_type: None,
-            evidence: FrameEvidence::Absent,
-            error,
-        }
-    }
-
-    /// The same frame with `error` in place of the decode error.
-    pub(crate) fn with_error(self, error: serde_json::Error) -> Self {
-        Self { error, ..self }
-    }
-
-    /// Relabel text a decoder read from a replacement-decoded payload: it is
-    /// not the frame as received.
-    pub(crate) fn mark_replacement_decoded(&mut self) {
-        if let FrameEvidence::Text(text) = &mut self.evidence {
-            self.evidence = FrameEvidence::Decoded(std::mem::take(text));
-        }
-    }
-
-    /// Replace what a decoder read lossily from `bytes`, the frame as
-    /// received, with those bytes.
-    pub(crate) fn set_received_bytes(&mut self, bytes: &[u8]) {
-        if !matches!(self.evidence, FrameEvidence::Absent) {
-            self.evidence = FrameEvidence::Bytes(bytes.to_vec());
-        }
-    }
-
-    /// The frame's discriminator value (for a Responses frame, its `type`),
-    /// when the classifier read a string one.
-    pub fn event_type(&self) -> Option<&str> {
-        self.event_type.as_deref()
-    }
-
-    /// What was kept of the frame, and how faithful it is.
-    pub fn evidence(&self) -> &FrameEvidence {
-        &self.evidence
-    }
-
-    /// The frame's text exactly as received. `None` when there is no exact
-    /// text: see [`Self::evidence`].
-    pub fn frame(&self) -> Option<&str> {
-        match &self.evidence {
-            FrameEvidence::Text(text) => Some(text),
-            _ => None,
-        }
-    }
-
-    /// The frame's bytes exactly as received, text or not. `None` when they
-    /// were not kept: see [`Self::evidence`].
-    pub fn frame_bytes(&self) -> Option<&[u8]> {
-        match &self.evidence {
-            FrameEvidence::Text(text) => Some(text.as_bytes()),
-            FrameEvidence::Bytes(bytes) => Some(bytes),
-            FrameEvidence::Decoded(_) | FrameEvidence::Absent => None,
-        }
-    }
-
-    /// Why the frame failed to decode.
-    pub fn error(&self) -> &serde_json::Error {
-        &self.error
-    }
-}
-
-impl fmt::Display for CorruptFrame {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.event_type {
-            Some(event_type) => write!(f, "`{event_type}` frame failed to decode: {}", self.error)?,
-            None => write!(f, "frame failed to decode: {}", self.error)?,
-        }
-        match &self.evidence {
-            FrameEvidence::Text(text) => write!(f, "; frame: {text}"),
-            FrameEvidence::Bytes(bytes) => {
-                write!(f, "; frame bytes (not UTF-8): {}", bytes.escape_ascii())
-            }
-            FrameEvidence::Decoded(text) => {
-                write!(f, "; frame decoded with U+FFFD replacement: {text}")
-            }
-            FrameEvidence::Absent => Ok(()),
-        }
-    }
-}
-
-impl std::error::Error for CorruptFrame {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.error)
-    }
-}
+/// A request-building failure shared by every clone of the error that holds
+/// it.
+#[cfg(target_family = "wasm")]
+pub type SharedError = Arc<dyn std::error::Error + 'static>;
 
 /// A failed provider operation: completion, embedding, reranking,
 /// transcription, image or audio generation, verification, model listing, or
@@ -539,43 +305,37 @@ impl std::error::Error for CorruptFrame {
 ///     }
 /// }
 /// ```
-#[derive(Debug, thiserror::Error)]
+///
+/// Errors are `Clone`: sources are shared, so a stream that already yielded
+/// an error can hand the same error to a later caller.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
 pub enum ProviderError {
     /// A transport failure that produced no provider reply: a reset
     /// connection, a timeout, an unreadable response. A reply the server
     /// made is [`Self::ProviderResponse`].
-    #[error("HttpError: {0}")]
-    Http(http_client::Error),
+    Http(Arc<http_client::Error>),
     /// JSON serialization or deserialization failed.
-    #[error("JsonError: {0}")]
-    Json(#[from] serde_json::Error),
-    /// A frame of the provider's reply failed to decode. What was kept of the
-    /// frame travels with it; see [`CorruptFrame`].
-    #[error("CorruptFrameError: {0}")]
-    CorruptFrame(#[source] CorruptFrame),
+    Json(Arc<serde_json::Error>),
     /// A URL could not be parsed.
-    #[error("UrlError: {0}")]
-    Url(#[from] url::ParseError),
+    Url(url::ParseError),
     /// The request could not be built.
-    #[error("RequestError: {0}")]
-    Request(#[from] BoxError),
+    Request(SharedError),
     /// The reply decoded but does not answer the request.
-    #[error("ResponseError: {0}")]
     Response(String),
-    /// The provider reported a failure without a preserved reply.
-    #[error("ProviderError: {0}")]
+    /// The provider reported a failure without a preserved reply: a Rig
+    /// diagnostic, never classified as retryable. A provider's own error
+    /// payload belongs in [`Self::ProviderResponse`], whose envelope decides
+    /// its code and retry verdict; never put provider JSON here.
     Provider(String),
     /// The provider's reply, preserved: a non-success status with its body, a
     /// 2xx error envelope, or a non-HTTP transport's error payload.
-    #[error("ProviderResponseError: {0}")]
     ProviderResponse(ProviderResponseError),
     /// The provider rejected the configured credentials with 401 or 403.
-    #[error("invalid authentication: {0}")]
     InvalidAuthentication(ProviderResponseError),
     /// A request for an existing context-cache handle answered 403 or 404.
     /// The reply's body is the provider's explanation, which can name a
     /// cause other than expiry, such as a credential or quota failure.
-    #[error("cached content `{name}` is expired or was deleted: {}", response.body)]
     CacheExpired {
         /// The cache handle the request named.
         name: String,
@@ -583,13 +343,8 @@ pub enum ProviderError {
         response: ProviderResponseError,
     },
     /// The provider returned vectors of a width other than the one the caller
-    /// declared through
-    /// [`embedding`](crate::driver::HasEmbedding::embedding)'s `ndims`
-    /// argument. Raised only when the width was set explicitly.
-    #[error(
-        "{provider} embedding response returned {returned}-dimension vectors, but the model was \
-         created with {requested} dimensions; this provider does not resize embeddings"
-    )]
+    /// declared through an embedding wire's `ndims` argument. Raised only
+    /// when the width was set explicitly.
     MismatchedDimensions {
         /// Provider whose response disagreed with the declared width.
         provider: String,
@@ -598,9 +353,88 @@ pub enum ProviderError {
         /// Width the provider actually returned.
         returned: usize,
     },
+    /// A failure a relay delivered as its report, such as a relayed
+    /// stream. It reports as the relayed report, unchanged.
+    Relayed(Box<ErrorReport>),
+    /// The reply stopped before the provider ended it: its frames ran out,
+    /// or the runtime stopped, without the provider's end.
+    Truncated,
+    /// A streamed reply sent nothing for this long, before its first frame
+    /// or between two, and was dropped. Retryable.
+    Stalled(std::time::Duration),
+    /// A [`GenerationOptions`](crate::completion::GenerationOptions) field
+    /// the wire or model cannot honour, under
+    /// [`OnUnsupported::Error`](crate::completion::OnUnsupported::Error).
+    UnsupportedOption(UnsupportedOption),
+}
+
+impl fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Http(error) => write!(f, "HttpError: {error}"),
+            Self::Json(error) => write!(f, "JsonError: {error}"),
+            Self::Url(error) => write!(f, "UrlError: {error}"),
+            Self::Request(error) => write!(f, "RequestError: {error}"),
+            Self::Response(message) => write!(f, "ResponseError: {message}"),
+            Self::Provider(message) => write!(f, "ProviderError: {message}"),
+            Self::ProviderResponse(response) => write!(f, "ProviderResponseError: {response}"),
+            Self::InvalidAuthentication(response) => {
+                write!(f, "invalid authentication: {response}")
+            }
+            Self::CacheExpired { name, response } => write!(
+                f,
+                "cached content `{name}` is expired or was deleted: {}",
+                response.body
+            ),
+            Self::MismatchedDimensions {
+                provider,
+                requested,
+                returned,
+            } => write!(
+                f,
+                "{provider} embedding response returned {returned}-dimension vectors, but the \
+                 model was created with {requested} dimensions; this provider does not resize \
+                 embeddings"
+            ),
+            Self::Relayed(report) => f.write_str(&report.message),
+            Self::Truncated => {
+                f.write_str("ResponseError: the reply ended before the provider ended it")
+            }
+            Self::Stalled(idle) => write!(
+                f,
+                "TimeoutError: the streamed reply sent nothing for {}s",
+                idle.as_secs_f64()
+            ),
+            Self::UnsupportedOption(option) => write!(f, "RequestError: {option}"),
+        }
+    }
+}
+
+/// The source is the shared error itself, not its `Arc`, so callers can
+/// downcast it.
+impl std::error::Error for ProviderError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Json(error) => Some(&**error),
+            Self::Url(error) => Some(error),
+            Self::Request(error) => Some(&**error),
+            _ => None,
+        }
+    }
+}
+
+impl From<url::ParseError> for ProviderError {
+    fn from(error: url::ParseError) -> Self {
+        Self::Url(error)
+    }
 }
 
 impl ProviderError {
+    /// A request that could not be built, for the given reason.
+    pub fn request(reason: impl Into<BoxError>) -> Self {
+        Self::Request(Arc::from(reason.into()))
+    }
+
     /// Preserves the status and verbatim body as [`Self::ProviderResponse`],
     /// including error envelopes returned with 2xx statuses.
     pub fn from_http_response(status: http::StatusCode, body: impl Into<String>) -> Self {
@@ -608,9 +442,9 @@ impl ProviderError {
     }
 
     /// Preserves a verbatim provider error body with no HTTP status as
-    /// [`Self::ProviderResponse`].
+    /// [`Self::ProviderResponse`] (see [`ProviderResponseError::from_body`]).
     pub fn from_provider_body(body: impl Into<String>) -> Self {
-        Self::ProviderResponse(ProviderResponseError::without_status(body))
+        Self::ProviderResponse(ProviderResponseError::from_body(body))
     }
 
     /// Converts a non-success reply the transport reported as an error to
@@ -623,7 +457,7 @@ impl ProviderError {
                 body,
                 headers,
             } => Self::from_http_response(status, body).with_response_headers(Some(headers)),
-            other => Self::Http(other),
+            other => Self::Http(Arc::new(other)),
         }
     }
 
@@ -631,25 +465,35 @@ impl ProviderError {
     pub fn kind(&self) -> ErrorKind {
         match self {
             Self::Http(_) => ErrorKind::Http,
-            Self::Json(_) | Self::CorruptFrame(_) => ErrorKind::Json,
+            Self::Json(_) => ErrorKind::Json,
             Self::Url(_) => ErrorKind::Url,
-            Self::Request(_) => ErrorKind::Request,
-            Self::Response(_) | Self::MismatchedDimensions { .. } => ErrorKind::Response,
+            Self::Request(_) | Self::UnsupportedOption(_) => ErrorKind::Request,
+            Self::Response(_) | Self::MismatchedDimensions { .. } | Self::Truncated => {
+                ErrorKind::Response
+            }
             Self::Provider(_) => ErrorKind::Provider,
+            Self::Stalled(_) => ErrorKind::Timeout,
             Self::ProviderResponse(_)
             | Self::InvalidAuthentication(_)
             | Self::CacheExpired { .. } => ErrorKind::ProviderResponse,
+            Self::Relayed(report) => report.kind,
         }
     }
 
     /// Classifies transport failures with [`transient_transport`] and
-    /// preserved replies with [`ProviderResponseError::is_retryable`]. Every
-    /// other failure, rejected credentials and expired caches included, is not
-    /// retryable.
+    /// preserved replies with [`ProviderResponseError::is_retryable`]; a
+    /// truncated or stalled reply is retryable. Every other failure, rejected
+    /// credentials and expired caches included, is not retryable.
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Http(error) => transient_transport(error),
             Self::ProviderResponse(response) => response.is_retryable(),
+            Self::Relayed(report) => report.retryable,
+            // A reply cut short, by its transport or its runtime, may end on
+            // the next attempt.
+            Self::Truncated => true,
+            // A stalled stream is dropped, so the next attempt starts afresh.
+            Self::Stalled(_) => true,
             _ => false,
         }
     }
@@ -660,15 +504,7 @@ impl ProviderError {
             Self::ProviderResponse(response)
             | Self::InvalidAuthentication(response)
             | Self::CacheExpired { response, .. } => Some(response),
-            _ => None,
-        }
-    }
-
-    /// The undecodable frame and what was kept of it, when this error is
-    /// one.
-    pub fn corrupt_frame(&self) -> Option<&CorruptFrame> {
-        match self {
-            Self::CorruptFrame(corrupt) => Some(corrupt),
+            Self::Relayed(report) => report.provider_response.as_ref(),
             _ => None,
         }
     }
@@ -765,6 +601,7 @@ impl ProviderError {
     pub(crate) fn boundary(&self) -> AdapterErrorBoundary {
         match (self, self.kind()) {
             (Self::Http(error), _) => AdapterErrorBoundary::from_http(error),
+            (Self::Stalled(_), _) => AdapterErrorBoundary::Transport,
             (_, ErrorKind::Json | ErrorKind::Response) => AdapterErrorBoundary::Decode,
             (_, ErrorKind::Provider | ErrorKind::ProviderResponse) => {
                 AdapterErrorBoundary::ProviderResponse
@@ -784,8 +621,37 @@ impl ProviderError {
                 name,
                 response: map(response),
             },
+            // The report restates what it read from the reply it preserves,
+            // so what the map fills reaches both. What it held is kept.
+            Self::Relayed(mut report) => {
+                if let Some(response) = report.provider_response.take() {
+                    let response = map(response);
+                    report.request_id = report
+                        .request_id
+                        .or_else(|| response.provider_request_id.clone());
+                    report.http_status = report
+                        .http_status
+                        .or_else(|| response.status.map(|status| status.as_u16()));
+                    report.code = report.code.or_else(|| response.machine_code());
+                    report.refusal |= response.refusal;
+                    report.provider_response = Some(response);
+                }
+                Self::Relayed(report)
+            }
             other => other,
         }
+    }
+}
+
+impl From<serde_json::Error> for ProviderError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(Arc::new(error))
+    }
+}
+
+impl From<BoxError> for ProviderError {
+    fn from(error: BoxError) -> Self {
+        Self::Request(Arc::from(error))
     }
 }
 
@@ -797,8 +663,10 @@ impl From<http_client::Error> for ProviderError {
 
 /// A failure to build a provider request, returned by
 /// [`Wire::encode`](crate::wire::Wire::encode). It converts only into
-/// [`ProviderError::Request`], so every provider classifies its encode
+/// [`ProviderError::Request`] or [`ProviderError::UnsupportedOption`], both
+/// of kind [`ErrorKind::Request`], so every provider classifies its encode
 /// failures alike.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 #[error(transparent)]
 pub struct EncodeError(ProviderError);
@@ -806,7 +674,20 @@ pub struct EncodeError(ProviderError);
 impl EncodeError {
     /// A request that could not be built, for the given reason.
     pub fn request(reason: impl Into<BoxError>) -> Self {
-        Self(ProviderError::Request(reason.into()))
+        Self(ProviderError::request(reason))
+    }
+
+    /// A request that sets an option the wire or model cannot honour.
+    pub fn unsupported(option: UnsupportedOption) -> Self {
+        Self(ProviderError::UnsupportedOption(option))
+    }
+
+    /// The refused option, when this error is a refusal.
+    pub fn unsupported_option(&self) -> Option<&UnsupportedOption> {
+        match &self.0 {
+            ProviderError::UnsupportedOption(option) => Some(option),
+            _ => None,
+        }
     }
 }
 
@@ -835,44 +716,23 @@ impl From<crate::message::MessageError> for EncodeError {
     }
 }
 
-impl From<crate::message::UnrepresentableToolCall> for EncodeError {
-    fn from(error: crate::message::UnrepresentableToolCall) -> Self {
-        Self::request(error)
-    }
-}
-
-impl From<crate::message::UnreplayableProviderItem> for EncodeError {
-    fn from(error: crate::message::UnreplayableProviderItem) -> Self {
-        Self::request(error)
-    }
-}
-
 impl From<BoxError> for EncodeError {
     fn from(error: BoxError) -> Self {
-        Self(ProviderError::Request(error))
+        Self(ProviderError::from(error))
     }
 }
 
 impl From<http::Error> for ProviderError {
     fn from(error: http::Error) -> Self {
-        Self::Request(Box::new(error))
-    }
-}
-
-/// A client that could not be built: transport-configuration failures keep
-/// their HTTP identity, anything else (a missing key, an unreadable
-/// environment variable) is reported as a provider error.
-impl From<crate::client::ProviderClientError> for ProviderError {
-    fn from(error: crate::client::ProviderClientError) -> Self {
-        match error {
-            crate::client::ProviderClientError::Http(error) => Self::Http(error),
-            other => Self::Provider(other.to_string()),
-        }
+        Self::request(error)
     }
 }
 
 impl From<&ProviderError> for ErrorReport {
     fn from(error: &ProviderError) -> Self {
+        if let ProviderError::Relayed(report) = error {
+            return (**report).clone();
+        }
         let response = error.provider_response();
         ErrorReport {
             kind: error.kind(),
@@ -886,9 +746,6 @@ impl From<&ProviderError> for ErrorReport {
             source_chain: source_chain(error),
             request_id: response.and_then(|response| response.provider_request_id.clone()),
             provider_response: response.cloned(),
-            detail: error
-                .corrupt_frame()
-                .map(|corrupt| ErrorDetail::CorruptFrame(corrupt.into())),
         }
     }
 }
@@ -930,7 +787,6 @@ impl From<&ToolExecutionError> for ErrorReport {
             source_chain: source_chain(error),
             request_id: None,
             provider_response: None,
-            detail: None,
         }
     }
 }
@@ -941,38 +797,42 @@ impl From<ToolExecutionError> for ErrorReport {
     }
 }
 
-impl MemoryError {
-    /// The wire form of this error.
-    pub fn report(&self) -> ErrorReport {
-        ErrorReport::from(self)
-    }
-}
-
-impl From<&MemoryError> for ErrorReport {
-    fn from(error: &MemoryError) -> Self {
-        let kind = match error {
-            MemoryError::Backend(_) => ErrorKind::MemoryBackend,
-            MemoryError::Policy(_) => ErrorKind::MemoryPolicy,
-            MemoryError::Internal(_) => ErrorKind::Internal,
+/// Rebuilds a tool failure from a dispatch report.
+///
+/// An [`ErrorKind::Tool`] report keeps its tool kind; other kinds map to the
+/// closest [`ToolErrorKind`]. Retryability, code, HTTP status, and refusal are
+/// copied, the message is model-visible, and the report is the `source()`.
+impl From<ErrorReport> for ToolExecutionError {
+    fn from(report: ErrorReport) -> Self {
+        let kind = match report.kind {
+            ErrorKind::Tool(kind) => kind,
+            ErrorKind::Timeout => ToolErrorKind::Timeout,
+            ErrorKind::Cancelled => ToolErrorKind::Cancelled,
+            ErrorKind::Denied => ToolErrorKind::PermissionDenied,
+            ErrorKind::HandlerUnavailable => ToolErrorKind::NotFound,
+            ErrorKind::Http => ToolErrorKind::Network,
+            ErrorKind::Provider | ErrorKind::ProviderResponse => ToolErrorKind::Provider,
+            ErrorKind::Json
+            | ErrorKind::Url
+            | ErrorKind::Request
+            | ErrorKind::Response
+            | ErrorKind::Internal
+            | ErrorKind::Divergence
+            | ErrorKind::Other => ToolErrorKind::Other,
         };
-        ErrorReport {
-            kind,
-            retryable: false,
-            message: error.to_string(),
-            code: None,
-            http_status: None,
-            refusal: false,
-            source_chain: source_chain(error),
-            request_id: None,
-            provider_response: None,
-            detail: None,
+        let mut error = if report.refusal {
+            ToolExecutionError::refused(report.message.clone())
+        } else {
+            ToolExecutionError::new(kind, report.message.clone())
         }
-    }
-}
-
-impl From<MemoryError> for ErrorReport {
-    fn from(error: MemoryError) -> Self {
-        Self::from(&error)
+        .with_retryable(report.retryable);
+        if let Some(code) = &report.code {
+            error = error.with_code(code.clone());
+        }
+        if let Some(status) = report.http_status {
+            error = error.with_http_status(status);
+        }
+        error.with_source(report)
     }
 }
 
@@ -988,7 +848,7 @@ impl From<&VectorStoreError> for ErrorReport {
             }
             VectorStoreError::JsonError(_) => (ErrorKind::Json, None),
             VectorStoreError::DatastoreError(_) => (ErrorKind::Provider, None),
-            VectorStoreError::FilterError(_) | VectorStoreError::BuilderError(_) => {
+            VectorStoreError::FilterError(_) | VectorStoreError::SamplesOutOfRange { .. } => {
                 (ErrorKind::Request, None)
             }
             VectorStoreError::MissingIdError(_) => (ErrorKind::Response, None),
@@ -1035,7 +895,6 @@ impl From<&VectorStoreError> for ErrorReport {
             source_chain: source_chain(error),
             request_id: None,
             provider_response,
-            detail: None,
         }
     }
 }

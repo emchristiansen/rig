@@ -2,21 +2,25 @@
 
 use tracing::info_span;
 
+#[cfg(test)]
+mod tests;
+
 /// Build a completion-parent span with the supplied literal name and operation.
 /// Literal names are required because tracing stores them in static metadata.
 macro_rules! build_chat_span {
     ($runner:expr, $effective_preamble:expr, $name:literal, $operation:literal) => {{
-        let system_instructions = $crate::core::telemetry::system_instructions_json(
+        let system_instructions = $crate::__core::telemetry::system_instructions_json(
             $effective_preamble,
             $runner.config.record_telemetry_content,
         );
         // Reuse the core parent marker so completion instrumentation recognizes this span.
-        $crate::core::telemetry::completion_parent_span!(
+        $crate::__core::telemetry::completion_parent_span!(
             target: "rig::agent_chat",
             name: $name,
             operation: $operation,
             system_instructions: system_instructions.as_deref(),
             gen_ai.agent.name = $runner.agent_name_or_default(),
+            gen_ai.tool.definitions = $crate::__core::telemetry::Empty,
         )
     }};
 }

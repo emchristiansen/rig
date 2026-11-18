@@ -54,16 +54,23 @@ impl VectorStoreIndex for NativeIndex {
     async fn top_n<T: DeserializeOwned + WasmCompatSend>(
         &self,
         _req: VectorSearchRequest<Self::Filter>,
-    ) -> Result<Vec<(f64, String, T)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchResult<T>>, VectorStoreError> {
         let document = serde_json::from_value(Value::Array(vec![Value::Null; 401]))?;
-        Ok(vec![(0.9, "doc-1".to_owned(), document)])
+        Ok(vec![VectorSearchResult {
+            score: 0.9,
+            id: "doc-1".to_owned(),
+            document,
+        }])
     }
 
     async fn top_n_ids(
         &self,
         _req: VectorSearchRequest<Self::Filter>,
-    ) -> Result<Vec<(f64, String)>, VectorStoreError> {
-        Ok(vec![(0.9, "doc-1".to_owned())])
+    ) -> Result<Vec<VectorSearchIdResult>, VectorStoreError> {
+        Ok(vec![VectorSearchIdResult {
+            score: 0.9,
+            id: "doc-1".to_owned(),
+        }])
     }
 }
 
@@ -73,20 +80,27 @@ impl VectorStoreIndex for TestIndex {
     async fn top_n<T: DeserializeOwned + WasmCompatSend>(
         &self,
         req: VectorSearchRequest,
-    ) -> Result<Vec<(f64, String, T)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchResult<T>>, VectorStoreError> {
         self.queries
             .lock()
             .expect("query recorder lock")
             .push(req.query().to_string());
         let document = serde_json::from_value(json!({ "answer": 42 }))?;
-        Ok(vec![(0.9, "doc-1".to_string(), document)])
+        Ok(vec![VectorSearchResult {
+            score: 0.9,
+            id: "doc-1".to_string(),
+            document,
+        }])
     }
 
     async fn top_n_ids(
         &self,
         _req: VectorSearchRequest,
-    ) -> Result<Vec<(f64, String)>, VectorStoreError> {
-        Ok(vec![(0.9, "doc-1".to_string())])
+    ) -> Result<Vec<VectorSearchIdResult>, VectorStoreError> {
+        Ok(vec![VectorSearchIdResult {
+            score: 0.9,
+            id: "doc-1".to_string(),
+        }])
     }
 }
 
@@ -100,11 +114,11 @@ async fn vector_store_index_remains_a_tool() {
         .query("answer")
         .samples(1)
         .build();
-    let output = <TestIndex as PortableTool>::call(&index, request)
+    let output = Tool::call(&index, &mut ToolContext::default(), request)
         .await
         .expect("vector tool call should succeed");
 
-    assert_eq!(<TestIndex as PortableTool>::NAME, "search_vector_store");
+    assert_eq!(<TestIndex as Tool>::NAME, "search_vector_store");
     assert_eq!(
         *queries.lock().expect("query recorder lock"),
         vec!["answer"]
@@ -114,6 +128,11 @@ async fn vector_store_index_remains_a_tool() {
     assert_eq!(result.score, 0.9);
     assert_eq!(result.id, "doc-1");
     assert_eq!(result.document, json!({ "answer": 42 }));
+    assert_eq!(
+        serde_json::to_value(&output).expect("tool output serializes"),
+        json!([{ "score": 0.9, "id": "doc-1", "document": { "answer": 42 } }]),
+        "the tool output keeps its named-field JSON shape"
+    );
 }
 
 #[tokio::test]
@@ -134,7 +153,7 @@ async fn dynamic_native_filter_preserves_backend_documents() {
     )
     .await
     .expect("dynamic vector search should succeed");
-    let crate::effect::Outcome::Documents(crate::effect::RetrievedDocuments::Scored(results)) =
+    let crate::effect::Answered::Documents(crate::effect::RetrievedDocuments::Scored(results)) =
         outcome
     else {
         panic!("expected scored documents");

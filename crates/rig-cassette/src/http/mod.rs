@@ -5,7 +5,8 @@
 //! holds an undeclared account failure or undeleted stored state, in which
 //! case it goes under [`attempt_root`] instead. The `http` feature enables this
 //! engine; `bedrock` adds binary Smithy event-stream scrubbing. Invalid
-//! fixtures and failed replay assertions panic.
+//! fixtures and failed replay assertions panic in `start_at` and `finish`;
+//! `try_start_at` and `try_finish` return them as a [`CassetteError`].
 //!
 //! ```
 //! use rig_cassette::http::CassetteSpec;
@@ -23,46 +24,53 @@
 )]
 #![warn(missing_docs)]
 
-#[cfg(feature = "bedrock")]
-use aws_smithy_eventstream::frame::{read_message_from, write_message_to};
-#[cfg(feature = "bedrock")]
-use aws_smithy_types::event_stream::Message as EventStreamMessage;
+use crate::scrub::{
+    MultipartPart, REDACTED, Scrubber, VOLATILE_JSON_KEYS, canonical_json,
+    contains_case_insensitive, multipart_boundary, parse_multipart_parts,
+};
+use crate::traffic::{self, Exchange, RequestBody};
 use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::Response;
 use axum::{Router, routing::any};
 use base64::{Engine, prelude::BASE64_STANDARD};
-use futures::{FutureExt, stream};
-use httpmock::MockServer;
-use rig_core::http_client::{
-    self, HttpClientExt, LazyBody, MultipartForm, Request as HttpRequest, Response as HttpResponse,
-};
+use futures::stream;
+use rig_core::http_client::{self, DynHttpClient};
+use rig_core::redact;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::any::Any;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::fmt;
 use std::fs;
 use std::net::SocketAddr;
-use std::panic::{AssertUnwindSafe, resume_unwind};
+use std::panic::resume_unwind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 
 mod account;
+mod clock;
+pub use clock::{CassetteClock, MAX_PAUSE, clock_sidecar};
+pub use snapshot::request_snapshot;
+use snapshot::{RequestSnapshots, SnapshotMode};
+mod error;
+pub use error::CassetteError;
 pub mod ledger;
-mod relay;
+mod proxy;
+mod shape;
+mod snapshot;
 pub use account::{AccountFailure, account_failure, reply_account_failure};
+use shape::BodyMatching;
 
 const MODE_ENV: &str = "RIG_PROVIDER_TEST_MODE";
 const ATTEMPT_DIR_ENV: &str = "RIG_CASSETTE_ATTEMPT_DIR";
-const REDACTED: &str = "[REDACTED]";
 const DUMMY_API_KEY: &str = REDACTED;
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -74,11 +82,14 @@ enum ReplayMatching {
     Unordered,
 }
 
-/// The fixture scenario and its ordered or unordered replay matching policy.
+/// The fixture scenario and its replay matching policy: ordered or
+/// unordered, and exact or shape-matched request bodies.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CassetteSpec {
     scenario: &'static str,
     replay_matching: ReplayMatching,
+    /// `None` takes `RIG_CASSETTE_MATCHING`.
+    body_matching: Option<BodyMatching>,
     expected_failures: u8,
 }
 
@@ -88,6 +99,7 @@ impl CassetteSpec {
         Self {
             scenario,
             replay_matching: ReplayMatching::Ordered,
+            body_matching: None,
             expected_failures: 0,
         }
     }
@@ -100,6 +112,28 @@ impl CassetteSpec {
     /// Allow matching an unused interaction in any order.
     pub const fn unordered(mut self) -> Self {
         self.replay_matching = ReplayMatching::Unordered;
+        self
+    }
+
+    /// Match request bodies by their coarse shape instead of exactly, as
+    /// `RIG_CASSETTE_MATCHING=shape` does for a spec that chooses neither.
+    /// The method, path, query and recorded headers still match exactly.
+    /// The key keeps the body's field structure, the order of its arrays of
+    /// objects, and the values of `model`, `role`, `name` and `stream`; it
+    /// erases other values, the types of content, tool schemas and tool
+    /// arguments. Unordered replay serves, among the interactions with the
+    /// request's key, the one its body is closest to. Pair it with
+    /// `RIG_CASSETTE_SNAPSHOTS=check`, which pins the bytes.
+    pub const fn shape_matched(mut self) -> Self {
+        self.body_matching = Some(BodyMatching::Shape);
+        self
+    }
+
+    /// Match request bodies exactly whatever `RIG_CASSETTE_MATCHING` says,
+    /// for a cell whose subject is the exact matcher. Exact is also what a
+    /// spec that chooses neither gets when the variable is unset.
+    pub const fn exact_matched(mut self) -> Self {
+        self.body_matching = Some(BodyMatching::Exact);
         self
     }
 
@@ -120,17 +154,14 @@ impl From<&'static str> for CassetteSpec {
 
 #[derive(Clone, Copy, Debug)]
 struct CassettePolicy {
-    recorded_request_headers: &'static [&'static str],
     required_request_headers: &'static [&'static str],
-    sensitive_headers: &'static [&'static str],
-    sensitive_query_params: &'static [&'static str],
-    response_header_allowlist: &'static [&'static str],
-    forbidden_patterns: &'static [&'static str],
     replay_matching: ReplayMatching,
+    body_matching: BodyMatching,
 }
 
 impl CassettePolicy {
-    fn for_scenario(provider: &str, scenario: &str, replay_matching: ReplayMatching) -> Self {
+    fn for_scenario(provider: &str, spec: CassetteSpec) -> Self {
+        let scenario = spec.scenario;
         let required_request_headers = match provider {
             "openai" | "doubleword" | "venice" => OPENAI_REQUIRED_REQUEST_HEADERS,
             "chatgpt" => CHATGPT_REQUIRED_REQUEST_HEADERS,
@@ -143,46 +174,20 @@ impl CassettePolicy {
 
         Self {
             required_request_headers,
-            replay_matching,
-            ..Self::default()
+            replay_matching: spec.replay_matching,
+            body_matching: spec.body_matching.unwrap_or(BodyMatching::Exact),
         }
-    }
-
-    fn is_sensitive_header(self, name: &str) -> bool {
-        contains_case_insensitive(self.sensitive_headers, name)
-    }
-
-    fn required_request_headers(self) -> &'static [&'static str] {
-        self.required_request_headers
-    }
-
-    fn is_sensitive_query_param(self, name: &str) -> bool {
-        contains_case_insensitive(self.sensitive_query_params, name)
-    }
-
-    fn is_allowed_response_header(self, name: &str) -> bool {
-        contains_case_insensitive(self.response_header_allowlist, name)
     }
 }
 
 impl Default for CassettePolicy {
     fn default() -> Self {
         Self {
-            recorded_request_headers: RECORDED_REQUEST_HEADERS,
             required_request_headers: NO_REQUIRED_REQUEST_HEADERS,
-            sensitive_headers: SENSITIVE_HEADER_NAMES,
-            sensitive_query_params: SENSITIVE_QUERY_PARAMS,
-            response_header_allowlist: RESPONSE_HEADER_ALLOWLIST,
-            forbidden_patterns: FORBIDDEN_CASSETTE_PATTERNS,
             replay_matching: ReplayMatching::Ordered,
+            body_matching: BodyMatching::Exact,
         }
     }
-}
-
-fn contains_case_insensitive(values: &[&str], needle: &str) -> bool {
-    values
-        .iter()
-        .any(|value| needle.eq_ignore_ascii_case(value))
 }
 
 /// Whether to replay frozen traffic or record genuine upstream exchanges.
@@ -236,12 +241,38 @@ fn skips_recording(mode: CassetteMode, reason: &str) -> bool {
     false
 }
 
-/// Recorder for transports that bypass the HTTP proxy, including binary bodies.
-#[derive(Clone, Debug)]
+/// What a recording session keeps: each exchange scrubbed as a cassette
+/// interaction, the created-resource ledger, and why an exchange cannot be
+/// kept. The proxy and a [`direct_http`](ProviderCassette::direct_http)
+/// client both hand their exchanges to it; a transport of its own (Bedrock's
+/// connector) calls [`record_http_interaction`](Self::record_http_interaction).
+#[derive(Clone)]
 pub struct DirectRecorder {
-    interactions: Arc<Mutex<Vec<CassetteInteraction>>>,
-    policy: CassettePolicy,
-    ledger: Arc<relay::LedgerTarget>,
+    /// The kept interactions with their exchanges' numbers, in the order the
+    /// exchanges started: ordered replay serves them in that order, whichever
+    /// ended first.
+    interactions: Arc<std::sync::Mutex<Vec<(u64, CassetteInteraction)>>>,
+    ledger: Arc<ledger::LedgerTarget>,
+    /// Exchanges that cannot become an interaction, such as a stream that
+    /// failed midway; each refuses the recording.
+    refusals: Arc<std::sync::Mutex<Vec<String>>>,
+    /// The session's one scrubber: what it learned and the placeholders it
+    /// numbered hold across the session's exchanges, so two OAuth tokens
+    /// stay two placeholders and one token keeps its own.
+    scrubber: Arc<std::sync::Mutex<Scrubber>>,
+    /// Exchanges the recorder opened and has not yet handed on, which
+    /// [`ProviderCassette::try_finish`] waits for.
+    in_flight: Arc<AtomicUsize>,
+    /// How many exchanges the session started; each takes the next number.
+    started: Arc<AtomicU64>,
+}
+
+impl fmt::Debug for DirectRecorder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DirectRecorder")
+            .field("ledger", &self.ledger)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Borrowed request bytes and headers supplied to the direct recorder.
@@ -267,119 +298,379 @@ pub struct DirectHttpResponse<'a, Headers> {
 }
 
 impl DirectRecorder {
-    /// Append what a successful reply to `method uri` created to the
-    /// created-resource ledger. Called before the reply reaches the caller.
-    fn log_created(
+    /// Scrub and append one complete direct request/response exchange, and
+    /// write what its reply created to the ledger.
+    pub fn record_http_interaction(
         &self,
-        method: &str,
-        uri: &str,
-        request_body: &[u8],
-        status: u16,
-        response_body: &[u8],
+        request: DirectHttpRequest<
+            '_,
+            impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
+        >,
+        response: DirectHttpResponse<
+            '_,
+            impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
+        >,
     ) {
-        if !(200..300).contains(&status) {
-            return;
-        }
-        let path = url::Url::parse(uri)
-            .map(|url| url.path().to_owned())
-            .unwrap_or_else(|_| uri.to_owned());
-        let created = ledger::created_resources(
-            &self.ledger.provider,
-            &self.ledger.origin,
-            method,
-            &path,
-            request_body,
-            response_body,
-        );
-        ledger::append(
-            &self.ledger.path,
-            &created
-                .into_iter()
-                .map(|resource| {
-                    ledger::LedgerEntry::Created(ledger::CreatedResource {
-                        scenario: self.ledger.scenario.clone(),
-                        ..resource
-                    })
-                })
-                .collect::<Vec<_>>(),
-        );
-    }
-
-    /// Scrub and append one complete direct request/response exchange.
-    pub async fn record_http_interaction<RequestHeaders, ResponseHeaders>(
-        &self,
-        request: DirectHttpRequest<'_, RequestHeaders>,
-        response: DirectHttpResponse<'_, ResponseHeaders>,
-    ) where
-        RequestHeaders: IntoIterator,
-        RequestHeaders::Item: DirectHeader,
-        ResponseHeaders: IntoIterator,
-        ResponseHeaders::Item: DirectHeader,
-    {
-        let mut scrubber = CassetteScrubber::new(self.policy);
-        let mut interaction = CassetteInteraction {
-            when: recorded_request(
-                self.policy,
-                request.method,
-                request.uri,
-                request.headers.into_iter().map(DirectHeader::into_pair),
-                request.body,
-            ),
-            then: recorded_response(
-                response.status,
-                response.headers.into_iter().map(DirectHeader::into_pair),
-                response.body,
-            ),
-        };
+        let request_headers: Vec<_> = request.headers.into_iter().collect();
+        let response_headers: Vec<_> = response.headers.into_iter().collect();
+        let number = self.next_number();
         // The ledger sees the exchange before its reply reaches the caller.
-        self.log_created(
-            request.method,
-            request.uri,
-            request.body,
+        ledger::record_created(
+            &self.ledger,
+            ledger::Sent {
+                method: request.method,
+                uri: request.uri,
+                body: request.body,
+            },
             response.status,
             response.body,
         );
+        self.keep_exchange(
+            number,
+            DirectHttpRequest {
+                method: request.method,
+                uri: request.uri,
+                headers: request_headers
+                    .iter()
+                    .map(|(name, value)| (name.as_ref(), value.as_ref().as_bytes())),
+                body: request.body,
+            },
+            DirectHttpResponse {
+                status: response.status,
+                headers: response_headers
+                    .iter()
+                    .map(|(name, value)| (name.as_ref(), value.as_ref().as_bytes())),
+                body: response.body,
+            },
+        );
+    }
+
+    /// Scrub and keep one exchange, the session's `number`th to start, as a
+    /// cassette interaction.
+    fn keep_exchange(
+        &self,
+        number: u64,
+        request: DirectHttpRequest<
+            '_,
+            impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<[u8]>)>,
+        >,
+        response: DirectHttpResponse<
+            '_,
+            impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<[u8]>)>,
+        >,
+    ) {
+        let mut scrubber = self
+            .scrubber
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let request_headers: Vec<_> = request.headers.into_iter().collect();
+        let response_headers: Vec<_> = response.headers.into_iter().collect();
+        let request_text = || {
+            request_headers.iter().map(|(name, value)| {
+                (
+                    name.as_ref(),
+                    crate::scrub::HeaderText::from(value.as_ref()),
+                )
+            })
+        };
+        let response_text = || {
+            response_headers.iter().map(|(name, value)| {
+                (
+                    name.as_ref(),
+                    crate::scrub::HeaderText::from(value.as_ref()),
+                )
+            })
+        };
+        let prepared = scrubber.prepare_exchange_with_headers(
+            request.uri,
+            request_text(),
+            crate::scrub::RequestBodyRef::Bytes(request.body),
+            response_text(),
+            Some(response.body),
+        );
+        // A body the scrubber could not read whole is withheld: the cassette
+        // keeps its size and content type, never its bytes.
+        let request_headers: Vec<_> = crate::scrub::recordable_pairs(request_text()).collect();
+        let response_headers: Vec<_> = crate::scrub::recordable_pairs(response_text()).collect();
+        let request_withheld = prepared.request_withheld().cloned();
+        let response_withheld = prepared.response_withheld().cloned();
+        let response_headers: Vec<_> = response_headers
+            .into_iter()
+            .map(|(name, value)| {
+                let scrubbed =
+                    prepared.scrub_response_header(&mut scrubber, name.as_ref(), value.as_ref());
+                (name, scrubbed)
+            })
+            .collect();
+        let request_body = prepared
+            .request_body
+            .map(|body| scrubber.scrub_prepared(body))
+            .unwrap_or_else(|| Bytes::copy_from_slice(request.body));
+        let response_body = prepared
+            .response_body
+            .map(|body| scrubber.scrub_prepared(body))
+            .unwrap_or_else(|| Bytes::copy_from_slice(response.body));
+        let mut interaction = CassetteInteraction {
+            when: recorded_request(request.method, request.uri, request_headers, &request_body),
+            then: recorded_response(response.status, response_headers, &response_body),
+        };
+        if request_withheld.is_some() {
+            interaction.when.body = None;
+            interaction.when.body_encoding = BodyEncoding::Utf8;
+            interaction.when.withheld = request_withheld;
+        }
+        if response_withheld.is_some() {
+            interaction.then.body = None;
+            interaction.then.body_encoding = BodyEncoding::Utf8;
+            interaction.then.withheld = response_withheld;
+        }
+        // A redirect to the provider itself is kept as its path, so replay
+        // follows it to the replay server.
+        let origin = uri_origin(request.uri);
+        for header in &mut interaction.then.header {
+            if header.name.eq_ignore_ascii_case("location")
+                && let Some(local) = origin
+                    .as_deref()
+                    .and_then(|origin| local_location(origin, &header.value))
+            {
+                header.value = local;
+            }
+        }
         scrubber.scrub_request(&mut interaction.when);
         scrubber.scrub_response(&mut interaction.then);
-        self.interactions.lock().await.push(interaction);
+        drop(scrubber);
+        self.keep(number, interaction);
+    }
+
+    /// The ledger of `exchange`'s reply, which the recorder feeds as the
+    /// reply arrives; `None` when the reply creates nothing.
+    pub(crate) fn reply_ledger(&self, exchange: &Exchange) -> Option<ledger::ReplyLedger> {
+        let request_body = match &exchange.request_body {
+            RequestBody::Bytes(body) => body.as_ref(),
+            RequestBody::Multipart(_) => &[],
+        };
+        ledger::ReplyLedger::start(
+            self.ledger.clone(),
+            ledger::Sent {
+                method: &exchange.method,
+                uri: &exchange.uri,
+                body: request_body,
+            },
+            exchange.status?.as_u16(),
+            exchange.stream_framing(),
+        )
+    }
+
+    /// Scrub and keep one exchange the proxy or a
+    /// [`direct_http`](ProviderCassette::direct_http) client recorded, whose
+    /// reply the recorder already wrote to the ledger; one that got no reply
+    /// has nothing to replay, and a multipart request is only in the ledger.
+    /// An exchange whose reply did not end the way replay would serve it
+    /// refuses the recording ([`incomplete`]).
+    pub(crate) fn record_exchange(&self, exchange: &Exchange) {
+        let Some(status) = exchange.status else {
+            // Without it, replay would meet the request with nothing to serve,
+            // whether it failed or was cancelled before its headers.
+            let text = format!(
+                "the request {} {} got no reply ({})",
+                exchange.method,
+                uri_path(&exchange.uri),
+                exchange
+                    .error
+                    .as_deref()
+                    .unwrap_or("it was cancelled before its headers"),
+            );
+            self.refuse(self.refusal_text(exchange, &text));
+            return;
+        };
+        if let Some(why) = exchange.incomplete() {
+            let kind = if exchange.chunks.is_some() {
+                "streamed reply"
+            } else {
+                "reply"
+            };
+            let text = format!(
+                "the {kind} to {} {} {why} ({})",
+                exchange.method,
+                uri_path(&exchange.uri),
+                exchange.error.as_deref().unwrap_or("no error recorded"),
+            );
+            self.refuse(self.refusal_text(exchange, &text));
+            return;
+        }
+        let RequestBody::Bytes(request_body) = &exchange.request_body else {
+            return;
+        };
+        let response_body = exchange.response_bytes().unwrap_or_default();
+        let response_headers = exchange
+            .response_headers
+            .as_ref()
+            .into_iter()
+            .flat_map(|headers| {
+                headers
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_bytes()))
+            });
+        self.keep_exchange(
+            exchange.number,
+            DirectHttpRequest {
+                method: &exchange.method,
+                uri: &exchange.uri,
+                headers: exchange
+                    .request_headers
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_bytes())),
+                body: request_body,
+            },
+            DirectHttpResponse {
+                status: status.as_u16(),
+                headers: response_headers,
+                body: &response_body,
+            },
+        );
+    }
+
+    fn keep(&self, number: u64, interaction: CassetteInteraction) {
+        let mut interactions = self
+            .interactions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let at = interactions.partition_point(|(kept, _)| *kept <= number);
+        interactions.insert(at, (number, interaction));
+    }
+
+    /// The number of the exchange starting now: one more than the last.
+    pub(crate) fn next_number(&self) -> u64 {
+        self.started.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// The recorder opened an exchange.
+    pub(crate) fn exchange_opened(&self) {
+        self.in_flight.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The recorder handed an exchange on.
+    pub(crate) fn exchange_closed(&self) {
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// Wait up to `limit` for every open exchange to be handed on; `false`
+    /// when some still are.
+    async fn settled(&self, limit: std::time::Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + limit;
+        while self.in_flight.load(Ordering::SeqCst) > 0 {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        true
+    }
+
+    /// `text`, a refusal of `exchange`, scrubbed with the session's scrubber
+    /// once it learned the exchange's URL and request headers: a transport
+    /// error names the URL it failed on, query and key included.
+    fn refusal_text(&self, exchange: &Exchange, text: &str) -> String {
+        let mut scrubber = self
+            .scrubber
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let inspection = scrubber.learn_request(
+            &exchange.uri,
+            crate::scrub::header_pairs(&exchange.request_headers),
+        );
+        if matches!(
+            inspection,
+            crate::scrub::HeaderInspection::UnknownCredential
+        ) {
+            return format!("[{} bytes]", text.len());
+        }
+        scrubber.scrub_text(text)
+    }
+
+    fn refuse(&self, why: String) {
+        self.refusals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(why);
+    }
+
+    /// The kept interactions as YAML, scrubbed again with the session's
+    /// scrubber, which by now knows every value the session learned: a
+    /// credential that a later exchange taught, such as a token an early reply
+    /// held and a later request sends as its key, leaves the earlier ones too.
+    /// `None` when nothing was kept.
+    fn recorded_yaml(&self) -> Option<String> {
+        let mut interactions: Vec<_> = self
+            .interactions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|(_, interaction)| interaction.clone())
+            .collect();
+        if interactions.is_empty() {
+            return None;
+        }
+        // The interactions' lock is released before the scrubber's is taken:
+        // the two locks are never held together.
+        self.scrubber
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .scrub_interactions(&mut interactions);
+        Some(serialize_cassette_interactions(&interactions))
+    }
+
+    fn refusals(&self) -> Vec<String> {
+        self.refusals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
-/// Convert a direct-recording header into its name and value.
-pub trait DirectHeader {
-    /// The header name representation.
-    type Name: AsRef<str>;
-    /// The header value representation.
-    type Value: AsRef<str>;
-
-    /// Return the header name and value.
-    fn into_pair(self) -> (Self::Name, Self::Value);
+/// The path of `uri`, or `uri` itself when it does not parse.
+pub(crate) fn uri_path(uri: &str) -> String {
+    url::Url::parse(uri).map_or_else(|_| uri.to_owned(), |url| url.path().to_owned())
 }
 
-impl<Name, Value> DirectHeader for (Name, Value)
-where
-    Name: AsRef<str>,
-    Value: AsRef<str>,
-{
-    type Name = Name;
-    type Value = Value;
-
-    /// Return the header name and value.
-    fn into_pair(self) -> (Self::Name, Self::Value) {
-        self
-    }
+/// The scheme, host and port of `uri`; `None` when it is not an absolute URL.
+fn uri_origin(uri: &str) -> Option<String> {
+    url::Url::parse(uri)
+        .ok()
+        .map(|url| url.origin().ascii_serialization())
 }
+
+/// A `location` on `origin` itself as its path and query, so a client follows
+/// it to wherever the request went (the proxy, the replay server); `None`
+/// for a relative location or one elsewhere, which stays as it is.
+pub(crate) fn local_location(origin: &str, location: &str) -> Option<String> {
+    let target = url::Url::parse(location).ok()?;
+    let origin = url::Url::parse(origin).ok()?;
+    (target.origin() == origin.origin()).then(|| {
+        let mut local = target.path().to_owned();
+        if let Some(query) = target.query() {
+            local.push('?');
+            local.push_str(query);
+        }
+        local
+    })
+}
+
+/// How long [`ProviderCassette::try_finish`] waits for exchanges still under
+/// way before it refuses the recording.
+const IN_FLIGHT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How a recording session reaches the provider. Replay never reaches it,
 /// so the transport is irrelevant then.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Transport {
-    /// A local mock server proxies every request to the provider and
-    /// records the exchange (the default; the client is pointed at the
-    /// proxy's URL).
+pub enum RecordVia {
+    /// A local server forwards every request to the provider through the
+    /// session's [`DirectRecorder`] and streams the reply back (the default;
+    /// the client is pointed at the proxy's URL).
     Proxy,
-    /// The client talks to the provider directly and the session's
-    /// [`DirectRecorder`] captures the exchanges it is handed.
+    /// The client talks to the provider itself, through
+    /// [`direct_http`](ProviderCassette::direct_http) or a transport that
+    /// hands its exchanges to the session's [`DirectRecorder`].
     Direct,
 }
 
@@ -389,61 +680,43 @@ pub struct ProviderCassette {
     cassette_path: PathBuf,
     base_path: String,
     mode: CassetteMode,
-    policy: CassettePolicy,
     provider: &'static str,
     scenario: &'static str,
     expected_failures: Arc<AtomicU8>,
     attempt_root: PathBuf,
+    clock: CassetteClock,
 }
 
 enum CassetteServer {
+    /// A recording: `recorder` keeps every exchange, which reach the
+    /// provider through `proxy` or, without one, through the session's
+    /// [`direct_http`](ProviderCassette::direct_http) client.
     Recording {
-        server: MockServer,
-        recording_id: usize,
-        relay: relay::Relay,
+        recorder: DirectRecorder,
+        proxy: Option<proxy::Proxy>,
+        /// The session's [`proxy::Raw`] transport under the recorder, which
+        /// the proxy forwards through and `direct_http` sends through.
+        http: DynHttpClient,
     },
-    DirectRecording(DirectRecordingServer),
     Replay(ReplayServer),
-}
-
-struct DirectRecordingServer {
-    base_url: String,
-    interactions: Arc<Mutex<Vec<CassetteInteraction>>>,
-    ledger: Arc<relay::LedgerTarget>,
 }
 
 impl CassetteServer {
     /// The exchanges a recording session captured, as YAML; `None` for replay
     /// or when nothing was exchanged.
-    async fn recorded_yaml(&self) -> Option<String> {
+    fn recorded_yaml(&self) -> Option<String> {
         match self {
-            Self::Recording {
-                server,
-                recording_id,
-                ..
-            } => {
-                let recording = httpmock::Recording::new(*recording_id, server);
-                let bytes = recording.export_async().await.ok()??;
-                let yaml = String::from_utf8(bytes.to_vec()).ok()?;
-                // httpmock can export an empty document before the first response.
-                let parsed = serde_yaml::Deserializer::from_str(&yaml)
-                    .map(CassetteInteraction::deserialize)
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()?;
-                (!parsed.is_empty()).then_some(yaml)
-            }
-            Self::DirectRecording(server) => {
-                let interactions = server.interactions.lock().await;
-                (!interactions.is_empty()).then(|| serialize_cassette_interactions(&interactions))
-            }
+            Self::Recording { recorder, .. } => recorder.recorded_yaml(),
             Self::Replay(_) => None,
         }
     }
 
     fn base_url(&self) -> String {
         match self {
-            Self::Recording { relay, .. } => relay.base_url.clone(),
-            Self::DirectRecording(server) => server.base_url.clone(),
+            Self::Recording {
+                proxy: Some(proxy), ..
+            } => proxy.base_url.clone(),
+            Self::Recording { recorder, .. } => recorder.ledger.origin.clone(),
             Self::Replay(server) => server.base_url(),
         }
     }
@@ -468,7 +741,7 @@ impl ProviderCassette {
         real_base_url: &str,
     ) -> Self {
         Self::start_via(
-            Transport::Proxy,
+            RecordVia::Proxy,
             cassette_root,
             provider,
             spec,
@@ -480,7 +753,7 @@ impl ProviderCassette {
     /// Start a session in the ambient [`CassetteMode`], using `transport` for
     /// recording only. Panics for an invalid mode, URL, or unusable replay fixture.
     pub async fn start_via(
-        transport: Transport,
+        transport: RecordVia,
         cassette_root: &Path,
         provider: &'static str,
         spec: impl Into<CassetteSpec>,
@@ -500,18 +773,57 @@ impl ProviderCassette {
     }
 
     /// Start with an explicit mode and fixture path, ignoring the ambient mode.
-    /// `transport` selects how recording reaches the provider. Panics for an
-    /// invalid upstream URL, missing or malformed replay fixture, or server bind
-    /// failure.
+    /// `transport` selects how recording reaches the provider. Panics with the
+    /// [`CassetteError`] that [`Self::try_start_at`] would return.
     pub async fn start_at(
-        transport: Transport,
+        transport: RecordVia,
         provider: &'static str,
         spec: CassetteSpec,
         real_base_url: &str,
         mode: CassetteMode,
         cassette_path: PathBuf,
     ) -> Self {
-        Self::start_with_attempts(
+        Self::try_start_at(
+            transport,
+            provider,
+            spec,
+            real_base_url,
+            mode,
+            cassette_path,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// [`Self::start_at`] without panicking. Returns an error for an invalid
+    /// upstream URL, a missing, unreadable or malformed replay fixture or
+    /// clock sidecar, and a local server that cannot bind.
+    ///
+    /// ```no_run
+    /// # use rig_cassette::http::{CassetteError, CassetteMode, CassetteSpec, ProviderCassette, RecordVia};
+    /// # async fn replay() -> Result<(), CassetteError> {
+    /// let cassette = ProviderCassette::try_start_at(
+    ///     RecordVia::Proxy,
+    ///     "openai",
+    ///     CassetteSpec::new("completion"),
+    ///     "https://api.openai.com/v1",
+    ///     CassetteMode::Replay,
+    ///     "sessions/openai/completion.yaml".into(),
+    /// )
+    /// .await?;
+    /// // Point a client at `cassette.base_url()` and run the session.
+    /// cassette.try_finish().await
+    /// # }
+    /// ```
+    pub async fn try_start_at(
+        transport: RecordVia,
+        provider: &'static str,
+        spec: CassetteSpec,
+        real_base_url: &str,
+        mode: CassetteMode,
+        cassette_path: PathBuf,
+    ) -> Result<Self, CassetteError> {
+        Self::try_start_with_attempts(
             transport,
             provider,
             spec,
@@ -523,154 +835,193 @@ impl ProviderCassette {
         .await
     }
 
-    /// [`Self::start_at`] with failed recordings and the ledger under
+    /// [`Self::try_start_at`] with failed recordings and the ledger under
     /// `attempt_root` instead of the ambient [`attempt_root`].
-    pub(crate) async fn start_with_attempts(
-        transport: Transport,
+    async fn try_start_with_attempts(
+        transport: RecordVia,
         provider: &'static str,
         spec: CassetteSpec,
         real_base_url: &str,
         mode: CassetteMode,
         cassette_path: PathBuf,
         attempt_root: PathBuf,
-    ) -> Self {
+    ) -> Result<Self, CassetteError> {
+        let (snapshots, spec) = if mode.records() {
+            (SnapshotMode::Off, spec)
+        } else {
+            let spec = match spec.body_matching {
+                Some(_) => spec,
+                None => CassetteSpec {
+                    body_matching: Some(BodyMatching::current(&cassette_path)?),
+                    ..spec
+                },
+            };
+            (SnapshotMode::current(&cassette_path)?, spec)
+        };
+        Self::try_start_session(
+            transport,
+            provider,
+            spec,
+            real_base_url,
+            mode,
+            cassette_path,
+            attempt_root,
+            snapshots,
+        )
+        .await
+    }
+
+    /// [`Self::try_start_with_attempts`] with an explicit request snapshot
+    /// mode instead of the ambient `RIG_CASSETTE_SNAPSHOTS`, and the body
+    /// matching `spec` names instead of the ambient `RIG_CASSETTE_MATCHING`.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the session inputs, each from a distinct public entry point"
+    )]
+    async fn try_start_session(
+        transport: RecordVia,
+        provider: &'static str,
+        spec: CassetteSpec,
+        real_base_url: &str,
+        mode: CassetteMode,
+        cassette_path: PathBuf,
+        attempt_root: PathBuf,
+        snapshots: SnapshotMode,
+    ) -> Result<Self, CassetteError> {
         let scenario = spec.scenario;
         let ledger_path = attempt_root.join(ledger::LEDGER_FILE);
-        let policy = CassettePolicy::for_scenario(provider, scenario, spec.replay_matching);
-        let upstream = UpstreamBase::parse(real_base_url);
-        let server = if !mode.records() {
-            if !cassette_path.exists() {
-                panic!(
-                    "missing provider cassette {}; run with {MODE_ENV}=record and the real API key to create it",
-                    cassette_path.display()
-                );
-            }
-            CassetteServer::Replay(ReplayServer::start(&cassette_path, policy).await)
+        let policy = CassettePolicy::for_scenario(provider, spec);
+        let upstream = UpstreamBase::parse(real_base_url, &cassette_path)?;
+        // Everything that can fail runs before the replay server exists, so
+        // an error never drops an unplayed server and trips its guard.
+        let replay = if mode.records() {
+            None
         } else {
-            match transport {
-                Transport::Direct => CassetteServer::DirectRecording(DirectRecordingServer {
-                    base_url: upstream.origin.clone(),
-                    interactions: Arc::new(Mutex::new(Vec::new())),
-                    ledger: Arc::new(relay::LedgerTarget {
-                        path: ledger_path.clone(),
-                        provider: provider.to_owned(),
-                        scenario: scenario.to_owned(),
-                        origin: upstream.origin.clone(),
-                    }),
+            if !cassette_path.exists() {
+                return Err(CassetteError::MissingFixture {
+                    path: cassette_path,
+                });
+            }
+            let interactions = load_replay_interactions(&cassette_path).await?;
+            let recorded: Vec<Value> = interactions
+                .iter()
+                .map(|interaction| recorded_body_view(&interaction.when))
+                .collect();
+            let shapes = (policy.body_matching == BodyMatching::Shape).then(|| ReplayShapes {
+                keys: recorded.iter().map(shape::shape_key).collect(),
+                views: recorded.clone(),
+            });
+            let snapshots = RequestSnapshots::load(snapshots, &cassette_path, recorded)?;
+            Some((interactions, snapshots, shapes))
+        };
+        let clock = CassetteClock::start(mode, &cassette_path)?;
+        let server = if let Some((interactions, snapshots, shapes)) = replay {
+            CassetteServer::Replay(
+                ReplayServer::start(&cassette_path, interactions, policy, snapshots, shapes)
+                    .await?,
+            )
+        } else {
+            let recorder = DirectRecorder {
+                interactions: Arc::default(),
+                ledger: Arc::new(ledger::LedgerTarget {
+                    path: ledger_path,
+                    provider: provider.to_owned(),
+                    scenario: scenario.to_owned(),
+                    origin: upstream.origin.clone(),
                 }),
-                Transport::Proxy => {
-                    let server = MockServer::start_async().await;
-                    server
-                        .forward_to_async(&upstream.origin, |rule| {
-                            rule.filter(|when| {
-                                when.any_request();
-                            });
-                        })
-                        .await;
-
-                    let recorded_request_headers = policy.recorded_request_headers.to_vec();
-                    let recording = server
-                        .record_async(move |rule| {
-                            rule.record_request_headers(recorded_request_headers)
-                                .filter(|when| {
-                                    when.any_request();
-                                });
-                        })
-                        .await;
-                    let recording_id = recording.id;
-                    // Clients reach the proxy through the relay, which writes
-                    // the created-resource ledger as replies pass.
-                    let relay = relay::Relay::start(
-                        server.address().to_string(),
-                        relay::LedgerTarget {
-                            path: ledger_path.clone(),
-                            provider: provider.to_owned(),
-                            scenario: scenario.to_owned(),
-                            origin: upstream.origin.clone(),
-                        },
-                    )
-                    .await
-                    .expect("the recording relay should bind");
-                    CassetteServer::Recording {
-                        server,
-                        recording_id,
-                        relay,
-                    }
-                }
+                refusals: Arc::default(),
+                scrubber: Arc::default(),
+                in_flight: Arc::default(),
+                started: Arc::default(),
+            };
+            let bind_error = |source| CassetteError::Bind {
+                path: cassette_path.clone(),
+                source,
+            };
+            let http = traffic::recorded(
+                DynHttpClient::new(proxy::Raw::new().map_err(bind_error)?),
+                traffic::Sink::Cassette(recorder.clone()),
+            );
+            let proxy = match transport {
+                RecordVia::Direct => None,
+                RecordVia::Proxy => Some(
+                    proxy::Proxy::start(upstream.origin.clone(), http.clone())
+                        .await
+                        .map_err(bind_error)?,
+                ),
+            };
+            CassetteServer::Recording {
+                recorder,
+                proxy,
+                http,
             }
         };
 
-        Self {
+        Ok(Self {
             server,
             cassette_path,
             base_path: upstream.path,
             mode,
-            policy,
             provider,
             scenario,
             expected_failures: Arc::new(AtomicU8::new(spec.expected_failures)),
             attempt_root,
-        }
+            clock,
+        })
+    }
+
+    /// The session's recorded clock: wall time while recording, the same
+    /// readings in the same order on replay. See [`CassetteClock`].
+    pub fn clock(&self) -> CassetteClock {
+        self.clock.clone()
+    }
+
+    /// Wait `duration` while recording, so a live provider sees the pause;
+    /// return at once on replay. Panics above [`MAX_PAUSE`] (60 s): no
+    /// cassette test waits longer.
+    pub async fn pause(&self, duration: std::time::Duration) {
+        self.clock.pause(duration).await;
     }
 
     /// Write completed, scrubbed exchanges to `path` without finalizing recording.
     /// Return `false` for replay, empty recordings, export or parsing failures,
     /// failed safety checks, or write errors. Empty snapshots never replace a file.
     pub async fn checkpoint_recording(&self, path: &Path) -> bool {
-        if !self.mode.records() {
+        let Some(yaml) = self.server.recorded_yaml() else {
             return false;
-        }
-        let yaml = match &self.server {
+        };
+        let redacted = scrub_cassette_contents(&yaml);
+        cassette_safety_failures(path, &redacted).is_empty()
+            && write_cassette_atomically(path, redacted.as_bytes())
+                .await
+                .is_ok()
+    }
+
+    /// The client for a [`RecordVia::Direct`] session. While recording, it
+    /// sends through the session's transport, the one the proxy forwards
+    /// through, so the recorder keeps every reply as the provider sent it,
+    /// binary, streamed and error replies included; on top, a non-success
+    /// reply becomes the error providers expect of rig-reqwest. In replay it
+    /// is rig-reqwest's client for the replay server. Recording follows no
+    /// redirect, so a 3xx is a provider error here while replay would follow
+    /// it: an endpoint that redirects must record with [`RecordVia::Proxy`].
+    pub fn direct_http(&self) -> DynHttpClient {
+        match &self.server {
             CassetteServer::Recording {
-                server,
-                recording_id,
-                ..
-            } => {
-                let recording = httpmock::Recording::new(*recording_id, server);
-                let Ok(Some(bytes)) = recording.export_async().await else {
-                    return false;
-                };
-                let Ok(yaml) = String::from_utf8(bytes.to_vec()) else {
-                    return false;
-                };
-                yaml
-            }
-            CassetteServer::DirectRecording(server) => {
-                let interactions = server.interactions.lock().await;
-                if interactions.is_empty() {
-                    return false;
-                }
-                serialize_cassette_interactions(&interactions)
-            }
-            CassetteServer::Replay(_) => return false,
-        };
-        // httpmock can export an empty YAML document before the first response.
-        let parsed = serde_yaml::Deserializer::from_str(&yaml)
-            .map(CassetteInteraction::deserialize)
-            .collect::<Result<Vec<_>, _>>();
-        let Ok(interactions) = parsed else {
-            return false;
-        };
-        if interactions.is_empty() {
-            return false;
+                proxy: None, http, ..
+            } => DynHttpClient::new(proxy::ProviderErrors(http.clone())),
+            _ => DynHttpClient::new(rig_reqwest::ReqwestClient::default()),
         }
-        let redacted = scrub_cassette_contents_with_policy(self.policy, &yaml);
-        if !cassette_safety_failures_with_policy(self.policy, path, &redacted).is_empty() {
-            return false;
-        }
-        write_cassette_atomically(path, redacted.as_bytes())
-            .await
-            .is_ok()
     }
 
     /// Return the direct recorder only for an active direct-recording session.
     pub fn direct_recorder(&self) -> Option<DirectRecorder> {
         match &self.server {
-            CassetteServer::DirectRecording(server) => Some(DirectRecorder {
-                interactions: server.interactions.clone(),
-                policy: self.policy,
-                ledger: server.ledger.clone(),
-            }),
+            CassetteServer::Recording {
+                recorder,
+                proxy: None,
+                ..
+            } => Some(recorder.clone()),
             _ => None,
         }
     }
@@ -713,66 +1064,92 @@ impl ProviderCassette {
     }
 
     /// Write a scrubbed recording or assert complete replay consumption and shut
-    /// down. Panics on empty recordings, export or write failures, unsafe data,
-    /// unused interactions, or refused replay requests. A recording holding an
-    /// undeclared account failure (see [`account_failure`]) is not written to
-    /// the fixture: it goes to [`attempt_root`] and this panics.
+    /// down. Panics with the [`CassetteError`] that [`Self::try_finish`] would
+    /// return. A recording holding an undeclared account failure (see
+    /// [`account_failure`]) is not written to the fixture: it goes to
+    /// [`attempt_root`] and this panics.
     pub async fn finish(self) {
+        if let Err(error) = self.try_finish().await {
+            panic!("{error}");
+        }
+    }
+
+    /// [`Self::finish`] without panicking. Returns an error for a replay that
+    /// left interactions or clock readings unused or refused a request, and
+    /// for a recording that is empty, refused, unsafe after scrubbing, or
+    /// cannot be written. A refused recording is kept under [`attempt_root`],
+    /// and [`CassetteError::RecordingRefused`] says where. The local servers
+    /// are shut down on every path, and dropping what remains never panics.
+    pub async fn try_finish(self) -> Result<(), CassetteError> {
         let expected = self.expected_failures.load(Ordering::Relaxed);
         let Self {
             server,
             cassette_path,
-            policy,
             provider,
             scenario,
             attempt_root,
+            clock,
             ..
         } = self;
 
-        let yaml = match server {
+        let (yaml, refusals) = match server {
             CassetteServer::Replay(mut server) => {
-                let result = AssertUnwindSafe(server.assert_consumed(&cassette_path))
-                    .catch_unwind()
-                    .await;
+                let consumed = server.check_consumed(&cassette_path).await;
                 server.shutdown().await;
-                if let Err(payload) = result {
-                    resume_unwind(payload);
-                }
-                return;
+                consumed?;
+                return clock.finish(&cassette_path).await;
             }
-            server => server.recorded_yaml().await.unwrap_or_else(|| {
-                panic!(
-                    "provider cassette {} should contain at least one interaction",
-                    cassette_path.display()
-                )
-            }),
+            CassetteServer::Recording {
+                recorder, proxy, ..
+            } => {
+                // An exchange still under way, such as a proxied stream whose
+                // client went away while the provider kept the socket open,
+                // must reach the recording before it is read.
+                let settled = recorder.settled(IN_FLIGHT_WAIT).await;
+                drop(proxy);
+                let mut refusals = recorder.refusals();
+                if !settled {
+                    refusals.push(format!(
+                        "{} exchanges were still under way {}s after the test ended",
+                        recorder.in_flight.load(Ordering::SeqCst),
+                        IN_FLIGHT_WAIT.as_secs()
+                    ));
+                }
+                let Some(yaml) = recorder.recorded_yaml() else {
+                    return Err(if refusals.is_empty() {
+                        CassetteError::EmptyRecording {
+                            path: cassette_path,
+                        }
+                    } else {
+                        CassetteError::RecordingRefused {
+                            path: cassette_path,
+                            refusals,
+                            kept_at: None,
+                        }
+                    });
+                };
+                refusals.extend(recording_refusals(provider, &yaml, expected));
+                (yaml, refusals)
+            }
         };
 
-        let refusals = recording_refusals(provider, &yaml, expected);
         if !refusals.is_empty() {
-            let kept = write_attempt(&attempt_root, provider, scenario, policy, &yaml).await;
-            panic!(
-                "provider cassette {} was not written: {}\nthe recording was kept at {}",
-                cassette_path.display(),
-                refusals.join("; "),
-                kept.map_or_else(
-                    || "<nowhere: write failed>".to_owned(),
-                    |path| path.display().to_string()
-                )
-            );
+            let kept_at = write_attempt(&attempt_root, provider, scenario, &yaml).await;
+            return Err(CassetteError::RecordingRefused {
+                path: cassette_path,
+                refusals,
+                kept_at,
+            });
         }
-        write_scrubbed_cassette(&cassette_path, policy, &yaml).await;
+        write_scrubbed_cassette(&cassette_path, &yaml).await?;
+        clock.finish(&cassette_path).await
     }
 
     /// Finalize after a successful test, preserving its original panic otherwise.
     /// A failed recording is kept under [`attempt_root`], never over the fixture.
     pub async fn finish_after_test(self, test_result: Result<(), PanicPayload>) {
         match test_result {
-            Ok(()) => {
-                if let Err(payload) = self.finish_catching_unwind().await {
-                    resume_unwind(payload);
-                }
-            }
+            Ok(()) => self.finish().await,
             Err(payload) => {
                 self.keep_failed_attempt().await;
                 resume_unwind(payload);
@@ -788,9 +1165,7 @@ impl ProviderCassette {
     ) -> Result<(), E> {
         match test_result {
             Ok(Ok(())) => {
-                if let Err(payload) = self.finish_catching_unwind().await {
-                    resume_unwind(payload);
-                }
+                self.finish().await;
                 Ok(())
             }
             Ok(Err(error)) => {
@@ -815,15 +1190,13 @@ impl ProviderCassette {
         }
         let Self {
             server,
-            policy,
             provider,
             scenario,
             attempt_root,
             ..
         } = self;
-        if let Some(yaml) = server.recorded_yaml().await
-            && let Some(path) =
-                write_attempt(&attempt_root, provider, scenario, policy, &yaml).await
+        if let Some(yaml) = server.recorded_yaml()
+            && let Some(path) = write_attempt(&attempt_root, provider, scenario, &yaml).await
         {
             eprintln!("failed recording kept at {}", path.display());
         }
@@ -833,10 +1206,6 @@ impl ProviderCassette {
         if let CassetteServer::Replay(server) = &mut self.server {
             server.checked = true;
         }
-    }
-
-    async fn finish_catching_unwind(self) -> Result<(), PanicPayload> {
-        AssertUnwindSafe(self.finish()).catch_unwind().await
     }
 }
 
@@ -850,31 +1219,31 @@ struct ReplayServer {
 }
 
 impl ReplayServer {
-    async fn start(cassette_path: &Path, policy: CassettePolicy) -> Self {
-        let contents = tokio::fs::read_to_string(cassette_path)
-            .await
-            .unwrap_or_else(|error| {
-                panic!(
-                    "provider cassette {} should be readable: {error}",
-                    cassette_path.display()
-                )
-            });
-        let interactions = parse_cassette(cassette_path, &contents);
+    async fn start(
+        cassette_path: &Path,
+        interactions: Vec<ReplayInteraction>,
+        policy: CassettePolicy,
+        snapshots: Option<RequestSnapshots>,
+        shapes: Option<ReplayShapes>,
+    ) -> Result<Self, CassetteError> {
+        let bind_error = |source| CassetteError::Bind {
+            path: cassette_path.to_path_buf(),
+            source,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.map_err(bind_error)?;
+        let addr = listener.local_addr().map_err(bind_error)?;
         let state = Arc::new(Mutex::new(ReplayState {
             cassette_path: cassette_path.to_path_buf(),
             interactions,
             misses: Vec::new(),
             policy,
+            snapshots,
+            shapes,
+            contextual_shapes: None,
         }));
         let app = Router::new()
             .fallback(any(replay_request))
             .with_state(state.clone());
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("replay server should bind");
-        let addr = listener
-            .local_addr()
-            .expect("replay server address should be available");
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
@@ -890,23 +1259,32 @@ impl ReplayServer {
             }
         });
 
-        Self {
+        Ok(Self {
             addr,
             state,
             shutdown: Some(shutdown_tx),
             task: Some(task),
             checked: false,
-        }
+        })
     }
 
     fn base_url(&self) -> String {
         format!("http://{}", self.addr)
     }
 
-    async fn assert_consumed(&mut self, cassette_path: &Path) {
+    /// Check that replay played every interaction and refused nothing, then
+    /// check or write the request snapshot. This disarms the drop guard
+    /// whatever the outcome.
+    async fn check_consumed(&mut self, cassette_path: &Path) -> Result<(), CassetteError> {
         self.checked = true;
         let state = self.state.lock().await;
-        assert_replay_finished(cassette_path, &state.interactions, &state.misses);
+        if let Some(error) = replay_mismatch(cassette_path, &state.interactions, &state.misses) {
+            return Err(error);
+        }
+        state
+            .snapshots
+            .as_ref()
+            .map_or(Ok(()), RequestSnapshots::finish)
     }
 
     async fn shutdown(&mut self) {
@@ -933,11 +1311,19 @@ impl Drop for ReplayServer {
         let Ok(state) = self.state.try_lock() else {
             return;
         };
-        if let Some(message) = replay_completion_failure_message(
+        let failure = replay_completion_failure_message(
             &state.cassette_path,
             &state.interactions,
             &state.misses,
-        ) {
+        )
+        .or_else(|| {
+            state
+                .snapshots
+                .as_ref()
+                .and_then(|snapshots| snapshots.finish().err())
+                .map(|error| error.to_string())
+        });
+        if let Some(message) = failure {
             panic!("{message}\n(the replay session was dropped without `finish`)");
         }
     }
@@ -948,6 +1334,19 @@ struct ReplayState {
     interactions: Vec<ReplayInteraction>,
     misses: Vec<ReplayMiss>,
     policy: CassettePolicy,
+    snapshots: Option<RequestSnapshots>,
+    /// Each interaction's coarse shape key and body, under shape matching.
+    shapes: Option<ReplayShapes>,
+    /// Normalized projections reused while authoritative request credentials agree.
+    contextual_shapes: Option<(Scrubber, Arc<ReplayShapes>)>,
+}
+
+/// What shape matching keeps of each recorded interaction.
+struct ReplayShapes {
+    /// The coarse shape key of each recorded body.
+    keys: Vec<Value>,
+    /// Each recorded body as [`snapshot::body_view`] reads it.
+    views: Vec<Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -955,13 +1354,13 @@ struct ReplayMiss {
     diagnostic: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct CassetteInteraction {
     when: CassetteRequest,
     then: CassetteResponse,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct CassetteRequest {
     path: String,
     method: String,
@@ -972,9 +1371,13 @@ struct CassetteRequest {
     body: Option<String>,
     #[serde(default, skip_serializing_if = "BodyEncoding::is_utf8")]
     body_encoding: BodyEncoding,
+    /// A body recording could not read whole and scrub, kept by its size
+    /// and content type only; replay refuses the exchange.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    withheld: Option<crate::scrub::OpaqueBody>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct CassetteResponse {
     status: u16,
     #[serde(default)]
@@ -982,6 +1385,10 @@ struct CassetteResponse {
     body: Option<String>,
     #[serde(default, skip_serializing_if = "BodyEncoding::is_utf8")]
     body_encoding: BodyEncoding,
+    /// A body recording could not read whole and scrub, kept by its size
+    /// and content type only; replay refuses the exchange.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    withheld: Option<crate::scrub::OpaqueBody>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -998,7 +1405,7 @@ impl BodyEncoding {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct NameValue {
     name: String,
     value: String,
@@ -1010,6 +1417,7 @@ struct ReplayInteraction {
     consumed: bool,
 }
 
+#[cfg(test)]
 fn assert_replay_finished(
     cassette_path: &Path,
     interactions: &[ReplayInteraction],
@@ -1025,8 +1433,17 @@ fn replay_completion_failure_message(
     interactions: &[ReplayInteraction],
     misses: &[ReplayMiss],
 ) -> Option<String> {
-    let mut failures = Vec::new();
-    let unused = interactions
+    replay_mismatch(cassette_path, interactions, misses).map(|error| error.to_string())
+}
+
+/// The replay failure for interactions left unplayed and requests refused,
+/// or `None` when replay played the fixture exactly.
+fn replay_mismatch(
+    cassette_path: &Path,
+    interactions: &[ReplayInteraction],
+    misses: &[ReplayMiss],
+) -> Option<CassetteError> {
+    let unused_interactions = interactions
         .iter()
         .enumerate()
         .filter(|(_, interaction)| !interaction.consumed)
@@ -1037,51 +1454,101 @@ fn replay_completion_failure_message(
             )
         })
         .collect::<Vec<_>>();
-
-    if !unused.is_empty() {
-        failures.push(format!("left unused interactions:\n{}", unused.join("\n")));
-    }
-
-    if !misses.is_empty() {
-        let formatted_misses = misses
-            .iter()
-            .enumerate()
-            .map(|(index, miss)| format!("[{index}] {}", miss.diagnostic))
-            .collect::<Vec<_>>()
-            .join("\n");
-        failures.push(format!(
-            "received unexpected replay request(s):\n{formatted_misses}"
-        ));
-    }
-
-    (!failures.is_empty()).then(|| {
-        format!(
-            "provider cassette replay failed for {}:\n{}",
-            cassette_path.display(),
-            failures.join("\n\n")
-        )
+    let unexpected_requests = misses
+        .iter()
+        .map(|miss| miss.diagnostic.clone())
+        .collect::<Vec<_>>();
+    (!unused_interactions.is_empty() || !unexpected_requests.is_empty()).then(|| {
+        CassetteError::ReplayMismatch {
+            path: cassette_path.to_path_buf(),
+            unused_interactions,
+            unexpected_requests,
+        }
     })
 }
 
-fn parse_cassette(cassette_path: &Path, contents: &str) -> Vec<ReplayInteraction> {
-    parse_cassette_interactions(cassette_path, contents)
+/// Read, parse and check the fixture a replay session serves.
+async fn load_replay_interactions(
+    cassette_path: &Path,
+) -> Result<Vec<ReplayInteraction>, CassetteError> {
+    let contents = tokio::fs::read_to_string(cassette_path)
+        .await
+        .map_err(|source| CassetteError::UnreadableFixture {
+            path: cassette_path.to_path_buf(),
+            source,
+        })?;
+    try_parse_cassette_interactions(cassette_path, &contents)?
         .into_iter()
-        .map(|interaction| ReplayInteraction {
-            when: interaction.when,
-            then: interaction.then,
-            consumed: false,
+        .enumerate()
+        .map(|(index, interaction)| match replay_problem(&interaction) {
+            Some(reason) => Err(CassetteError::InvalidInteraction {
+                path: cassette_path.to_path_buf(),
+                index,
+                reason,
+            }),
+            None => Ok(ReplayInteraction {
+                when: interaction.when,
+                then: interaction.then,
+                consumed: false,
+            }),
         })
         .collect()
 }
 
+/// What would make the replay server fail on `interaction`: a recorded body
+/// that does not decode, or a response that is not valid HTTP.
+fn replay_problem(interaction: &CassetteInteraction) -> Option<String> {
+    let request = &interaction.when;
+    if let Some(body) = &request.body
+        && let Err(error) = decode_body(body, request.body_encoding)
+    {
+        return Some(format!("request body does not decode: {error}"));
+    }
+    let response = &interaction.then;
+    if let Err(error) = StatusCode::from_u16(response.status) {
+        return Some(format!("response status {}: {error}", response.status));
+    }
+    for header in &response.header {
+        if is_hop_by_hop_header(&header.name) {
+            continue;
+        }
+        if let Err(error) = HeaderName::from_bytes(header.name.as_bytes()) {
+            return Some(format!(
+                "invalid response header name {:?}: {error}",
+                header.name
+            ));
+        }
+        if let Err(error) = HeaderValue::from_str(&header.value) {
+            return Some(format!(
+                "invalid value for response header {:?}: {error}",
+                header.name
+            ));
+        }
+    }
+    if let Some(body) = &response.body
+        && let Err(error) = decode_body(body, response.body_encoding)
+    {
+        return Some(format!("response body does not decode: {error}"));
+    }
+    None
+}
+
 fn parse_cassette_interactions(cassette_path: &Path, contents: &str) -> Vec<CassetteInteraction> {
+    try_parse_cassette_interactions(cassette_path, contents)
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+fn try_parse_cassette_interactions(
+    cassette_path: &Path,
+    contents: &str,
+) -> Result<Vec<CassetteInteraction>, CassetteError> {
     serde_yaml::Deserializer::from_str(contents)
         .map(|document| {
-            CassetteInteraction::deserialize(document).unwrap_or_else(|error| {
-                panic!(
-                    "provider cassette {} should deserialize: {error}",
-                    cassette_path.display()
-                )
+            CassetteInteraction::deserialize(document).map_err(|source| {
+                CassetteError::MalformedFixture {
+                    path: cassette_path.to_path_buf(),
+                    source,
+                }
             })
         })
         .collect()
@@ -1100,42 +1567,300 @@ async fn replay_request(
         uri,
         headers,
         body,
+        context: std::sync::OnceLock::new(),
     };
     let policy = state.policy;
-
-    let Some(index) = matching_interaction_index(policy, &state.interactions, &request) else {
-        let message = replay_miss_message(policy, &request, &state.interactions);
-        state.misses.push(ReplayMiss {
-            diagnostic: message.clone(),
+    let withheld = unplayed_matching_index(
+        policy,
+        &state.interactions,
+        |_, interaction| {
+            (interaction.when.withheld.is_some() || interaction.then.withheld.is_some())
+                && request_line_matches(policy, &request, &interaction.when)
+        },
+        |_| 0,
+    );
+    if matches!(policy.replay_matching, ReplayMatching::Ordered)
+        && let Some(response) = withheld.and_then(|index| refuse_withheld(&mut state, index))
+    {
+        return response;
+    }
+    let normalize = |view: &Value| normalize_request_view(&request, view);
+    let sent = if state.snapshots.is_some() || state.shapes.is_some() {
+        match incoming_body_view(&request) {
+            Ok(view) => Some(view),
+            Err(error) => {
+                if let Some(response) =
+                    withheld.and_then(|index| refuse_withheld(&mut state, index))
+                {
+                    return response;
+                }
+                let diagnostic = format!("request body cannot be inspected: {error}");
+                state.misses.push(ReplayMiss {
+                    diagnostic: diagnostic.clone(),
+                });
+                let mut response = Response::new(Body::from(diagnostic));
+                *response.status_mut() = StatusCode::NOT_FOUND;
+                return response;
+            }
+        }
+    } else {
+        None
+    };
+    let context = request.context();
+    let cached = state
+        .contextual_shapes
+        .as_ref()
+        .and_then(|(previous, shapes)| {
+            previous
+                .same_credentials(context)
+                .then(|| Arc::clone(shapes))
         });
-        return Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .header("content-type", "application/json")
-            .body(Body::from(message))
-            .expect("replay miss response should build");
+    let contextual_shapes = if cached.is_some() {
+        cached
+    } else {
+        let contextual_shapes = state.shapes.as_ref().map(|shapes| {
+            let views: Vec<_> = shapes.views.iter().map(normalize).collect();
+            let keys = views
+                .iter()
+                .zip(&shapes.views)
+                .zip(&shapes.keys)
+                .map(|((view, original), key)| {
+                    if view == original {
+                        key.clone()
+                    } else {
+                        shape::shape_key(view)
+                    }
+                })
+                .collect();
+            Arc::new(ReplayShapes { keys, views })
+        });
+        state.contextual_shapes = contextual_shapes
+            .as_ref()
+            .map(|shapes| (context.clone(), Arc::clone(shapes)));
+        contextual_shapes
+    };
+    let sent_shape = contextual_shapes
+        .as_ref()
+        .zip(sent.as_ref())
+        .map(|(_, sent)| shape::shape_key(sent));
+    let shapes = contextual_shapes
+        .as_ref()
+        .zip(sent_shape.as_ref())
+        .map(|(shapes, sent)| ShapeKeys {
+            recorded: &shapes.keys,
+            sent,
+        });
+    // Unordered shape matching serves the interaction the request is
+    // closest to: its snapshot's expected body when snapshots check, else
+    // the recording.
+    let distance = |index: usize| match (&state.snapshots, &contextual_shapes, &sent) {
+        (Some(snapshots), _, Some(sent)) => snapshots.distance(index, sent, normalize),
+        (None, Some(shapes), Some(sent)) => shapes
+            .views
+            .get(index)
+            .map_or(usize::MAX, |view| snapshot::diff(view, sent).len()),
+        _ => usize::MAX,
     };
 
+    let Some(index) =
+        matching_interaction_index(policy, &state.interactions, &request, shapes, distance)
+    else {
+        if let Some(response) = withheld.and_then(|index| refuse_withheld(&mut state, index)) {
+            return response;
+        }
+        // The interaction the request was most likely meant for, compared
+        // with what its snapshot expects.
+        let snapshot_diff =
+            state
+                .snapshots
+                .as_ref()
+                .zip(sent.as_ref())
+                .and_then(|(snapshots, sent)| {
+                    let candidate = miss_candidate_index(policy, &state.interactions, &request)?;
+                    snapshots.difference(candidate, sent, normalize)
+                });
+        if let Some(difference) = &snapshot_diff {
+            eprintln!(
+                "replay of {} refused a request that differs from its snapshot at {difference}",
+                state.cassette_path.display()
+            );
+        }
+        let message = replay_miss_message(
+            policy,
+            &request,
+            &state.interactions,
+            shapes,
+            snapshot_diff.as_deref(),
+        );
+        let diagnostic = match &snapshot_diff {
+            Some(difference) => format!("{message}\nsnapshot difference at {difference}"),
+            None => message.clone(),
+        };
+        state.misses.push(ReplayMiss { diagnostic });
+        let mut response = Response::new(Body::from(message));
+        *response.status_mut() = StatusCode::NOT_FOUND;
+        response
+            .headers_mut()
+            .insert("content-type", HeaderValue::from_static("application/json"));
+        return response;
+    };
+
+    if let (Some(snapshots), Some(sent)) = (state.snapshots.as_mut(), sent) {
+        snapshots.observe(index, sent, normalize);
+    }
     let cassette_path = state.cassette_path.clone();
     let interaction = &mut state.interactions[index];
     interaction.consumed = true;
     cassette_response(&interaction.then, &cassette_path)
 }
 
-fn matching_interaction_index(
+fn refuse_withheld(state: &mut ReplayState, index: usize) -> Option<Response> {
+    let interaction = state.interactions.get_mut(index)?;
+    let (side, body) = [
+        ("request", &interaction.when.withheld),
+        ("reply", &interaction.then.withheld),
+    ]
+    .into_iter()
+    .find_map(|(side, body)| Some((side, body.as_ref()?)))?;
+    let message = format!(
+        "interaction {index} ({} {}) was recorded without its {side} body, a {body}, so replay \
+         cannot serve it; record it again with a body the recorder can read and scrub",
+        interaction.when.method, interaction.when.path
+    );
+    interaction.consumed = true;
+    state.misses.push(ReplayMiss {
+        diagnostic: message.clone(),
+    });
+    let mut response = Response::new(Body::from(message));
+    *response.status_mut() = StatusCode::BAD_GATEWAY;
+    response
+        .headers_mut()
+        .insert("content-type", HeaderValue::from_static("text/plain"));
+    Some(response)
+}
+
+/// The unplayed interaction a refused request was most likely meant for:
+/// the next one in order, or for unordered replay the first unplayed one on
+/// the request's method and path.
+fn miss_candidate_index(
     policy: CassettePolicy,
     interactions: &[ReplayInteraction],
     request: &IncomingRequest,
 ) -> Option<usize> {
+    let mut unplayed = interactions
+        .iter()
+        .enumerate()
+        .filter(|(_, interaction)| !interaction.consumed);
+    match policy.replay_matching {
+        ReplayMatching::Ordered => unplayed.next().map(|(index, _)| index),
+        ReplayMatching::Unordered => unplayed
+            .find(|(_, interaction)| {
+                request
+                    .method
+                    .as_str()
+                    .eq_ignore_ascii_case(&interaction.when.method)
+                    && paths_match(request, &interaction.when.path)
+            })
+            .map(|(index, _)| index),
+    }
+}
+
+/// A recorded request's body as request snapshots compare it.
+fn recorded_body_view(request: &CassetteRequest) -> Value {
+    let content_type = request
+        .header
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("content-type"))
+        .map(|header| header.value.as_str());
+    // `load_replay_interactions` refuses a body that does not decode.
+    let body = request
+        .body
+        .as_deref()
+        .and_then(|body| decode_body(body, request.body_encoding).ok())
+        .unwrap_or_default();
+    snapshot::body_view(content_type, &body)
+}
+
+/// An incoming request's body as request snapshots compare it.
+fn incoming_body_view(request: &IncomingRequest) -> Result<Value, crate::scrub::OpaqueBody> {
+    let content_type = request
+        .headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    let body = request.context().clone().request_body(
+        content_type,
+        request
+            .headers
+            .get(axum::http::header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok()),
+        &request.body,
+    )?;
+    Ok(normalize_request_view(
+        request,
+        &snapshot::body_view(content_type, &body),
+    ))
+}
+
+fn normalize_request_view(request: &IncomingRequest, view: &Value) -> Value {
+    let mut view = view.clone();
+    request.context().clone().scrub_json_value(None, &mut view);
+    view
+}
+
+/// Under shape matching, the coarse shape key of every interaction's
+/// recorded body and of the request's body.
+#[derive(Clone, Copy)]
+struct ShapeKeys<'a> {
+    recorded: &'a [Value],
+    sent: &'a Value,
+}
+
+/// The interaction replay serves `request` from. Ordered replay serves the
+/// next unplayed interaction when it matches; unordered replay the first
+/// unplayed one that matches, and under shape matching the one of those at
+/// the least `distance` from the request (the first on a tie), so requests
+/// that share a shape still find their own recordings.
+fn matching_interaction_index(
+    policy: CassettePolicy,
+    interactions: &[ReplayInteraction],
+    request: &IncomingRequest,
+    shapes: Option<ShapeKeys<'_>>,
+    distance: impl Fn(usize) -> usize,
+) -> Option<usize> {
+    let matches = |index: usize, interaction: &ReplayInteraction| {
+        interaction.when.withheld.is_none()
+            && interaction.then.withheld.is_none()
+            && match shapes {
+                Some(keys) => {
+                    shape_request_matches(policy, request, &interaction.when, keys, index)
+                }
+                None => request_matches(policy, request, &interaction.when),
+            }
+    };
+    unplayed_matching_index(policy, interactions, matches, |index| {
+        if shapes.is_some() { distance(index) } else { 0 }
+    })
+}
+
+fn unplayed_matching_index(
+    policy: CassettePolicy,
+    interactions: &[ReplayInteraction],
+    matches: impl Fn(usize, &ReplayInteraction) -> bool,
+    distance: impl Fn(usize) -> usize,
+) -> Option<usize> {
+    let mut unplayed = interactions
+        .iter()
+        .enumerate()
+        .filter(|(_, interaction)| !interaction.consumed);
     match policy.replay_matching {
         ReplayMatching::Ordered => {
-            let index = interactions
-                .iter()
-                .position(|interaction| !interaction.consumed)?;
-            request_matches(policy, request, &interactions[index].when).then_some(index)
+            let (index, interaction) = unplayed.next()?;
+            matches(index, interaction).then_some(index)
         }
-        ReplayMatching::Unordered => interactions.iter().position(|interaction| {
-            !interaction.consumed && request_matches(policy, request, &interaction.when)
-        }),
+        ReplayMatching::Unordered => unplayed
+            .filter(|(index, interaction)| matches(*index, interaction))
+            .map(|(index, _)| index)
+            .min_by_key(|index| distance(*index)),
     }
 }
 
@@ -1143,7 +1868,13 @@ fn replay_miss_message(
     policy: CassettePolicy,
     request: &IncomingRequest,
     interactions: &[ReplayInteraction],
+    shapes: Option<ShapeKeys<'_>>,
+    snapshot_diff: Option<&str>,
 ) -> String {
+    let mut scrubber = request.context().clone();
+    let actual_query = request.uri.query().map(|query| scrubber.scrub_text(query));
+    let actual_query_params = scrub_query_pairs_for_diagnostics(&mut scrubber, request.uri.query());
+    let actual_body_preview = body_preview_bytes_for_diagnostics(&mut scrubber, &request.body);
     let candidates = interactions
         .iter()
         .enumerate()
@@ -1152,18 +1883,20 @@ fn replay_miss_message(
                 .method
                 .as_str()
                 .eq_ignore_ascii_case(&interaction.when.method);
-            let path_matches = request.uri.path() == interaction.when.path;
-            let query_matches = query_matches(request.uri.query(), &interaction.when.query_param);
-            let headers_match = headers_match(&request.headers, &interaction.when.header);
+            let path_matches = paths_match(request, &interaction.when.path);
+            let query_matches = query_matches(request, &interaction.when.query_param);
+            let headers_match = headers_match(request, &interaction.when.header);
             let required_headers_match = required_headers_present(policy, &request.headers);
             let body_matches = body_matches(
-                policy,
+                request.context(),
                 &request.headers,
                 &interaction.when.header,
                 &request.body,
                 interaction.when.body.as_deref(),
                 interaction.when.body_encoding,
             );
+            let shape_matches = shapes
+                .map(|keys| body_shape_matches(request, &interaction.when, keys, index));
 
             json!({
                 "index": index,
@@ -1171,29 +1904,33 @@ fn replay_miss_message(
                 "method_matches": method_matches,
                 "path_matches": path_matches,
                 "query_matches": query_matches,
-                "expected_query_params": scrub_name_values_for_diagnostics(policy, &interaction.when.query_param),
+                "expected_query_params": scrub_name_values_for_diagnostics(&mut scrubber, interaction.when.query_param.clone()),
                 "headers_match": headers_match,
                 "required_headers_match": required_headers_match,
                 "body_matches": body_matches,
+                "shape_matches": shape_matches,
                 "expected_method": interaction.when.method,
-                "expected_path": interaction.when.path,
-                "expected_body_preview": interaction.when.body.as_deref().map(|body| body_preview_for_diagnostics(policy, body)),
+                "expected_path": scrubber.scrub_text(&interaction.when.path),
+                "expected_body_preview": interaction.when.body.as_deref().map(|body| body_preview_for_diagnostics(&mut scrubber, body)),
             })
         })
         .collect::<Vec<_>>();
 
-    json!({
+    let mut message = json!({
         "message": "Request did not match any route or mock",
         "actual_method": request.method.as_str(),
-        "actual_path": request.uri.path(),
-        "actual_query": request.uri.query().map(|query| scrub_text_for_diagnostics(policy, query)),
-        "actual_query_params": scrub_query_pairs_for_diagnostics(policy, request.uri.query()),
-        "required_headers": policy.required_request_headers(),
+        "actual_path": scrubber.scrub_text(request.uri.path()),
+        "actual_query": actual_query,
+        "actual_query_params": actual_query_params,
+        "required_headers": policy.required_request_headers,
         "missing_required_headers": missing_required_headers(policy, &request.headers),
-        "actual_body_preview": body_preview_bytes_for_diagnostics(policy, &request.body),
+        "actual_body_preview": actual_body_preview,
         "candidates": candidates,
-    })
-    .to_string()
+    });
+    if let (Some(difference), Value::Object(fields)) = (snapshot_diff, &mut message) {
+        fields.insert("snapshot_diff".to_owned(), Value::from(difference));
+    }
+    message.to_string()
 }
 
 struct IncomingRequest {
@@ -1201,9 +1938,24 @@ struct IncomingRequest {
     uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
     body: Bytes,
+    context: std::sync::OnceLock<Scrubber>,
 }
 
-fn request_matches(
+impl IncomingRequest {
+    fn context(&self) -> &Scrubber {
+        self.context
+            .get_or_init(|| Scrubber::for_request(&self.uri.to_string(), &self.headers))
+    }
+}
+
+fn paths_match(request: &IncomingRequest, expected: &str) -> bool {
+    let mut scrubber = request.context().clone();
+    scrubber.scrub_text(request.uri.path()) == scrubber.scrub_text(expected)
+}
+
+/// Whether everything but the body matches: method, path, query, the
+/// recorded headers and the policy's required headers.
+fn request_line_matches(
     policy: CassettePolicy,
     request: &IncomingRequest,
     expected: &CassetteRequest,
@@ -1212,12 +1964,48 @@ fn request_matches(
         .method
         .as_str()
         .eq_ignore_ascii_case(&expected.method)
-        && request.uri.path() == expected.path
-        && query_matches(request.uri.query(), &expected.query_param)
-        && headers_match(&request.headers, &expected.header)
+        && paths_match(request, &expected.path)
+        && query_matches(request, &expected.query_param)
+        && headers_match(request, &expected.header)
         && required_headers_present(policy, &request.headers)
+}
+
+/// [`request_line_matches`] with the body compared by its coarse shape key
+/// against interaction `index`.
+fn shape_request_matches(
+    policy: CassettePolicy,
+    request: &IncomingRequest,
+    expected: &CassetteRequest,
+    keys: ShapeKeys<'_>,
+    index: usize,
+) -> bool {
+    request_line_matches(policy, request, expected)
+        && body_shape_matches(request, expected, keys, index)
+}
+
+/// Whether the request body has interaction `index`'s coarse shape. A
+/// recording without a body accepts an empty body or, as exact matching
+/// does, any multipart body.
+fn body_shape_matches(
+    request: &IncomingRequest,
+    expected: &CassetteRequest,
+    keys: ShapeKeys<'_>,
+    index: usize,
+) -> bool {
+    if expected.body.is_none() {
+        return request.body.is_empty() || is_multipart_request(&request.headers, &expected.header);
+    }
+    keys.recorded.get(index) == Some(keys.sent)
+}
+
+fn request_matches(
+    policy: CassettePolicy,
+    request: &IncomingRequest,
+    expected: &CassetteRequest,
+) -> bool {
+    request_line_matches(policy, request, expected)
         && body_matches(
-            policy,
+            request.context(),
             &request.headers,
             &expected.header,
             &request.body,
@@ -1227,7 +2015,6 @@ fn request_matches(
 }
 
 fn recorded_request<N, V>(
-    policy: CassettePolicy,
     method: &str,
     uri: &str,
     headers: impl IntoIterator<Item = (N, V)>,
@@ -1247,9 +2034,10 @@ where
             .into_owned()
             .map(|(name, value)| NameValue { name, value })
             .collect(),
-        header: recorded_request_headers(policy, headers),
+        header: recorded_request_headers(headers),
         body: recorded_body.body,
         body_encoding: recorded_body.encoding,
+        withheld: None,
     }
 }
 
@@ -1274,6 +2062,7 @@ where
             .collect(),
         body: recorded_body.body,
         body_encoding: recorded_body.encoding,
+        withheld: None,
     }
 }
 
@@ -1284,10 +2073,7 @@ fn parse_recorded_uri(uri: &str) -> url::Url {
     })
 }
 
-fn recorded_request_headers<N, V>(
-    policy: CassettePolicy,
-    headers: impl IntoIterator<Item = (N, V)>,
-) -> Vec<NameValue>
+fn recorded_request_headers<N, V>(headers: impl IntoIterator<Item = (N, V)>) -> Vec<NameValue>
 where
     N: AsRef<str>,
     V: AsRef<str>,
@@ -1296,7 +2082,7 @@ where
         .into_iter()
         .filter_map(|(name, value)| {
             let name = name.as_ref();
-            contains_case_insensitive(policy.recorded_request_headers, name).then(|| NameValue {
+            contains_case_insensitive(RECORDED_REQUEST_HEADERS, name).then(|| NameValue {
                 name: name.to_ascii_lowercase(),
                 value: value.as_ref().to_string(),
             })
@@ -1329,14 +2115,17 @@ fn recorded_body(body: &[u8]) -> RecordedBody {
     }
 }
 
-fn query_matches(query: Option<&str>, expected: &[NameValue]) -> bool {
-    let actual = parsed_query_pairs(query);
-    query_pair_counts(actual)
-        == query_pair_counts(
-            expected
-                .iter()
-                .map(|pair| (pair.name.clone(), pair.value.clone())),
-        )
+fn query_matches(request: &IncomingRequest, expected: &[NameValue]) -> bool {
+    let mut scrubber = request.context().clone();
+    let mut actual: Vec<_> = parsed_query_pairs(request.uri.query())
+        .into_iter()
+        .map(|(name, value)| NameValue { name, value })
+        .collect();
+    let mut expected = expected.to_vec();
+    scrub_query_params(&mut scrubber, &mut actual);
+    scrub_query_params(&mut scrubber, &mut expected);
+    query_pair_counts(actual.into_iter().map(|pair| (pair.name, pair.value)))
+        == query_pair_counts(expected.into_iter().map(|pair| (pair.name, pair.value)))
 }
 
 fn parsed_query_pairs(query: Option<&str>) -> Vec<(String, String)> {
@@ -1355,22 +2144,25 @@ fn query_pair_counts(
     counts
 }
 
-fn headers_match(actual: &axum::http::HeaderMap, expected: &[NameValue]) -> bool {
+fn headers_match(request: &IncomingRequest, expected: &[NameValue]) -> bool {
+    let mut scrubber = request.context().clone();
     expected.iter().all(|expected| {
         let Ok(name) = HeaderName::from_bytes(expected.name.as_bytes()) else {
             return false;
         };
 
-        actual
+        request
+            .headers
             .get(name)
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| {
                 if expected.name.eq_ignore_ascii_case("content-type")
-                    && expected.value.starts_with("multipart/form-data;")
+                    && crate::scrub::is_multipart(&expected.value)
                 {
-                    value.starts_with("multipart/form-data;")
+                    crate::scrub::is_multipart(value)
                 } else {
-                    value == expected.value
+                    scrubber.scrub_header_value(&expected.name, value)
+                        == scrubber.scrub_header_value(&expected.name, &expected.value)
                 }
             })
     })
@@ -1385,7 +2177,7 @@ fn missing_required_headers(
     actual: &axum::http::HeaderMap,
 ) -> Vec<&'static str> {
     policy
-        .required_request_headers()
+        .required_request_headers
         .iter()
         .copied()
         .filter(|required| !has_nonempty_header(actual, required))
@@ -1404,39 +2196,60 @@ fn has_nonempty_header(actual: &axum::http::HeaderMap, name: &str) -> bool {
 }
 
 fn body_matches(
-    policy: CassettePolicy,
+    context: &Scrubber,
     actual_headers: &axum::http::HeaderMap,
     expected_headers: &[NameValue],
     actual: &[u8],
     expected: Option<&str>,
     expected_encoding: BodyEncoding,
 ) -> bool {
+    let Ok(actual) = context.clone().request_body(
+        actual_headers
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        actual_headers
+            .get(axum::http::header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok()),
+        actual,
+    ) else {
+        return false;
+    };
+    let actual = actual.as_ref();
     let Some(expected) = expected else {
-        // The proxy omits non-UTF-8 multipart bodies, so absent multipart bytes
-        // cannot be matched; other requests must still be empty.
+        // Older fixtures may omit binary multipart bytes, so those bodies
+        // cannot be compared; every other absent body must be empty.
         return actual.is_empty() || is_multipart_request(actual_headers, expected_headers);
     };
     let expected_bytes = decode_body(expected, expected_encoding)
         .unwrap_or_else(|error| panic!("cassette request body should decode: {error}"));
-    if is_multipart_request(actual_headers, expected_headers) {
-        return multipart_bodies_match(actual_headers, expected_headers, actual, &expected_bytes);
-    }
-
-    if expected_encoding == BodyEncoding::Base64 {
-        return actual == expected_bytes;
-    }
-
-    let Ok(actual) = std::str::from_utf8(actual) else {
+    let expected_header = |name: &str| {
+        expected_headers
+            .iter()
+            .find(|header| header.name.eq_ignore_ascii_case(name))
+            .map(|header| header.value.as_str())
+    };
+    let Ok(expected) = context.clone().request_body(
+        expected_header("content-type"),
+        expected_header("content-encoding"),
+        &expected_bytes,
+    ) else {
         return false;
     };
-    let Ok(expected) = std::str::from_utf8(&expected_bytes) else {
+    let expected = expected.as_ref();
+    let multipart = is_multipart_request(actual_headers, expected_headers);
+    if expected_encoding == BodyEncoding::Base64 && !multipart {
+        return actual == expected;
+    }
+    if multipart {
+        return multipart_bodies_match(actual_headers, expected_headers, actual, expected);
+    }
+    let (Ok(actual), Ok(expected)) = (std::str::from_utf8(actual), std::str::from_utf8(expected))
+    else {
         return false;
     };
-    let actual = CassetteScrubber::new(policy).scrub_body(actual);
-    let expected = CassetteScrubber::new(policy).scrub_body(expected);
 
     if let (Some(actual_json), Some(expected_json)) =
-        (canonical_json(&actual), canonical_json(&expected))
+        (canonical_json(actual), canonical_json(expected))
     {
         return actual_json == expected_json;
     }
@@ -1457,17 +2270,11 @@ fn is_multipart_request(
 ) -> bool {
     expected_headers.iter().any(|header| {
         header.name.eq_ignore_ascii_case("content-type")
-            && header.value.starts_with("multipart/form-data;")
+            && crate::scrub::is_multipart(&header.value)
     }) || actual_headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.starts_with("multipart/form-data;"))
-}
-
-#[derive(Debug, Eq, PartialEq)]
-struct MultipartPart {
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
+        .is_some_and(crate::scrub::is_multipart)
 }
 
 fn multipart_bodies_match(
@@ -1500,114 +2307,6 @@ fn multipart_bodies_match(
     }
 }
 
-fn multipart_boundary(content_type: &str) -> Option<String> {
-    content_type.split(';').find_map(|part| {
-        let (name, value) = part.trim().split_once('=')?;
-        name.eq_ignore_ascii_case("boundary")
-            .then(|| value.trim_matches('"').to_string())
-            .filter(|value| !value.is_empty())
-    })
-}
-
-fn parse_multipart_parts(body: &[u8], boundary: &str) -> Option<Vec<MultipartPart>> {
-    let marker = format!("--{boundary}").into_bytes();
-    let mut parts = Vec::new();
-
-    for raw_part in split_bytes(body, &marker).into_iter().skip(1) {
-        let raw_part = strip_prefix_bytes(raw_part, b"\r\n");
-        if raw_part.starts_with(b"--") {
-            break;
-        }
-
-        let raw_part = strip_suffix_bytes(raw_part, b"\r\n");
-        if raw_part.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
-
-        let header_end = find_bytes(raw_part, b"\r\n\r\n")?;
-        let raw_headers = &raw_part[..header_end];
-        let raw_body = &raw_part[header_end + b"\r\n\r\n".len()..];
-        let raw_headers = std::str::from_utf8(raw_headers).ok()?;
-        let mut headers = raw_headers
-            .lines()
-            .filter_map(|line| {
-                let (name, value) = line.split_once(':')?;
-                Some((
-                    name.trim().to_ascii_lowercase(),
-                    normalize_multipart_header_value(value.trim()),
-                ))
-            })
-            .collect::<Vec<_>>();
-        headers.sort();
-
-        parts.push(MultipartPart {
-            headers,
-            body: raw_body.to_vec(),
-        });
-    }
-
-    Some(parts)
-}
-
-fn split_bytes<'a>(body: &'a [u8], marker: &[u8]) -> Vec<&'a [u8]> {
-    let mut parts = Vec::new();
-    let mut remainder = body;
-
-    while let Some(index) = find_bytes(remainder, marker) {
-        let (before, after_marker) = remainder.split_at(index);
-        parts.push(before);
-        remainder = &after_marker[marker.len()..];
-    }
-
-    parts.push(remainder);
-    parts
-}
-
-fn find_bytes(body: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(0);
-    }
-
-    body.windows(needle.len())
-        .position(|window| window == needle)
-}
-
-fn strip_prefix_bytes<'a>(body: &'a [u8], prefix: &[u8]) -> &'a [u8] {
-    body.strip_prefix(prefix).unwrap_or(body)
-}
-
-fn strip_suffix_bytes<'a>(body: &'a [u8], suffix: &[u8]) -> &'a [u8] {
-    body.strip_suffix(suffix).unwrap_or(body)
-}
-
-fn normalize_multipart_header_value(value: &str) -> String {
-    value
-        .split(';')
-        .map(str::trim)
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
-fn canonical_json(body: &str) -> Option<Value> {
-    serde_json::from_str::<Value>(body)
-        .ok()
-        .map(sort_json_objects)
-}
-
-fn sort_json_objects(value: Value) -> Value {
-    match value {
-        Value::Object(map) => Value::Object(
-            map.into_iter()
-                .map(|(key, value)| (key, sort_json_objects(value)))
-                .collect::<BTreeMap<_, _>>()
-                .into_iter()
-                .collect(),
-        ),
-        Value::Array(values) => Value::Array(values.into_iter().map(sort_json_objects).collect()),
-        value => value,
-    }
-}
-
 fn body_preview(body: &str) -> String {
     const LIMIT: usize = 512;
     let mut preview = body.chars().take(LIMIT).collect::<String>();
@@ -1617,107 +2316,32 @@ fn body_preview(body: &str) -> String {
     preview
 }
 
-fn body_preview_for_diagnostics(policy: CassettePolicy, body: &str) -> String {
-    body_preview(&scrub_body_for_diagnostics(policy, body))
+fn body_preview_for_diagnostics(scrubber: &mut Scrubber, body: &str) -> String {
+    body_preview(&scrubber.scrub_body(body))
 }
 
-fn body_preview_bytes_for_diagnostics(policy: CassettePolicy, body: &[u8]) -> String {
+fn body_preview_bytes_for_diagnostics(scrubber: &mut Scrubber, body: &[u8]) -> String {
     match std::str::from_utf8(body) {
-        Ok(body) => body_preview_for_diagnostics(policy, body),
+        Ok(body) => body_preview_for_diagnostics(scrubber, body),
         Err(_) => format!("<{} bytes of non-UTF-8 body>", body.len()),
     }
 }
 
-fn scrub_body_for_diagnostics(policy: CassettePolicy, body: &str) -> String {
-    CassetteScrubber::new(policy).scrub_body(body)
-}
-
-/// Redact directories of home paths beginning at the input start or after a
-/// double quote, preserving the final component. Embedded path segments are
-/// unchanged to avoid corrupting URLs.
-fn scrub_local_filesystem_paths(text: &str) -> String {
-    const HOME_PREFIXES: &[&str] = &["/Users/", "/home/", "/root/"];
-
-    let mut output = String::with_capacity(text.len());
-    let mut rest = text;
-    let mut consumed = 0usize;
-
-    'outer: while let Some((prefix, at)) = HOME_PREFIXES
-        .iter()
-        .filter_map(|p| rest.find(*p).map(|i| (*p, i)))
-        .min_by_key(|(_, i)| *i)
-    {
-        // Anchored: the value must begin here. Anything else is a path segment
-        // inside a larger string (a URL, prose) and is not ours to rewrite.
-        let absolute = consumed + at;
-        let starts_value = absolute == 0 || text.as_bytes().get(absolute - 1) == Some(&b'"');
-        if !starts_value {
-            let skip = at + prefix.len();
-            output.push_str(&rest[..skip]);
-            rest = &rest[skip..];
-            consumed = absolute + prefix.len();
-            continue;
-        }
-
-        output.push_str(&rest[..at]);
-        let path = &rest[at..];
-        // Spaces may belong to account names; treating them as terminators would
-        // leak the remainder of the home path.
-        let end = path.find(['"', '\\', '\n', '\r']).unwrap_or(path.len());
-        let (path, tail) = path.split_at(end);
-
-        match path.rsplit_once('/') {
-            Some((_, base)) if !base.is_empty() => {
-                output.push_str("/REDACTED_PATH/");
-                output.push_str(base);
-            }
-            _ => output.push_str("/REDACTED_PATH"),
-        }
-        consumed = absolute + path.len();
-        rest = tail;
-        if rest.is_empty() {
-            break 'outer;
-        }
-    }
-
-    output.push_str(rest);
-    output
-}
-
-fn scrub_text_for_diagnostics(policy: CassettePolicy, text: &str) -> String {
-    CassetteScrubber::new(policy).scrub_text(text)
-}
-
 fn scrub_query_pairs_for_diagnostics(
-    policy: CassettePolicy,
+    scrubber: &mut Scrubber,
     query: Option<&str>,
 ) -> Vec<NameValue> {
-    let mut pairs = parsed_query_pairs(query)
+    let pairs = parsed_query_pairs(query)
         .into_iter()
-        .map(|(name, value)| NameValue { name, value })
-        .collect::<Vec<_>>();
-    scrub_query_params(policy, &mut pairs);
-    for pair in &mut pairs {
-        pair.value = scrub_text_for_diagnostics(policy, &pair.value);
-    }
-    pairs
+        .map(|(name, value)| NameValue { name, value });
+    scrub_name_values_for_diagnostics(scrubber, pairs.collect())
 }
 
 fn scrub_name_values_for_diagnostics(
-    policy: CassettePolicy,
-    values: &[NameValue],
+    scrubber: &mut Scrubber,
+    mut values: Vec<NameValue>,
 ) -> Vec<NameValue> {
-    let mut values = values
-        .iter()
-        .map(|value| NameValue {
-            name: value.name.clone(),
-            value: value.value.clone(),
-        })
-        .collect::<Vec<_>>();
-    scrub_query_params(policy, &mut values);
-    for value in &mut values {
-        value.value = scrub_text_for_diagnostics(policy, &value.value);
-    }
+    scrub_query_params(scrubber, &mut values);
     values
 }
 
@@ -1768,23 +2392,11 @@ fn response_body(response: &CassetteResponse) -> Body {
 
 fn is_sse_response(headers: &[NameValue]) -> bool {
     headers.iter().any(|header| {
-        header.name.eq_ignore_ascii_case("content-type")
-            && header
-                .value
-                .trim_start()
-                .to_ascii_lowercase()
-                .starts_with("text/event-stream")
+        header.name.eq_ignore_ascii_case("content-type") && crate::scrub::is_sse(&header.value)
     })
 }
 
 fn sse_body_chunks(body: &str) -> Vec<Bytes> {
-    fragmented_sse_body_chunks(body)
-        .into_iter()
-        .map(Bytes::from)
-        .collect()
-}
-
-fn fragmented_sse_body_chunks(body: &str) -> Vec<String> {
     const CHUNK_SIZES: [usize; 7] = [1, 5, 2, 13, 3, 8, 21];
 
     let mut chunks = Vec::new();
@@ -1800,7 +2412,7 @@ fn fragmented_sse_body_chunks(body: &str) -> Vec<String> {
             end += 1;
         }
 
-        chunks.push(body[start..end].to_string());
+        chunks.push(Bytes::copy_from_slice(&body.as_bytes()[start..end]));
         start = end;
     }
 
@@ -1828,9 +2440,13 @@ struct UpstreamBase {
 }
 
 impl UpstreamBase {
-    fn parse(real_base_url: &str) -> Self {
-        let url = url::Url::parse(real_base_url)
-            .unwrap_or_else(|error| panic!("invalid provider base URL {real_base_url:?}: {error}"));
+    fn parse(real_base_url: &str, cassette_path: &Path) -> Result<Self, CassetteError> {
+        let url =
+            url::Url::parse(real_base_url).map_err(|source| CassetteError::InvalidBaseUrl {
+                path: cassette_path.to_path_buf(),
+                url: real_base_url.to_owned(),
+                source,
+            })?;
         let origin = url.origin().ascii_serialization();
         let path = url.path().trim_end_matches('/');
         let path = if path.is_empty() || path == "/" {
@@ -1839,7 +2455,7 @@ impl UpstreamBase {
             path.to_string()
         };
 
-        Self { origin, path }
+        Ok(Self { origin, path })
     }
 }
 
@@ -1910,15 +2526,27 @@ pub fn recorded_json_turns(
         .into_iter()
         .map(|(request, response)| {
             (
-                serde_json::from_str(&request).unwrap_or_else(|error| {
-                    panic!("cassette {provider}/{scenario} request should be JSON: {error}")
-                }),
-                serde_json::from_str(&response).unwrap_or_else(|error| {
-                    panic!("cassette {provider}/{scenario} response should be JSON: {error}")
-                }),
+                json_body(&request, provider, scenario, "request"),
+                json_body(&response, provider, scenario, "response"),
             )
         })
         .collect()
+}
+
+/// The first recorded request and response bodies, as
+/// [`recorded_interaction_bodies`] reads them.
+fn first_bodies(cassette_root: &Path, provider: &str, scenario: &str) -> (String, String) {
+    recorded_interaction_bodies(cassette_root, provider, scenario)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("cassette {provider}/{scenario} should contain an interaction"))
+}
+
+/// `body`, the recorded `what` of `provider/scenario`, as JSON.
+fn json_body(body: &str, provider: &str, scenario: &str, what: &str) -> Value {
+    serde_json::from_str(body).unwrap_or_else(|error| {
+        panic!("cassette {provider}/{scenario} {what} should be JSON: {error}")
+    })
 }
 
 /// Return a single recorded request and response as JSON.
@@ -1936,25 +2564,15 @@ pub fn recorded_json_turn(cassette_root: &Path, provider: &str, scenario: &str) 
 /// Return the first recorded request body as JSON.
 /// Panics for an unreadable, malformed, or empty fixture or invalid JSON body.
 pub fn recorded_json_request(cassette_root: &Path, provider: &str, scenario: &str) -> Value {
-    let (request, _) = recorded_interaction_bodies(cassette_root, provider, scenario)
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| panic!("cassette {provider}/{scenario} should contain an interaction"));
-    serde_json::from_str(&request).unwrap_or_else(|error| {
-        panic!("cassette {provider}/{scenario} request should be JSON: {error}")
-    })
+    let (request, _) = first_bodies(cassette_root, provider, scenario);
+    json_body(&request, provider, scenario, "request")
 }
 
 /// Return the first recorded response body as JSON.
 /// Panics for an unreadable, malformed, or empty fixture or invalid JSON body.
 pub fn recorded_json_response(cassette_root: &Path, provider: &str, scenario: &str) -> Value {
-    let (_, response) = recorded_interaction_bodies(cassette_root, provider, scenario)
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| panic!("cassette {provider}/{scenario} should contain an interaction"));
-    serde_json::from_str(&response).unwrap_or_else(|error| {
-        panic!("cassette {provider}/{scenario} response should be JSON: {error}")
-    })
+    let (_, response) = first_bodies(cassette_root, provider, scenario);
+    json_body(&response, provider, scenario, "response")
 }
 
 /// Return recorded request headers in wire order with lowercased names,
@@ -2037,21 +2655,12 @@ pub fn recorded_sse_json_frames(
     provider: &str,
     scenario: &str,
 ) -> Vec<Value> {
-    let (_, response) = recorded_interaction_bodies(cassette_root, provider, scenario)
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| panic!("cassette {provider}/{scenario} should contain an interaction"));
-
-    response
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("data:"))
-        .map(str::trim)
-        .filter(|payload| *payload != "[DONE]")
-        .map(|payload| {
-            serde_json::from_str(payload).unwrap_or_else(|error| {
-                panic!("cassette {provider}/{scenario} SSE frame should be JSON: {error}")
-            })
-        })
+    let (_, response) = first_bodies(cassette_root, provider, scenario);
+    let frames = http_client::framing::Framing::Sse.split(response.as_bytes());
+    let payloads = frames.iter().map(|frame| frame.as_str());
+    payloads
+        .filter(|payload| payload != "[DONE]")
+        .map(|payload| json_body(&payload, provider, scenario, "SSE frame"))
         .collect()
 }
 
@@ -2074,17 +2683,10 @@ fn sanitize_path_segment(segment: &str) -> String {
 /// function is the identity on every committed cassette.
 /// Panics if the cassette cannot be parsed.
 pub fn scrub_cassette_contents(yaml: &str) -> String {
-    scrub_cassette_contents_with_policy(CassettePolicy::default(), yaml)
-}
-
-fn scrub_cassette_contents_with_policy(policy: CassettePolicy, yaml: &str) -> String {
     let mut interactions = parse_cassette_interactions(Path::new("<cassette>"), yaml);
-    let mut scrubber = CassetteScrubber::new(policy);
+    let mut scrubber = Scrubber::default();
 
-    for interaction in &mut interactions {
-        scrubber.scrub_request(&mut interaction.when);
-        scrubber.scrub_response(&mut interaction.then);
-    }
+    scrubber.scrub_interactions(&mut interactions);
 
     serialize_cassette_interactions(&interactions)
 }
@@ -2092,16 +2694,8 @@ fn scrub_cassette_contents_with_policy(policy: CassettePolicy, yaml: &str) -> St
 /// Return diagnostics for unsanitized or unsafe material in a YAML cassette.
 /// Panics if the cassette cannot be parsed.
 pub fn cassette_safety_failures(cassette_path: &Path, contents: &str) -> Vec<String> {
-    cassette_safety_failures_with_policy(CassettePolicy::default(), cassette_path, contents)
-}
-
-fn cassette_safety_failures_with_policy(
-    policy: CassettePolicy,
-    cassette_path: &Path,
-    contents: &str,
-) -> Vec<String> {
     let mut failures = Vec::new();
-    let scrubbed = scrub_cassette_contents_with_policy(policy, contents);
+    let scrubbed = scrub_cassette_contents(contents);
 
     if scrubbed != contents {
         failures.push(format!(
@@ -2112,79 +2706,50 @@ fn cassette_safety_failures_with_policy(
 
     let decoded = decoded_base64_body_texts(contents);
     let with_decoded = format!("{}\n{}", contents, decoded.join("\n"));
-    failures.extend(artifact_safety_failures_with_policy(
-        policy,
-        cassette_path,
-        &with_decoded,
-    ));
+    failures.extend(artifact_safety_failures(cassette_path, &with_decoded));
     failures
 }
 
 /// The cassette engine's secret/provider-token checks for JSON sidecars and
 /// failure reports. Unlike the cassette validator this does not parse YAML.
-pub fn artifact_safety_failures(path: &Path, contents: &str) -> Vec<String> {
-    artifact_safety_failures_with_policy(CassettePolicy::default(), path, contents)
+pub fn artifact_safety_failures(cassette_path: &Path, contents: &str) -> Vec<String> {
+    let mut failures = Vec::new();
+
+    let lower = contents.to_ascii_lowercase();
+    for pattern in FORBIDDEN_CASSETTE_PATTERNS {
+        if lower.contains(pattern) {
+            failures.push(format!("{} contains {pattern:?}", cassette_path.display()));
+        }
+    }
+
+    // Distinct key-shaped tokens of each kind, named, never echoed.
+    let mut keys: Vec<(redact::Kind, BTreeSet<&str>)> = Vec::new();
+    for secret in redact::find(contents) {
+        let token = contents.get(secret.range).unwrap_or_default();
+        match keys.iter_mut().find(|(kind, _)| *kind == secret.kind) {
+            Some((_, tokens)) => {
+                tokens.insert(token);
+            }
+            None => keys.push((secret.kind, BTreeSet::from([token]))),
+        }
+    }
+    for (kind, tokens) in keys {
+        failures.push(format!(
+            "{} contains {} {kind}-shaped token(s)",
+            cassette_path.display(),
+            tokens.len()
+        ));
+    }
+
+    failures
 }
 
 /// Scrub live diagnostics with the same credential rules as provider
 /// traffic. This is separate evidence, never a canonical effect log.
 pub fn scrub_artifact(value: &Value) -> Value {
     let mut value = value.clone();
-    CassetteScrubber::new(CassettePolicy::default()).scrub_json_value(None, &mut value);
+    Scrubber::default().scrub_json_value(None, &mut value);
     value
-}
-
-fn artifact_safety_failures_with_policy(
-    policy: CassettePolicy,
-    cassette_path: &Path,
-    contents: &str,
-) -> Vec<String> {
-    let mut failures = Vec::new();
-
-    let lower = contents.to_ascii_lowercase();
-    for pattern in policy.forbidden_patterns {
-        if lower.contains(pattern) {
-            failures.push(format!("{} contains {pattern:?}", cassette_path.display()));
-        }
-    }
-
-    let openai_api_key_tokens = openai_api_key_tokens(contents);
-    if !openai_api_key_tokens.is_empty() {
-        failures.push(format!(
-            "{} contains {} OpenAI API key-shaped token(s)",
-            cassette_path.display(),
-            openai_api_key_tokens.len()
-        ));
-    }
-
-    let anthropic_api_key_tokens = anthropic_api_key_tokens(contents);
-    if !anthropic_api_key_tokens.is_empty() {
-        failures.push(format!(
-            "{} contains {} Anthropic API key-shaped token(s)",
-            cassette_path.display(),
-            anthropic_api_key_tokens.len()
-        ));
-    }
-
-    let google_api_key_tokens = google_api_key_tokens(contents);
-    if !google_api_key_tokens.is_empty() {
-        failures.push(format!(
-            "{} contains {} Google API key-shaped token(s)",
-            cassette_path.display(),
-            google_api_key_tokens.len()
-        ));
-    }
-
-    let aws_access_key_tokens = aws_access_key_tokens(contents);
-    if !aws_access_key_tokens.is_empty() {
-        failures.push(format!(
-            "{} contains {} AWS access key-shaped token(s)",
-            cassette_path.display(),
-            aws_access_key_tokens.len()
-        ));
-    }
-
-    failures
 }
 
 /// One reply in a cassette that [`reply_account_failure`] classifies.
@@ -2348,14 +2913,8 @@ pub(crate) fn target_dir_of(exe: &Path) -> Option<PathBuf> {
 /// Scrub `yaml` and write it to a fresh file under `root`:
 /// `<provider>/<scenario>.<unix seconds>-<pid>-<n>.yaml`. Returns the path,
 /// or `None` when the write failed.
-async fn write_attempt(
-    root: &Path,
-    provider: &str,
-    scenario: &str,
-    policy: CassettePolicy,
-    yaml: &str,
-) -> Option<PathBuf> {
-    let redacted = scrub_cassette_contents_with_policy(policy, yaml);
+async fn write_attempt(root: &Path, provider: &str, scenario: &str, yaml: &str) -> Option<PathBuf> {
+    let redacted = scrub_cassette_contents(yaml);
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
@@ -2375,19 +2934,22 @@ async fn write_attempt(
         .map(|()| path)
 }
 
-async fn write_scrubbed_cassette(cassette_path: &Path, policy: CassettePolicy, yaml: &str) {
-    let redacted = scrub_cassette_contents_with_policy(policy, yaml);
-    let failures = cassette_safety_failures_with_policy(policy, cassette_path, &redacted);
-    assert!(
-        failures.is_empty(),
-        "provider cassette {} still contains unsafe artifacts after scrubbing:\n{}",
-        cassette_path.display(),
-        failures.join("\n")
-    );
+async fn write_scrubbed_cassette(cassette_path: &Path, yaml: &str) -> Result<(), CassetteError> {
+    let redacted = scrub_cassette_contents(yaml);
+    let failures = cassette_safety_failures(cassette_path, &redacted);
+    if !failures.is_empty() {
+        return Err(CassetteError::UnsafeRecording {
+            path: cassette_path.to_path_buf(),
+            failures,
+        });
+    }
 
     write_cassette_atomically(cassette_path, redacted.as_bytes())
         .await
-        .expect("provider cassette should be written");
+        .map_err(|source| CassetteError::WriteFixture {
+            path: cassette_path.to_path_buf(),
+            source,
+        })
 }
 
 fn decoded_base64_body_texts(contents: &str) -> Vec<String> {
@@ -2395,26 +2957,14 @@ fn decoded_base64_body_texts(contents: &str) -> Vec<String> {
         .into_iter()
         .flat_map(|interaction| {
             [
-                interaction.when,
-                cassette_request_from_response(interaction.then),
+                (interaction.when.body, interaction.when.body_encoding),
+                (interaction.then.body, interaction.then.body_encoding),
             ]
         })
-        .filter(|request| request.body_encoding == BodyEncoding::Base64)
-        .filter_map(|request| request.body)
-        .filter_map(|body| decode_body(&body, BodyEncoding::Base64).ok())
+        .filter(|(_, encoding)| *encoding == BodyEncoding::Base64)
+        .filter_map(|(body, _)| decode_body(&body?, BodyEncoding::Base64).ok())
         .map(|body| String::from_utf8_lossy(&body).into_owned())
         .collect()
-}
-
-fn cassette_request_from_response(response: CassetteResponse) -> CassetteRequest {
-    CassetteRequest {
-        path: String::new(),
-        method: String::new(),
-        query_param: Vec::new(),
-        header: response.header,
-        body: response.body,
-        body_encoding: response.body_encoding,
-    }
 }
 
 fn serialize_cassette_interactions(interactions: &[CassetteInteraction]) -> String {
@@ -2485,6 +3035,8 @@ const FORBIDDEN_CASSETTE_PATTERNS: &[&str] = &[
     "__cf_bm=",
     "proj_",
     "set-cookie",
+    "cookie:",
+    "chatgpt-account-id:",
     "openai-organization",
     "openai-project",
     "anthropic-organization-id",
@@ -2510,36 +3062,12 @@ const RECORDED_REQUEST_HEADERS: &[&str] = &[
     "openai-beta",
 ];
 
-const SENSITIVE_HEADER_NAMES: &[&str] = &[
-    "authorization",
-    "x-api-key",
-    "api-key",
-    "x-goog-api-key",
-    "ocp-apim-subscription-key",
-    "set-cookie",
-    "openai-organization",
-    "openai-project",
-    "anthropic-organization-id",
-    "x-amz-security-token",
-    "x-amz-content-sha256",
-    "x-amz-date",
-    "key",
-];
-
-const SENSITIVE_QUERY_PARAMS: &[&str] = &[
-    "key",
-    "api_key",
-    "apikey",
-    "access_token",
-    "x-amz-credential",
-    "x-amz-signature",
-    "x-amz-security-token",
-];
-
 // AWS SDKs require the error-type header for exception classification and read
 // request IDs from headers.
 const RESPONSE_HEADER_ALLOWLIST: &[&str] = &[
     "content-type",
+    // Replay must follow a redirect where the recording went.
+    "location",
     // Replay must retain the provider's retry hint for adapter diagnostics.
     "retry-after",
     "x-amzn-errortype",
@@ -2564,52 +3092,105 @@ pub fn volatile_json_keys() -> &'static [&'static str] {
     VOLATILE_JSON_KEYS
 }
 
-const VOLATILE_JSON_KEYS: &[&str] = &[
-    "completed_at",
-    "created",
-    "created_at",
-    "updated",
-    "updated_at",
-];
-
-/// Credential material a token exchange can return in a body.
-const OAUTH_TOKEN_KEYS: &[&str] = &["access_token", "id_token", "refresh_token"];
-
-/// Removes credentials, AWS account numbers and home-directory paths from a
-/// recording and normalizes its volatile fields. Everything else the provider
-/// sent is kept verbatim, so a fixture can seed a live call and a replay
-/// decodes the provider's own bytes.
-struct CassetteScrubber {
-    policy: CassettePolicy,
-    placeholders: BTreeMap<String, String>,
-    counters: BTreeMap<&'static str, usize>,
-}
-
-impl CassetteScrubber {
-    fn new(policy: CassettePolicy) -> Self {
-        Self {
-            policy,
-            placeholders: BTreeMap::new(),
-            counters: BTreeMap::new(),
+/// The cassette's own steps of the shared [`Scrubber`].
+impl Scrubber {
+    fn scrub_interactions(&mut self, interactions: &mut [CassetteInteraction]) {
+        let prepared: Vec<_> = interactions
+            .iter()
+            .map(|interaction| {
+                let query = url::form_urlencoded::Serializer::new(String::new())
+                    .extend_pairs(
+                        interaction
+                            .when
+                            .query_param
+                            .iter()
+                            .map(|pair| (&pair.name, &pair.value)),
+                    )
+                    .finish();
+                self.learn_request(
+                    &format!("{}?{}", interaction.when.path, query),
+                    interaction.when.header.iter().map(|header| {
+                        (
+                            header.name.as_str(),
+                            crate::scrub::HeaderText::Utf8(header.value.as_str()),
+                        )
+                    }),
+                );
+                for header in &interaction.then.header {
+                    self.learn_header(&header.name, &header.value);
+                }
+                let prepare =
+                    |body: Option<&str>,
+                     encoding,
+                     headers: &[NameValue],
+                     withheld: &Option<crate::scrub::OpaqueBody>| {
+                        if let Some(summary) = withheld {
+                            return Some(crate::scrub::PreparedBody::withheld(summary.clone()));
+                        }
+                        let bytes = decode_body(body?, encoding).ok()?;
+                        let headers: Vec<_> = headers
+                            .iter()
+                            .map(|header| (header.name.as_str(), header.value.as_str()))
+                            .collect();
+                        Some(crate::scrub::PreparedBody::fixture(&bytes, &headers))
+                    };
+                let prepared = crate::scrub::PreparedExchange {
+                    header_inspection: crate::scrub::HeaderInspection::Readable,
+                    request_body: prepare(
+                        interaction.when.body.as_deref(),
+                        interaction.when.body_encoding,
+                        &interaction.when.header,
+                        &interaction.when.withheld,
+                    ),
+                    response_body: prepare(
+                        interaction.then.body.as_deref(),
+                        interaction.then.body_encoding,
+                        &interaction.then.header,
+                        &interaction.then.withheld,
+                    ),
+                };
+                for body in prepared.request_body.iter().chain(&prepared.response_body) {
+                    self.learn_fixture_body(body);
+                }
+                prepared
+            })
+            .collect();
+        for (interaction, mut prepared) in interactions.iter_mut().zip(prepared) {
+            self.finish_preparing(&mut prepared);
+            let request_withheld = prepared.request_withheld().cloned();
+            let response_withheld = prepared.response_withheld().cloned();
+            for header in &mut interaction.then.header {
+                header.value = prepared.scrub_response_header(self, &header.name, &header.value);
+            }
+            if let Some(summary) = request_withheld {
+                interaction.when.body = None;
+                interaction.when.body_encoding = BodyEncoding::Utf8;
+                interaction.when.withheld = Some(summary);
+            } else if let Some(body) = prepared.request_body {
+                interaction.when.body =
+                    Some(self.scrub_encoded_body(body, interaction.when.body_encoding));
+            }
+            if let Some(summary) = response_withheld {
+                interaction.then.body = None;
+                interaction.then.body_encoding = BodyEncoding::Utf8;
+                interaction.then.withheld = Some(summary);
+            } else if let Some(body) = prepared.response_body {
+                interaction.then.body =
+                    Some(self.scrub_encoded_body(body, interaction.then.body_encoding));
+            }
+            self.scrub_request(&mut interaction.when);
+            self.scrub_response(&mut interaction.then);
         }
     }
 
     fn scrub_request(&mut self, request: &mut CassetteRequest) {
         request.path = self.scrub_text(&request.path);
-        scrub_headers(self.policy, &mut request.header, HeaderMode::Request);
-        scrub_query_params(self.policy, &mut request.query_param);
-
-        for query_param in &mut request.query_param {
-            query_param.value = self.scrub_text(&query_param.value);
-        }
-
-        if let Some(body) = &mut request.body {
-            *body = self.scrub_encoded_body(body, request.body_encoding);
-        }
+        scrub_headers(self, &mut request.header, HeaderMode::Request);
+        scrub_query_params(self, &mut request.query_param);
     }
 
     fn scrub_response(&mut self, response: &mut CassetteResponse) {
-        scrub_headers(self.policy, &mut response.header, HeaderMode::Response);
+        scrub_headers(self, &mut response.header, HeaderMode::Response);
 
         // A retry hint is protocol data, not an arbitrary diagnostic string.
         // Canonicalize valid values and discard malformed/credential-bearing text.
@@ -2634,222 +3215,18 @@ impl CassetteScrubber {
                 false
             }
         });
-
-        if let Some(body) = &mut response.body {
-            *body = self.scrub_encoded_body(body, response.body_encoding);
-        }
     }
 
-    fn scrub_encoded_body(&mut self, body: &str, encoding: BodyEncoding) -> String {
+    fn scrub_encoded_body(
+        &mut self,
+        body: crate::scrub::PreparedBody,
+        encoding: BodyEncoding,
+    ) -> String {
+        let bytes = self.scrub_prepared(body);
         match encoding {
-            BodyEncoding::Utf8 => self.scrub_body(body),
-            BodyEncoding::Base64 => {
-                let Ok(bytes) = decode_body(body, BodyEncoding::Base64) else {
-                    return body.to_string();
-                };
-                if let Ok(text) = std::str::from_utf8(&bytes) {
-                    return BASE64_STANDARD.encode(self.scrub_body(text));
-                }
-
-                #[cfg(feature = "bedrock")]
-                {
-                    self.scrub_event_stream_body(bytes)
-                        .map_or_else(|| body.to_string(), |bytes| BASE64_STANDARD.encode(bytes))
-                }
-                #[cfg(not(feature = "bedrock"))]
-                {
-                    body.to_string()
-                }
-            }
+            BodyEncoding::Utf8 => String::from_utf8_lossy(&bytes).into_owned(),
+            BodyEncoding::Base64 => BASE64_STANDARD.encode(bytes),
         }
-    }
-
-    #[cfg(feature = "bedrock")]
-    fn scrub_event_stream_body(&mut self, bytes: Vec<u8>) -> Option<Vec<u8>> {
-        let mut input = Bytes::from(bytes);
-        let mut output = Vec::new();
-
-        while !input.is_empty() {
-            let message = read_message_from(&mut input).ok()?;
-            let payload = std::str::from_utf8(message.payload()).ok()?;
-            let scrubbed_payload = self.scrub_body(payload);
-            let scrubbed = EventStreamMessage::new_from_parts(
-                message.headers().to_vec(),
-                scrubbed_payload.into_bytes(),
-            );
-            write_message_to(&scrubbed, &mut output).ok()?;
-        }
-
-        Some(output)
-    }
-
-    fn scrub_body(&mut self, body: &str) -> String {
-        if let Some(mut json) = canonical_json(body) {
-            self.scrub_json_value(None, &mut json);
-            return serde_json::to_string(&json).expect("scrubbed JSON body should serialize");
-        }
-
-        if body
-            .lines()
-            .any(|line| line.trim_start().starts_with("data:"))
-        {
-            return self.scrub_sse_body(body);
-        }
-
-        self.scrub_text(body)
-    }
-
-    fn scrub_sse_body(&mut self, body: &str) -> String {
-        let mut output = String::with_capacity(body.len());
-
-        for line in body.split_inclusive('\n') {
-            let (line_without_newline, newline) = line
-                .strip_suffix('\n')
-                .map_or((line, ""), |line| (line, "\n"));
-            let (line_without_cr, cr) = line_without_newline
-                .strip_suffix('\r')
-                .map_or((line_without_newline, ""), |line| (line, "\r"));
-            let trimmed = line_without_cr.trim_start();
-            let indentation_len = line_without_cr.len() - trimmed.len();
-
-            if let Some(payload) = trimmed.strip_prefix("data:") {
-                let payload = payload.trim_start();
-                if payload == "[DONE]" {
-                    output.push_str(line_without_cr);
-                } else if let Some(mut json) = canonical_json(payload) {
-                    self.scrub_json_value(None, &mut json);
-                    output.push_str(&line_without_cr[..indentation_len]);
-                    output.push_str("data: ");
-                    output.push_str(
-                        &serde_json::to_string(&json)
-                            .expect("scrubbed SSE JSON payload should serialize"),
-                    );
-                } else {
-                    output.push_str(&self.scrub_text(line_without_cr));
-                }
-            } else {
-                output.push_str(&self.scrub_text(line_without_cr));
-            }
-
-            output.push_str(cr);
-            output.push_str(newline);
-        }
-
-        output
-    }
-
-    fn scrub_json_value(&mut self, key: Option<&str>, value: &mut Value) {
-        let key_lower = key.map(str::to_ascii_lowercase);
-
-        match value {
-            Value::Object(map) => {
-                for (key, value) in map {
-                    self.scrub_json_value(Some(key), value);
-                }
-            }
-            Value::Array(values) => {
-                for value in values {
-                    self.scrub_json_value(key, value);
-                }
-            }
-            Value::String(text) => {
-                if is_redacted_placeholder(text) {
-                    return;
-                }
-
-                if let Some(key) = key_lower.as_deref() {
-                    if VOLATILE_JSON_KEYS.contains(&key) {
-                        *text = "1970-01-01T00:00:00Z".to_string();
-                        return;
-                    }
-
-                    if OAUTH_TOKEN_KEYS.contains(&key) {
-                        *text = self.placeholder(text, "id_");
-                        return;
-                    }
-                }
-
-                *text = self.scrub_text(text);
-            }
-            Value::Number(number) => {
-                if key_lower
-                    .as_deref()
-                    .is_some_and(|key| VOLATILE_JSON_KEYS.contains(&key))
-                {
-                    *value = Value::Number(0.into());
-                } else {
-                    let _ = number;
-                }
-            }
-            Value::Bool(_) | Value::Null => {}
-        }
-    }
-
-    fn scrub_text(&mut self, text: &str) -> String {
-        let mut scrubbed = text.to_string();
-        for key in self.policy.sensitive_query_params {
-            scrubbed = scrub_query_param(&scrubbed, key, REDACTED);
-        }
-        let scrubbed = self.scrub_aws_account_ids(&scrubbed);
-        scrub_local_filesystem_paths(&scrubbed)
-    }
-
-    /// Replace 12-digit account-ID segments in ARNs, preserving partition,
-    /// service, region, and resource fields.
-    fn scrub_aws_account_ids(&mut self, text: &str) -> String {
-        const PREFIX: &str = "arn:";
-        const ACCOUNT_FIELD: usize = 4;
-        const ACCOUNT_LEN: usize = 12;
-
-        let mut output = String::with_capacity(text.len());
-        let mut rest = text;
-
-        while let Some(start) = rest.find(PREFIX) {
-            output.push_str(&rest[..start]);
-            let arn = &rest[start..];
-            // An ARN ends at the first character that cannot appear in one;
-            // the surrounding JSON quote or comma is the usual terminator.
-            let end = arn
-                .find(['"', ',', ' ', '\n', '}', ']'])
-                .unwrap_or(arn.len());
-            let (arn, tail) = arn.split_at(end);
-
-            let mut fields = arn.split(':').map(str::to_string).collect::<Vec<_>>();
-            match fields.get(ACCOUNT_FIELD) {
-                Some(account)
-                    if account.len() == ACCOUNT_LEN
-                        && account.chars().all(|ch| ch.is_ascii_digit()) =>
-                {
-                    let placeholder = self.placeholder(account, "account_");
-                    fields[ACCOUNT_FIELD] = placeholder;
-                    output.push_str(&fields.join(":"));
-                }
-                _ => output.push_str(arn),
-            }
-
-            rest = tail;
-        }
-
-        output.push_str(rest);
-        output
-    }
-
-    fn placeholder(&mut self, original: &str, kind: &'static str) -> String {
-        // Empty wire values must stay empty rather than acquire invented identifiers.
-        if original.is_empty() {
-            return String::new();
-        }
-
-        if let Some(existing) = self.placeholders.get(original) {
-            return existing.clone();
-        }
-
-        let counter = self.counters.entry(kind).or_insert(0);
-        *counter += 1;
-        let placeholder = format!("{kind}REDACTED_{counter}");
-        self.placeholders
-            .insert(original.to_string(), placeholder.clone());
-        placeholder
     }
 }
 
@@ -2859,411 +3236,28 @@ enum HeaderMode {
     Response,
 }
 
-fn scrub_headers(policy: CassettePolicy, headers: &mut Vec<NameValue>, mode: HeaderMode) {
-    match mode {
-        HeaderMode::Request => {
-            for header in headers {
-                if policy.is_sensitive_header(&header.name) {
-                    header.value = REDACTED.to_string();
-                }
-            }
-        }
-        HeaderMode::Response => {
-            headers.retain(|header| policy.is_allowed_response_header(&header.name));
-        }
+fn scrub_headers(scrubber: &mut Scrubber, headers: &mut Vec<NameValue>, mode: HeaderMode) {
+    if matches!(mode, HeaderMode::Response) {
+        headers.retain(|header| contains_case_insensitive(RESPONSE_HEADER_ALLOWLIST, &header.name));
+    }
+    for header in headers {
+        header.value = scrubber.scrub_header_value(&header.name, &header.value);
     }
 }
 
-fn scrub_query_params(policy: CassettePolicy, query_params: &mut [NameValue]) {
-    for query_param in query_params {
-        if policy.is_sensitive_query_param(&query_param.name) {
-            query_param.value = REDACTED.to_string();
-        }
+fn scrub_query_params(scrubber: &mut Scrubber, query_params: &mut [NameValue]) {
+    for pair in query_params {
+        pair.value = scrubber.scrub_param_value(&pair.name, &pair.value);
     }
-}
-
-fn token_end(text: &str, start: usize) -> usize {
-    let mut end = start;
-
-    for (offset, ch) in text[start..].char_indices() {
-        if offset == 0 || is_token_char(ch) {
-            end = start + offset + ch.len_utf8();
-        } else {
-            break;
-        }
-    }
-
-    end
-}
-
-fn is_token_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')
-}
-
-fn is_redacted_placeholder(value: &str) -> bool {
-    let Some((kind, counter)) = value.split_once("REDACTED_") else {
-        return false;
-    };
-
-    !kind.is_empty()
-        && !counter.is_empty()
-        && kind
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
-        && counter.chars().all(|ch| ch.is_ascii_digit())
-}
-
-fn openai_api_key_tokens(contents: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut index = 0;
-
-    while let Some(relative_index) = contents[index..].find("sk-") {
-        let start = index + relative_index;
-        if start > 0
-            && contents[..start]
-                .chars()
-                .next_back()
-                .is_some_and(is_token_char)
-        {
-            index = start + "sk-".len();
-            continue;
-        }
-
-        let end = token_end(contents, start);
-        let token = &contents[start..end];
-        if is_openai_api_key_token(token) {
-            tokens.push(token.to_string());
-        }
-        index = end;
-    }
-
-    tokens.sort();
-    tokens.dedup();
-    tokens
-}
-
-fn is_openai_api_key_token(token: &str) -> bool {
-    if is_redacted_placeholder(token) {
-        return false;
-    }
-
-    if let Some(suffix) = token.strip_prefix("sk-proj-") {
-        return token_suffix_is_plausible_secret(suffix, 16);
-    }
-
-    if let Some(suffix) = token.strip_prefix("sk-svcacct-") {
-        return token_suffix_is_plausible_secret(suffix, 16);
-    }
-
-    let Some(suffix) = token.strip_prefix("sk-") else {
-        return false;
-    };
-    if suffix.starts_with("ant-") {
-        return false;
-    }
-    token_suffix_is_plausible_secret(suffix, 32)
-}
-
-fn anthropic_api_key_tokens(contents: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut index = 0;
-
-    while let Some(relative_index) = contents[index..].find("sk-ant-") {
-        let start = index + relative_index;
-        if start > 0
-            && contents[..start]
-                .chars()
-                .next_back()
-                .is_some_and(is_token_char)
-        {
-            index = start + "sk-ant-".len();
-            continue;
-        }
-
-        let end = token_end(contents, start);
-        let token = &contents[start..end];
-        if is_anthropic_api_key_token(token) {
-            tokens.push(token.to_string());
-        }
-        index = end;
-    }
-
-    tokens.sort();
-    tokens.dedup();
-    tokens
-}
-
-fn is_anthropic_api_key_token(token: &str) -> bool {
-    if is_redacted_placeholder(token) {
-        return false;
-    }
-
-    let Some(suffix) = token.strip_prefix("sk-ant-") else {
-        return false;
-    };
-    token_suffix_is_plausible_secret(suffix, 16)
-}
-
-fn token_suffix_is_plausible_secret(suffix: &str, min_len: usize) -> bool {
-    suffix.len() >= min_len
-        && suffix
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
-        && suffix.chars().any(|ch| ch.is_ascii_alphabetic())
-}
-
-fn aws_access_key_tokens(contents: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-
-    for prefix in ["AKIA", "ASIA"] {
-        let mut remaining = contents;
-        while let Some(index) = remaining.find(prefix) {
-            // A key starts a token; the same letters inside a base64 blob
-            // (a signature, ciphertext, an image) are not a key.
-            if !starts_token(contents, remaining, index) {
-                remaining = &remaining[index + prefix.len()..];
-                continue;
-            }
-            let after_prefix = &remaining[index + prefix.len()..];
-            let suffix_len = after_prefix
-                .chars()
-                .take_while(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
-                .map(char::len_utf8)
-                .sum::<usize>();
-            let token = &remaining[index..index + prefix.len() + suffix_len];
-
-            if suffix_len == 16 {
-                tokens.push(token.to_string());
-            }
-
-            remaining = &remaining[index + prefix.len()..];
-        }
-    }
-
-    tokens.sort();
-    tokens.dedup();
-    tokens
-}
-
-fn google_api_key_tokens(contents: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut remaining = contents;
-    const PREFIX: &str = "AIza";
-    const MIN_SUFFIX_LEN: usize = 20;
-
-    while let Some(index) = remaining.find(PREFIX) {
-        if !starts_token(contents, remaining, index) {
-            remaining = &remaining[index + PREFIX.len()..];
-            continue;
-        }
-        let after_prefix = &remaining[index + PREFIX.len()..];
-        let suffix_len = after_prefix
-            .chars()
-            .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
-            .map(char::len_utf8)
-            .sum::<usize>();
-        let token = &remaining[index..index + PREFIX.len() + suffix_len];
-
-        if suffix_len >= MIN_SUFFIX_LEN {
-            tokens.push(token.to_string());
-        }
-
-        remaining = &remaining[index + PREFIX.len()..];
-    }
-
-    tokens.sort();
-    tokens.dedup();
-    tokens
-}
-
-/// Whether `remaining[index..]`, a suffix of `contents`, begins a token:
-/// the preceding character in `contents` is neither a token character nor
-/// one of the standard base64 alphabet's `+` and `/`, so the same letters
-/// inside a base64 blob are not read as the start of a key.
-fn starts_token(contents: &str, remaining: &str, index: usize) -> bool {
-    let absolute = contents.len() - remaining.len() + index;
-    contents[..absolute]
-        .chars()
-        .next_back()
-        .is_none_or(|ch| !is_token_char(ch) && !matches!(ch, '+' | '/'))
-}
-
-fn scrub_query_param(input: &str, key: &str, replacement: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut remainder = input;
-    let needle = format!("{key}=");
-
-    while let Some(index) = find_query_param(remainder, &needle) {
-        let (prefix, after_prefix) = remainder.split_at(index);
-        output.push_str(prefix);
-
-        let value_start = needle.len();
-        output.push_str(&after_prefix[..value_start]);
-        let after_value_start = &after_prefix[value_start..];
-        let value_end = after_value_start
-            .find(['&', '"', '\'', ' ', '\n', '\r', '<'])
-            .unwrap_or(after_value_start.len());
-        output.push_str(replacement);
-        remainder = &after_value_start[value_end..];
-    }
-
-    output.push_str(remainder);
-    output
-}
-
-fn find_query_param(input: &str, needle: &str) -> Option<usize> {
-    let mut search_start = 0;
-
-    while let Some(relative_index) = find_ascii_case_insensitive(&input[search_start..], needle) {
-        let index = search_start + relative_index;
-        let starts_param = index == 0
-            || input[..index]
-                .chars()
-                .next_back()
-                .is_some_and(|ch| matches!(ch, '?' | '&' | '"' | '\'' | ' '));
-
-        if starts_param {
-            return Some(index);
-        }
-
-        search_start = index + needle.len();
-    }
-
-    None
-}
-
-fn find_ascii_case_insensitive(input: &str, needle: &str) -> Option<usize> {
-    let input = input.as_bytes();
-    let needle = needle.as_bytes();
-
-    input
-        .windows(needle.len())
-        .position(|window| window.eq_ignore_ascii_case(needle))
 }
 
 #[cfg(test)]
 mod tests;
 
-/// A reqwest client that buffers unary responses and optionally records complete
-/// exchanges, preserving non-UTF-8 bodies as base64. Multipart requests are
-/// not recorded, but a file they upload is logged in the created-resource
-/// ledger; streaming requests pass through untouched.
-#[derive(Clone, Debug, Default)]
-pub struct DirectRecordingHttpClient {
-    inner: rig_reqwest::ReqwestClient,
-    recorder: Option<DirectRecorder>,
-}
-
-impl DirectRecordingHttpClient {
-    /// A client that records through `recorder` when one is present, i.e. in
-    /// record mode; in replay mode it is a plain client pointed at the replay
-    /// server.
-    pub fn new(recorder: Option<DirectRecorder>) -> Self {
-        Self {
-            inner: rig_reqwest::ReqwestClient::default(),
-            recorder,
-        }
-    }
-}
-
-impl HttpClientExt for DirectRecordingHttpClient {
-    fn send<T, U>(
-        &self,
-        req: rig_core::http_client::Request<T>,
-    ) -> impl std::future::Future<
-        Output = rig_core::http_client::Result<
-            rig_core::http_client::Response<rig_core::http_client::LazyBody<U>>,
-        >,
-    > + Send
-    + 'static
-    where
-        T: Into<Bytes> + Send,
-        U: From<Bytes> + Send + 'static,
-    {
-        let inner = self.inner.clone();
-        let recorder = self.recorder.clone();
-        let (parts, body) = req.into_parts();
-        let body: Bytes = body.into();
-        let method = parts.method.to_string();
-        let uri = parts.uri.to_string();
-        let request_headers = owned_headers(&parts.headers);
-        let request = HttpRequest::from_parts(parts, body.clone());
-
-        async move {
-            let response = HttpClientExt::send::<Bytes, Bytes>(&inner, request).await?;
-            let (parts, lazy_body) = response.into_parts();
-            // Buffered, not streamed: the recorder needs the whole payload,
-            // and the caller gets the same bytes back below.
-            let bytes = lazy_body.await?;
-
-            if let Some(recorder) = recorder {
-                let response_headers = owned_headers(&parts.headers);
-                recorder
-                    .record_http_interaction(
-                        DirectHttpRequest {
-                            method: &method,
-                            uri: &uri,
-                            headers: request_headers.iter().map(|(name, value)| (name, value)),
-                            body: &body,
-                        },
-                        DirectHttpResponse {
-                            status: parts.status.as_u16(),
-                            headers: response_headers.iter().map(|(name, value)| (name, value)),
-                            body: &bytes,
-                        },
-                    )
-                    .await;
-            }
-
-            let body: LazyBody<U> = Box::pin(async move { Ok(U::from(bytes)) });
-            Ok(HttpResponse::from_parts(parts, body))
-        }
-    }
-
-    fn send_multipart<U>(
-        &self,
-        req: HttpRequest<MultipartForm>,
-    ) -> impl Future<Output = http_client::Result<HttpResponse<LazyBody<U>>>> + Send + 'static
-    where
-        U: From<Bytes> + Send + 'static,
-    {
-        let inner = self.inner.clone();
-        let recorder = self.recorder.clone();
-        let method = req.method().to_string();
-        let uri = req.uri().to_string();
-        async move {
-            let response = inner.send_multipart::<Bytes>(req).await?;
-            let (parts, lazy_body) = response.into_parts();
-            let bytes = lazy_body.await?;
-            if let Some(recorder) = recorder {
-                recorder.log_created(&method, &uri, &[], parts.status.as_u16(), &bytes);
-            }
-            let body: LazyBody<U> = Box::pin(async move { Ok(U::from(bytes)) });
-            Ok(HttpResponse::from_parts(parts, body))
-        }
-    }
-
-    fn send_streaming<T>(
-        &self,
-        req: HttpRequest<T>,
-    ) -> impl Future<Output = http_client::Result<http_client::StreamingResponse>> + Send
-    where
-        T: Into<Bytes> + Send,
-    {
-        self.inner.send_streaming(req)
-    }
-}
-
 /// Collect UTF-8 HTTP headers as owned name/value pairs.
 pub fn owned_headers(headers: &http_client::HeaderMap) -> Vec<(String, String)> {
-    headers
-        .iter()
-        .filter_map(|(name, value)| {
-            value
-                .to_str()
-                .ok()
-                .map(|value| (name.as_str().to_string(), value.to_string()))
-        })
+    crate::scrub::recordable_pairs(crate::scrub::header_pairs(headers))
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
         .collect()
 }
 
@@ -3275,6 +3269,5 @@ mod paths;
 mod recording_guard_tests;
 #[cfg(test)]
 mod replay_session_tests;
-
 #[cfg(test)]
-mod local_path_scrub_tests;
+mod try_session_tests;

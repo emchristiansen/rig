@@ -6,7 +6,6 @@ use futures::StreamExt;
 use rig::agent::MultiTurnStreamItem;
 use rig::effect::EffectFamily;
 use rig::message::AssistantContent;
-use rig::prelude::*;
 use rig::providers::openai;
 use rig_cassette::agent::AgentReplayExt;
 
@@ -32,7 +31,7 @@ fn tool_calls(log: &rig::cassette::effect_log::EffectLog) -> Vec<rig::message::T
     log.records
         .iter()
         .filter_map(|record| match &record.outcome {
-            Ok(rig::effect::Outcome::Completion(response)) => Some(response),
+            Ok(rig::effect::Answered::Completion(response)) => Some(response),
             _ => None,
         })
         .flat_map(|response| response.choice.iter())
@@ -46,13 +45,15 @@ fn tool_calls(log: &rig::cassette::effect_log::EffectLog) -> Vec<rig::message::T
 fn assert_dual_ids(calls: &[rig::message::ToolCall]) {
     assert!(!calls.is_empty(), "the program calls tools");
     for call in calls {
-        let provider = call
-            .provider
-            .as_ref()
-            .unwrap_or_else(|| panic!("a Responses call carries a provider id: {call:?}"));
         assert!(
-            provider.item_id.is_some(),
-            "a Responses call carries the item id too: {call:?}"
+            call.id.provider().is_some(),
+            "a Responses call carries a provider id: {call:?}"
+        );
+        assert!(
+            call.native
+                .as_ref()
+                .is_some_and(|native| native.item["id"].is_string()),
+            "a Responses call carries its item, item id included: {call:?}"
         );
     }
 }
@@ -62,9 +63,7 @@ fn assert_dual_ids(calls: &[rig::message::ToolCall]) {
 async fn streaming_with_events_effect_log_is_the_golden_fixture() {
     with_openai_cassette("effect_corpus/streaming_with_events", |client| async move {
         let recorder = rig_cassette::effect_log::EffectLogRecorder::keeping_stream_events();
-        let agent = client
-            .openai
-            .agent(openai::GPT_4O)
+        let agent = rig::AgentBuilder::new(client.openai.completion(openai::GPT_4O))
             .name("golden")
             .preamble(STREAMING_TOOLS_PREAMBLE)
             .temperature(0.0)
@@ -111,9 +110,7 @@ async fn streaming_with_events_effect_log_is_the_golden_fixture() {
 async fn tool_call_turns_effect_log_is_the_golden_fixture() {
     with_openai_cassette("effect_corpus/tool_call_turns", |client| async move {
         let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
-        let agent = client
-            .openai
-            .agent(openai::GPT_4O)
+        let agent = rig::AgentBuilder::new(client.openai.completion(openai::GPT_4O))
             .name("golden")
             .preamble(CHAIN_PREAMBLE)
             .temperature(0.0)
@@ -126,7 +123,7 @@ async fn tool_call_turns_effect_log_is_the_golden_fixture() {
             .max_turns(6)
             .await
             .expect("the agent answers");
-        assert!(response.output.contains("21"), "{}", response.output);
+        assert!(response.output().contains("21"), "{}", response.output());
         let log = agent.stamp(recorder.take());
         assert_eq!(
             families(&log),

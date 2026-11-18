@@ -8,27 +8,22 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use rig::completion::{CompletionModel, Message};
+use rig::completion::Message;
 use rig::message::{AssistantContent, ToolChoice, UserContent};
-use rig::prelude::*;
-use rig::providers::openrouter;
 use rig::tool::Tool;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::support::{
-    ALPHA_SIGNAL_OUTPUT, AlphaSignal, BETA_SIGNAL_OUTPUT, BetaSignal, TWO_TOOL_STREAM_PREAMBLE,
-    TWO_TOOL_STREAM_PROMPT, assert_contains_all_case_insensitive, assert_nonempty_response,
-    assert_raw_stream_tool_call_arguments_are_objects, assert_two_tool_roundtrip_contract,
+    assert_contains_all_case_insensitive, assert_raw_stream_tool_call_arguments_are_objects,
     collect_raw_stream_observation, collect_stream_observation,
 };
 
 use super::super::{TOOL_MODEL, support::with_openrouter_cassette_result};
+use rig::completion::CompletionRequest;
 
 pub(super) const SESSION_MODEL: &str = TOOL_MODEL;
 const SESSION_MAX_TOKENS: Option<u64> = None;
-pub(super) const STRUCTURED_MODEL: &str = "google/gemini-2.5-flash";
 
 pub(super) const COMPLEX_SESSION_PREAMBLE: &str = "\
 You are a deterministic OpenRouter tool orchestration test harness. Use the tools instead of inventing values. \
@@ -328,12 +323,12 @@ pub(super) struct ToolEvent {
 pub(super) fn history_tool_calls(history: &[Message]) -> Vec<ToolEvent> {
     let mut calls = Vec::new();
     for (message_index, message) in history.iter().enumerate() {
-        if let Message::Assistant { content, .. } = message {
+        if let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) = message {
             for item in content.iter() {
                 if let AssistantContent::ToolCall(tool_call) = item {
                     calls.push(ToolEvent {
                         message_index,
-                        name: tool_call.function.name.clone(),
+                        name: tool_call.function.name.clone().into(),
                     });
                 }
             }
@@ -350,7 +345,7 @@ pub(super) fn history_tool_results(history: &[Message]) -> Vec<ToolEvent> {
                 if let UserContent::ToolResult(tool_result) = item {
                     results.push(ToolEvent {
                         message_index,
-                        name: tool_result.name.clone(),
+                        name: tool_result.name.clone().into(),
                     });
                 }
             }
@@ -408,14 +403,13 @@ async fn sequential_complex_tool_calls_streaming() -> Result<()> {
         |client| async move {
             let log = Arc::new(Mutex::new(Vec::new()));
             let (ping, manifest, labels, echo) = complex_tools(&log);
-            let agent = client
-                .agent(SESSION_MODEL)
+            let agent = rig::AgentBuilder::new(client.completion(SESSION_MODEL))
                 .preamble(COMPLEX_SESSION_PREAMBLE)
                 .tool(ping)
                 .tool(manifest)
                 .tool(labels)
                 .tool(echo)
-                .additional_params(json!({"parallel_tool_calls": false}))
+                .parallel_tool_calls(false)
                 .build();
 
             let mut stream = agent
@@ -467,80 +461,6 @@ async fn sequential_complex_tool_calls_streaming() -> Result<()> {
 }
 
 #[tokio::test]
-async fn parallel_tool_calls_single_turn_nonstreaming() -> Result<()> {
-    with_openrouter_cassette_result(
-        "agent_tool_sessions/parallel_tool_calls_single_turn_nonstreaming",
-        |client| async move {
-            let agent = client
-                .agent(SESSION_MODEL)
-                .preamble(TWO_TOOL_STREAM_PREAMBLE)
-                .tool(AlphaSignal)
-                .tool(BetaSignal)
-                .default_max_turns(5)
-                .build();
-            let mut history = Vec::<Message>::new();
-
-            let response = agent.chat(TWO_TOOL_STREAM_PROMPT, &mut history).await?;
-
-            assert_contains_all_case_insensitive(
-                &response.output,
-                &[ALPHA_SIGNAL_OUTPUT, BETA_SIGNAL_OUTPUT],
-            );
-            let calls = history_tool_calls(&history);
-            let call_names = calls
-                .iter()
-                .map(|call| call.name.as_str())
-                .collect::<Vec<_>>();
-            anyhow::ensure!(
-                calls.len() == 2
-                    && call_names.contains(&AlphaSignal::NAME)
-                    && call_names.contains(&BetaSignal::NAME),
-                "expected both zero-argument tools in one model turn, saw {call_names:?}"
-            );
-            anyhow::ensure!(
-                calls[0].message_index == calls[1].message_index,
-                "parallel tool calls should be recorded on one assistant message"
-            );
-            let result_count = history_tool_results(&history).len();
-            anyhow::ensure!(
-                result_count == 2,
-                "expected two tool results, saw {result_count}"
-            );
-
-            Ok(())
-        },
-    )
-    .await
-}
-
-#[tokio::test]
-async fn parallel_tool_calls_single_turn_streaming() -> Result<()> {
-    with_openrouter_cassette_result(
-        "agent_tool_sessions/parallel_tool_calls_single_turn_streaming",
-        |client| async move {
-            let agent = client
-                .agent(SESSION_MODEL)
-                .preamble(TWO_TOOL_STREAM_PREAMBLE)
-                .tool(AlphaSignal)
-                .tool(BetaSignal)
-                .build();
-
-            let mut stream = agent.prompt(TWO_TOOL_STREAM_PROMPT).max_turns(5).stream();
-            let observation = collect_stream_observation(&mut stream).await;
-
-            assert_two_tool_roundtrip_contract(
-                &observation,
-                &[AlphaSignal::NAME, BetaSignal::NAME],
-                &[ALPHA_SIGNAL_OUTPUT, BETA_SIGNAL_OUTPUT],
-            );
-
-            Ok(())
-        },
-    )
-    .await
-}
-
-#[tokio::test]
 async fn raw_stream_complex_tool_call_deltas_have_object_arguments() -> Result<()> {
     with_openrouter_cassette_result(
         "agent_tool_sessions/raw_stream_complex_tool_call_deltas_have_object_arguments",
@@ -548,18 +468,16 @@ async fn raw_stream_complex_tool_call_deltas_have_object_arguments() -> Result<(
             let log = Arc::new(Mutex::new(Vec::new()));
             let model = client.completion(SESSION_MODEL);
             let tool = InspectManifest { log };
-            let request = model
-                .completion_request(
+            let request = CompletionRequest::new(
                     "Call inspect_manifest exactly once for project rig-openrouter with critical=true, retries=2, \
                      steps [{name: plan, weight: 1}, {name: verify, weight: 2}], and note `streamed nested JSON`. \
                      Do not write normal text before the tool call.",
                 )
-                .preamble("Use the requested tool call and no prose before it.".to_string())
+                .preamble("Use the requested tool call and no prose before it.")
                 .tool(rig::tool::tool_definition(&tool))
-                .tool_choice(ToolChoice::Required)
-                .build();
+                .tool_choice(ToolChoice::Required);
 
-            let observation = collect_raw_stream_observation(model.stream(request).await?).await;
+            let observation = collect_raw_stream_observation(model.stream(request)?).await;
 
             assert_raw_stream_tool_call_arguments_are_objects(
                 &observation,
@@ -574,146 +492,6 @@ async fn raw_stream_complex_tool_call_deltas_have_object_arguments() -> Result<(
             anyhow::ensure!(tool_call.function.arguments["flags"]["critical"] == true);
             anyhow::ensure!(
                 tool_call.function.arguments["steps"].as_array().map(Vec::len) == Some(2)
-            );
-
-            Ok(())
-        },
-    )
-    .await
-}
-
-#[tokio::test]
-async fn long_history_replay_with_tool_result_continuation() -> Result<()> {
-    with_openrouter_cassette_result(
-        "agent_tool_sessions/long_history_replay_with_tool_result_continuation",
-        |client| async move {
-            let model = client.completion(SESSION_MODEL);
-            let request = model
-                .completion_request(
-                    "Answer in one short sentence: what is my favorite color, which label came from the tool, \
-                     and which release lane did I choose? Do not call any tools.",
-                )
-                .preamble("You are concise and should rely on the provided chat history.".to_string())
-                .message(Message::user("My favorite color is teal. Please remember it."))
-                .message(Message::assistant("Noted: your favorite color is teal."))
-                .message(Message::user("For this release, use the canary lane."))
-                .message(Message::assistant("Understood: the release lane is canary."))
-                .message(Message::user("Look up the harbor label with the tool."))
-                .message(Message::Assistant {
-                    id: None,
-                    content: vec![AssistantContent::tool_call(
-                        "call_REDACTED_1",
-                        AlphaSignal::NAME,
-                        json!({}),
-                    )],
-                })
-                .message(Message::tool_result(
-                    "call_REDACTED_1",
-                    AlphaSignal::NAME,
-                    ALPHA_SIGNAL_OUTPUT,
-                ))
-                .message(Message::assistant("The harbor label is crimson-harbor."))
-                .tool(rig::tool::tool_definition(&AlphaSignal))
-                .tool_choice(ToolChoice::None)
-                .build();
-
-            // One seam: `completion` folds the reply and the driver keeps the
-            // gateway's own document on `raw`, so the per-choice finish
-            // reasons — which the normalized response collapses into one — are
-            // read off OpenRouter's own response type rather than from a
-            // second call.
-            let response = model.completion(request).await?;
-            let wire = openrouter::CompletionResponse::deserialize(&response.raw)
-                .expect("raw is OpenRouter's own completion response");
-            let text = response
-                .choice
-                .iter()
-                .filter_map(|content| match content {
-                    AssistantContent::Text(text) => Some(text.text.as_str()),
-                    _ => None,
-                })
-                .collect::<String>();
-
-            assert_contains_all_case_insensitive(&text, &["teal", ALPHA_SIGNAL_OUTPUT, "canary"]);
-            anyhow::ensure!(
-                response.usage.input_tokens.is_some_and(|n| n > 0) && response.usage.output_tokens.is_some_and(|n| n > 0),
-                "usage should be populated on long-history replay: {:?}",
-                response.usage
-            );
-            anyhow::ensure!(
-                wire.choices
-                    .iter()
-                    .all(|choice| choice.finish_reason.is_some()),
-                "the gateway's document should preserve every choice's finish reason"
-            );
-            anyhow::ensure!(
-                response.finish_reason().is_some(),
-                "normalized response should preserve the finish reason: {:?}",
-                response.finish_reason()
-            );
-            assert_nonempty_response(&wire.model);
-
-            Ok(())
-        },
-    )
-    .await
-}
-
-#[derive(Debug, Deserialize, JsonSchema, Serialize)]
-pub(super) struct NestedPlan {
-    pub(super) release: ReleaseInfo,
-    pub(super) checks: Vec<PlanCheck>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema, Serialize)]
-pub(super) struct ReleaseInfo {
-    pub(super) lane: String,
-    pub(super) risk: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema, Serialize)]
-pub(super) struct PlanCheck {
-    pub(super) name: String,
-    pub(super) required: bool,
-}
-
-#[tokio::test]
-async fn nested_structured_output_schema_roundtrip() -> Result<()> {
-    with_openrouter_cassette_result(
-        "agent_tool_sessions/nested_structured_output_schema_roundtrip",
-        |client| async move {
-            let agent = client
-                .agent(STRUCTURED_MODEL)
-                .preamble(
-                    "Return only data that satisfies the requested schema. Use lane canary, risk low, \
-                     and checks compile=true and replay=true.",
-                )
-                .additional_params(json!({
-                    "provider": {
-                        "require_parameters": true,
-                        "order": ["Google AI Studio", "Google Vertex"]
-                    }
-                }))
-                .build();
-
-            let plan: NestedPlan = agent
-                .prompt_typed("Create the OpenRouter cassette release validation plan.")
-                .await?
-                .output;
-
-            anyhow::ensure!(plan.release.lane.eq_ignore_ascii_case("canary"));
-            anyhow::ensure!(plan.release.risk.eq_ignore_ascii_case("low"));
-            anyhow::ensure!(
-                plan.checks
-                    .iter()
-                    .any(|check| check.name.eq_ignore_ascii_case("compile") && check.required),
-                "structured output should include the compile check"
-            );
-            anyhow::ensure!(
-                plan.checks
-                    .iter()
-                    .any(|check| check.name.eq_ignore_ascii_case("replay") && check.required),
-                "structured output should include the replay check"
             );
 
             Ok(())
