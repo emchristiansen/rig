@@ -420,7 +420,10 @@ async fn a_success_status_the_driver_does_not_stream_is_refused_whole_and_not_ca
         }
         body
     };
-    for body in [terminal_and_tail, many_events] {
+    // Longer than the driver keeps of a refused reply; what it keeps is
+    // the same with and without the observer.
+    let long = "x".repeat((1 << 20) + 1);
+    for body in [terminal_and_tail, many_events, long] {
         let refusing = || {
             let mut headers = http::HeaderMap::new();
             headers.insert(
@@ -436,7 +439,8 @@ async fn a_success_status_the_driver_does_not_stream_is_refused_whole_and_not_ca
         let expected = ordinary(&refusing())
             .await
             .expect_err("the reply is refused");
-        assert_eq!(expected.provider_response_body(), Some(body.as_str()));
+        let kept = body.get(..1 << 20).unwrap_or(&body);
+        assert_eq!(expected.provider_response_body(), Some(kept));
 
         let (observation, writer) = Observation::prepare();
         let mut stream = wire()
@@ -452,21 +456,52 @@ async fn a_success_status_the_driver_does_not_stream_is_refused_whole_and_not_ca
             assert!(view.capture_fault.is_none());
             let error = view.native_error.expect("Rig's error is kept");
             assert_eq!(error.provider_response_status(), Some(StatusCode::CREATED));
-            assert_eq!(error.provider_response_body(), Some(body.as_str()));
+            assert_eq!(error.provider_response_body(), Some(kept));
             assert_eq!(error.to_string(), expected.to_string());
             assert_eq!(error.report(), expected.report());
         });
     }
 }
 
-/// The ledger of a failed call holds the frame Rig's decoder refused, and
-/// does not end with it when other frames arrived in the same chunk: every
-/// event a chunk completes is committed, up to the first terminal, before
-/// Rig decodes any of them. So the last string does not name the failure,
-/// and a terminal event in the ledger of a failed call does not say the
-/// call succeeded; the stage does.
+/// A 200 reply whose content type is not `text/event-stream` is one the
+/// driver refuses without reading: none of it is captured, and the failure
+/// is the one an ordinary stream reports.
 #[tokio::test]
-async fn frames_that_follow_a_refused_frame_in_its_chunk_are_committed_too() {
+async fn a_reply_of_another_content_type_is_refused_and_not_captured() {
+    let replying = || {
+        SequencedHttpClient::new([MockHttpResponse::success_typed(
+            sse(&turn_data()),
+            "text/html",
+        )])
+    };
+    let expected = ordinary(&replying())
+        .await
+        .expect_err("the reply is refused");
+    let (observation, writer) = Observation::prepare();
+    let mut stream = wire()
+        .raw_stream_observed(&replying(), CompletionRequest::new("say hi"), writer)
+        .expect("the request encodes");
+    let items = drain(&mut stream).await;
+    assert!(matches!(items.as_slice(), [Err(_)]), "{items:?}");
+    observation.inspect(|view| {
+        let head = view.reply_head.expect("the reply's head");
+        assert_eq!(head.status, StatusCode::OK);
+        assert!(!head.accepted_sse);
+        assert!(view.committed_prefix.is_empty());
+        assert!(view.capture_fault.is_none());
+        let error = view.native_error.expect("Rig's error is kept");
+        assert_eq!(error.to_string(), expected.to_string());
+        assert_eq!(error.report(), expected.report());
+    });
+}
+
+/// The ledger holds exactly the frames Rig's decoder was given. A frame the
+/// decoder refuses is the ledger's last string, whatever followed it in the
+/// chunk that carried it: the reply is handed on an event at a time, and
+/// the driver stops reading at the refused frame. So no frame after the
+/// failure is committed, a terminal event least of all.
+#[tokio::test]
+async fn the_ledger_of_a_failed_call_ends_with_the_frame_the_decoder_refused() {
     let refused = "{nope}".to_owned();
     let mut data = turn_data();
     data.insert(1, refused.clone());
@@ -483,19 +518,68 @@ async fn frames_that_follow_a_refused_frame_in_its_chunk_are_committed_too() {
     assert_eq!(failure.kind, ObservedFailureKind::Stream);
     observation.inspect(|view| {
         assert_eq!(view.stage, ObservationStage::NativeFailed);
+        assert!(
+            matches!(view.native_error, Some(ProviderError::Json(_))),
+            "Rig's decoder refused the frame itself: {:?}",
+            view.native_error
+        );
         assert_eq!(
             view.committed_prefix,
-            data.as_slice(),
-            "the refused frame, and the frames after it through the terminal"
-        );
-        assert_eq!(view.committed_prefix.get(1), Some(&refused));
-        assert!(
-            view.committed_prefix
-                .last()
-                .is_some_and(|last| last.contains("response.completed")),
-            "the ledger ends with a terminal the decoder never reached"
+            [data[0].clone(), refused.clone()],
+            "the frames the decoder was given, ending with the one it refused"
         );
     });
+}
+
+/// The observed body hands the reply on with its bytes unchanged and in
+/// order, in pieces that each complete at most one event, and commits an
+/// event before its piece is handed on. It ends with the piece that
+/// completes the first terminal: bytes after it in the same chunk are not
+/// handed on.
+#[tokio::test]
+async fn the_observed_body_hands_the_reply_on_an_event_at_a_time() {
+    let data = turn_data();
+    let mut reply = sse(&data).to_vec();
+    let through_terminal = reply.len();
+    reply.extend_from_slice(b"data: {\"type\":\"response.done\"}\n\n");
+    // Chunks that split an event, hold several events, and run past the
+    // terminal.
+    let cut = [7, reply.len() / 3, reply.len() / 2];
+    let mut chunks = Vec::new();
+    let mut from = 0;
+    for at in cut {
+        chunks.push(reply[from..at].to_vec());
+        from = at;
+    }
+    chunks.push(reply[from..].to_vec());
+
+    let (observation, _writer) = Observation::prepare();
+    let mut body = observed_body(chunks, &observation);
+    let mut handed_on = Vec::new();
+    let mut committed_before = 0;
+    while let Some(piece) = body.next().await {
+        handed_on.extend_from_slice(&piece.expect("reads"));
+        let committed = observation.inspect(|view| view.committed_prefix.len());
+        assert!(
+            committed <= committed_before + 1,
+            "a piece completes at most one event"
+        );
+        let cut_so_far = Framing::Sse
+            .framer()
+            .map(|mut framer| framer.push(&handed_on).count());
+        assert_eq!(
+            cut_so_far,
+            Some(committed),
+            "what is committed is what the bytes handed on complete"
+        );
+        committed_before = committed;
+    }
+    assert_eq!(
+        handed_on,
+        reply[..through_terminal],
+        "the reply's bytes through the terminal, and none after it"
+    );
+    observation.inspect(|view| assert_eq!(view.committed_prefix, data.as_slice()));
 }
 
 /// Dropping the stream before its end records a cancelled operation and
@@ -576,6 +660,7 @@ fn observed_body(chunks: Vec<Vec<u8>>, observation: &ObservationHandle) -> Obser
         .into_iter()
         .map(|chunk| Ok::<_, http_client::Error>(Bytes::from(chunk)));
     ObservedBody {
+        pending: Bytes::new(),
         body: Box::pin(futures::stream::iter(chunks)),
         framer: Framing::Sse
             .framer()

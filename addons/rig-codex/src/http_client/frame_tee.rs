@@ -50,7 +50,7 @@
 //! ```
 
 use crate::error::FrameEvidence;
-use crate::frame_tee::{RetainedFrames, driver_streams};
+use crate::frame_tee::{RetainedFrames, driver_streams, first_line};
 use bytes::Bytes;
 use futures::Stream;
 use rig_http::http_client::framing::{Framer, Framing, WireFrame};
@@ -242,17 +242,6 @@ impl Utf8Watch {
     /// Whether the body, now ended, was valid UTF-8 to its last byte.
     fn exact_at_end(&self) -> bool {
         !self.invalid && self.partial.is_empty()
-    }
-}
-
-/// The length of the first line of `bytes` with its line end: through a
-/// line feed, a carriage return and the line feed after it, or a carriage
-/// return alone. All of `bytes` when it holds no line end.
-fn first_line(bytes: &[u8]) -> usize {
-    match bytes.iter().position(|byte| matches!(byte, b'\n' | b'\r')) {
-        Some(at) if bytes.get(at) == Some(&b'\r') && bytes.get(at + 1) == Some(&b'\n') => at + 2,
-        Some(at) => at + 1,
-        None => bytes.len(),
     }
 }
 
