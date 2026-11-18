@@ -123,6 +123,21 @@ impl<F: Clone> RetainedFrames<F> {
     }
 }
 
+/// The length of the first line of `bytes` with its line end: through a
+/// line feed, a carriage return and the line feed after it, or a carriage
+/// return alone. All of `bytes` when it holds no line end.
+///
+/// Rig's incremental framers complete a frame only at a line end, so a
+/// wrapper that feeds a chunk to one line by line finds the byte where each
+/// frame ends, and can hand the chunk on a frame at a time.
+pub(crate) fn first_line(bytes: &[u8]) -> usize {
+    match bytes.iter().position(|byte| matches!(byte, b'\n' | b'\r')) {
+        Some(at) if bytes.get(at) == Some(&b'\r') && bytes.get(at + 1) == Some(&b'\n') => at + 2,
+        Some(at) => at + 1,
+        None => bytes.len(),
+    }
+}
+
 impl FrameEvidence {
     /// The evidence a websocket frame is of itself: its text or its bytes,
     /// exactly as received. `None` for a ping, a pong or a close, which carry

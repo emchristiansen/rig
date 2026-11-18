@@ -350,9 +350,7 @@ async fn a_refused_reply_is_a_stream_failure_with_its_head_and_no_captured_strin
 }
 
 /// A frame of a modelled type that fails to decode is committed, exactly as
-/// supplied, before it fails the stream. Here it is the reply's last frame,
-/// so it is the ledger's last string; the test below shows that is not so
-/// in general.
+/// supplied, before it fails the stream.
 #[tokio::test]
 async fn a_corrupt_frame_is_committed_before_it_fails_the_stream() {
     let malformed = crate::responses_api::corrupt_frame_fixtures::MALFORMED_KNOWN_FRAMES[0].frame;
@@ -377,14 +375,13 @@ async fn a_corrupt_frame_is_committed_before_it_fails_the_stream() {
     });
 }
 
-/// The ledger of a failed call holds the frame Rig's decoder refused, and
-/// does not end with it when other frames arrived in the same chunk: every
-/// event a chunk completes is committed, up to the first terminal, before
-/// Rig decodes any of them. So the last string does not name the failure,
-/// and a terminal event in the ledger of a failed call does not say the
-/// call succeeded; the stage does.
+/// The ledger holds exactly the frames Rig's decoder was given. A frame the
+/// decoder refuses is the ledger's last string, whatever followed it in the
+/// chunk that carried it: the reply is handed on an event at a time, and
+/// the driver stops reading at the refused frame. So no frame after the
+/// failure is committed, a terminal event least of all.
 #[tokio::test]
-async fn frames_that_follow_a_refused_frame_in_its_chunk_are_committed_too() {
+async fn the_ledger_of_a_failed_call_ends_with_the_frame_the_decoder_refused() {
     let refused = "{nope}".to_owned();
     let mut data = turn_data();
     data.insert(1, refused.clone());
@@ -403,17 +400,61 @@ async fn frames_that_follow_a_refused_frame_in_its_chunk_are_committed_too() {
         assert_eq!(view.stage, ObservationStage::NativeFailed);
         assert_eq!(
             view.committed_prefix,
-            data.as_slice(),
-            "the refused frame, and the frames after it through the terminal"
-        );
-        assert_eq!(view.committed_prefix.get(1), Some(&refused));
-        assert!(
-            view.committed_prefix
-                .last()
-                .is_some_and(|last| last.contains("response.completed")),
-            "the ledger ends with a terminal the decoder never reached"
+            [data[0].clone(), refused.clone()],
+            "the frames the decoder was given, ending with the one it refused"
         );
     });
+}
+
+/// The observed body hands the reply on with its bytes unchanged and in
+/// order, in pieces that each complete at most one event, and commits an
+/// event before its piece is handed on. It ends with the piece that
+/// completes the first terminal: bytes after it in the same chunk are not
+/// handed on.
+#[tokio::test]
+async fn the_observed_body_hands_the_reply_on_an_event_at_a_time() {
+    let data = turn_data();
+    let mut reply = sse(&data).to_vec();
+    let through_terminal = reply.len();
+    reply.extend_from_slice(b"data: {\"type\":\"response.done\"}\n\n");
+    // Chunks that split an event, hold several events, and run past the
+    // terminal.
+    let cut = [7, reply.len() / 3, reply.len() / 2];
+    let mut chunks = Vec::new();
+    let mut from = 0;
+    for at in cut {
+        chunks.push(reply[from..at].to_vec());
+        from = at;
+    }
+    chunks.push(reply[from..].to_vec());
+
+    let (observation, _writer) = Observation::prepare();
+    let mut body = observed_body(chunks, &observation);
+    let mut handed_on = Vec::new();
+    let mut committed_before = 0;
+    while let Some(piece) = body.next().await {
+        handed_on.extend_from_slice(&piece.expect("reads"));
+        let committed = observation.inspect(|view| view.committed_prefix.len());
+        assert!(
+            committed <= committed_before + 1,
+            "a piece completes at most one event"
+        );
+        let cut_so_far = Framing::Sse
+            .framer()
+            .map(|mut framer| framer.push(&handed_on).count());
+        assert_eq!(
+            cut_so_far,
+            Some(committed),
+            "what is committed is what the bytes handed on complete"
+        );
+        committed_before = committed;
+    }
+    assert_eq!(
+        handed_on,
+        reply[..through_terminal],
+        "the reply's bytes through the terminal, and none after it"
+    );
+    observation.inspect(|view| assert_eq!(view.committed_prefix, data.as_slice()));
 }
 
 /// Dropping the stream before its end records a cancelled operation and
@@ -494,6 +535,7 @@ fn observed_body(chunks: Vec<Vec<u8>>, observation: &ObservationHandle) -> Obser
         .into_iter()
         .map(|chunk| Ok::<_, http_client::Error>(Bytes::from(chunk)));
     ObservedBody {
+        pending: Bytes::new(),
         body: Box::pin(futures::stream::iter(chunks)),
         framer: Framing::Sse
             .framer()

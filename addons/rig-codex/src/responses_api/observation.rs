@@ -22,6 +22,7 @@
 //! });
 //! ```
 
+use crate::frame_tee::first_line;
 use crate::http_client::CodexHttpClient;
 use crate::responses_api::streaming::{
     DecodedFrame, ResponseChunkKind, StreamingCompletionChunk, decode_frame,
@@ -704,6 +705,7 @@ impl<H: HttpClientExt> HttpClientExt for ObservingHttpClient<H> {
             let body: BoxedStream = match Framing::Sse.framer() {
                 Some(framer) if accepted => Box::pin(ObservedBody {
                     body,
+                    pending: Bytes::new(),
                     framer,
                     partial: Vec::new(),
                     observation,
@@ -716,12 +718,21 @@ impl<H: HttpClientExt> HttpClientExt for ObservingHttpClient<H> {
     }
 }
 
-/// A streamed body that commits each server-sent event its chunks complete,
-/// and ends after the first terminal response event.
+/// A streamed body that commits each server-sent event its bytes complete,
+/// hands the bytes on in pieces that each complete at most one event, and
+/// ends after the first terminal response event.
+///
+/// Rig's driver decodes every frame of a chunk before it asks for the next
+/// chunk. So an event is committed, and its piece handed on, only after the
+/// driver has decoded every event before it: the ledger holds exactly the
+/// frames Rig's decoder was given, and when the decoder refuses one, that
+/// frame is the ledger's last string.
 struct ObservedBody {
     body: BoxedStream,
+    /// What is left of the transport's last chunk, not yet handed on.
+    pending: Bytes,
     framer: Framer,
-    /// The bytes of a UTF-8 sequence the last chunk left unfinished.
+    /// The bytes of a UTF-8 sequence the last line left unfinished.
     partial: Vec<u8>,
     observation: ObservationHandle,
     ended: bool,
@@ -732,6 +743,56 @@ impl ObservedBody {
     fn fail(&mut self, error: ObservedReplyError) -> Poll<Option<http_client::Result<Bytes>>> {
         self.ended = true;
         Poll::Ready(Some(Err(http_client::Error::Instance(Box::new(error)))))
+    }
+
+    /// Take the next piece of the pending chunk: its bytes through the line
+    /// that completes its first event, or all of it when it completes none.
+    /// The event, when there is one, is committed first.
+    fn next_piece(&mut self) -> Poll<Option<http_client::Result<Bytes>>> {
+        let chunk = std::mem::take(&mut self.pending);
+        let mut end = 0;
+        while let Some(rest) = chunk.get(end..).filter(|rest| !rest.is_empty()) {
+            let line = rest.get(..first_line(rest)).unwrap_or(rest);
+            end += line.len();
+            // The framer reads bytes that are not UTF-8 as replacement
+            // text, so only whole UTF-8 reaches it: a sequence a line
+            // leaves unfinished waits for the next, and an invalid one
+            // fails the reply once the events before it are committed.
+            let mut bytes = std::mem::take(&mut self.partial);
+            bytes.extend_from_slice(line);
+            let (whole, invalid) = match std::str::from_utf8(&bytes) {
+                Ok(_) => (bytes.len(), false),
+                Err(error) => (error.valid_up_to(), error.error_len().is_some()),
+            };
+            let (text, unfinished) = bytes.split_at(whole);
+            let frames: Vec<WireFrame> = self.framer.push(text).collect();
+            let mut committed = false;
+            for frame in frames {
+                let WireFrame::Text(data) = frame else {
+                    return self.fail(ObservedReplyError::NotUtf8);
+                };
+                let terminal = is_terminal(&data);
+                // Commit the complete source string before Rig classifies it.
+                if self.observation.append(data).is_err() {
+                    return self.fail(ObservedReplyError::Capture);
+                }
+                committed = true;
+                // The piece that completed the terminal is handed on;
+                // nothing after it is read.
+                self.ended |= terminal;
+            }
+            if invalid {
+                return self.fail(ObservedReplyError::NotUtf8);
+            }
+            self.partial = unfinished.to_vec();
+            if committed {
+                break;
+            }
+        }
+        if !self.ended {
+            self.pending = chunk.slice(end..);
+        }
+        Poll::Ready(Some(Ok(chunk.slice(..end))))
     }
 }
 
@@ -757,42 +818,13 @@ impl Stream for ObservedBody {
         if this.ended {
             return Poll::Ready(None);
         }
-        let next = this.body.as_mut().poll_next(cx);
-        if let Poll::Ready(Some(Ok(chunk))) = &next {
-            // The framer reads bytes that are not UTF-8 as replacement
-            // text, so only whole UTF-8 reaches it: a sequence a chunk
-            // leaves unfinished waits for the next, and an invalid one
-            // fails the reply once the events before it are committed.
-            let mut bytes = std::mem::take(&mut this.partial);
-            bytes.extend_from_slice(chunk);
-            let (whole, invalid) = match std::str::from_utf8(&bytes) {
-                Ok(_) => (bytes.len(), false),
-                Err(error) => (error.valid_up_to(), error.error_len().is_some()),
-            };
-            let (text, rest) = bytes.split_at(whole);
-            let frames: Vec<WireFrame> = this.framer.push(text).collect();
-            for frame in frames {
-                let WireFrame::Text(data) = frame else {
-                    return this.fail(ObservedReplyError::NotUtf8);
-                };
-                let terminal = is_terminal(&data);
-                // Commit the complete source string before Rig classifies it.
-                if this.observation.append(data).is_err() {
-                    return this.fail(ObservedReplyError::Capture);
-                }
-                if terminal {
-                    // The chunk that completed the terminal is handed on;
-                    // nothing after it is read.
-                    this.ended = true;
-                    return next;
-                }
+        if this.pending.is_empty() {
+            match this.body.as_mut().poll_next(cx) {
+                Poll::Ready(Some(Ok(chunk))) => this.pending = chunk,
+                other => return other,
             }
-            if invalid {
-                return this.fail(ObservedReplyError::NotUtf8);
-            }
-            this.partial = rest.to_vec();
         }
-        next
+        this.next_piece()
     }
 }
 
