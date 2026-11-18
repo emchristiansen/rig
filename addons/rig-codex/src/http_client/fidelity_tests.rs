@@ -126,8 +126,10 @@ async fn the_codex_lane_sends_the_pinned_body() {
 /// The conversation identity on the wire states the same cache key and
 /// metadata a caller would: the same JSON value with `input` last in any
 /// build, and the same bytes in a build that sorts keys. A build that keeps
-/// insertion order writes the identity's fields after the caller's, and a
-/// caller's own wherever the caller stated them.
+/// insertion order has no one place a caller's own fields go, since it
+/// writes them where the caller stated them; there the wire writes the
+/// identity's two fields last before `input`, the cache key first, so they
+/// are part of the bytes a conversation's requests share.
 #[tokio::test]
 async fn an_identity_on_the_wire_states_what_the_caller_would() {
     let mut request = muninn_shaped_request();
@@ -151,7 +153,15 @@ async fn an_identity_on_the_wire_states_what_the_caller_would() {
             "`input` is the last field: {body}"
         );
     }
-    if !preserves_order() {
+    if preserves_order() {
+        assert!(
+            body.ends_with(&format!(
+                r#","prompt_cache_key":"thread-7","client_metadata":{{"session_id":"session-7","thread_id":"thread-7"}},"input":{}}}"#,
+                raw_fields(&body)["input"].get()
+            )),
+            "the identity's fields are the last before `input`: {body}"
+        );
+    } else {
         assert_eq!(body, stated);
     }
 }
