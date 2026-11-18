@@ -420,7 +420,10 @@ async fn a_success_status_the_driver_does_not_stream_is_refused_whole_and_not_ca
         }
         body
     };
-    for body in [terminal_and_tail, many_events] {
+    // Longer than the driver keeps of a refused reply; what it keeps is
+    // the same with and without the observer.
+    let long = "x".repeat((1 << 20) + 1);
+    for body in [terminal_and_tail, many_events, long] {
         let refusing = || {
             let mut headers = http::HeaderMap::new();
             headers.insert(
@@ -436,7 +439,8 @@ async fn a_success_status_the_driver_does_not_stream_is_refused_whole_and_not_ca
         let expected = ordinary(&refusing())
             .await
             .expect_err("the reply is refused");
-        assert_eq!(expected.provider_response_body(), Some(body.as_str()));
+        let kept = body.get(..1 << 20).unwrap_or(&body);
+        assert_eq!(expected.provider_response_body(), Some(kept));
 
         let (observation, writer) = Observation::prepare();
         let mut stream = wire()
@@ -452,11 +456,43 @@ async fn a_success_status_the_driver_does_not_stream_is_refused_whole_and_not_ca
             assert!(view.capture_fault.is_none());
             let error = view.native_error.expect("Rig's error is kept");
             assert_eq!(error.provider_response_status(), Some(StatusCode::CREATED));
-            assert_eq!(error.provider_response_body(), Some(body.as_str()));
+            assert_eq!(error.provider_response_body(), Some(kept));
             assert_eq!(error.to_string(), expected.to_string());
             assert_eq!(error.report(), expected.report());
         });
     }
+}
+
+/// A 200 reply whose content type is not `text/event-stream` is one the
+/// driver refuses without reading: none of it is captured, and the failure
+/// is the one an ordinary stream reports.
+#[tokio::test]
+async fn a_reply_of_another_content_type_is_refused_and_not_captured() {
+    let replying = || {
+        SequencedHttpClient::new([MockHttpResponse::success_typed(
+            sse(&turn_data()),
+            "text/html",
+        )])
+    };
+    let expected = ordinary(&replying())
+        .await
+        .expect_err("the reply is refused");
+    let (observation, writer) = Observation::prepare();
+    let mut stream = wire()
+        .raw_stream_observed(&replying(), CompletionRequest::new("say hi"), writer)
+        .expect("the request encodes");
+    let items = drain(&mut stream).await;
+    assert!(matches!(items.as_slice(), [Err(_)]), "{items:?}");
+    observation.inspect(|view| {
+        let head = view.reply_head.expect("the reply's head");
+        assert_eq!(head.status, StatusCode::OK);
+        assert!(!head.accepted_sse);
+        assert!(view.committed_prefix.is_empty());
+        assert!(view.capture_fault.is_none());
+        let error = view.native_error.expect("Rig's error is kept");
+        assert_eq!(error.to_string(), expected.to_string());
+        assert_eq!(error.report(), expected.report());
+    });
 }
 
 /// The ledger holds exactly the frames Rig's decoder was given. A frame the
@@ -482,6 +518,11 @@ async fn the_ledger_of_a_failed_call_ends_with_the_frame_the_decoder_refused() {
     assert_eq!(failure.kind, ObservedFailureKind::Stream);
     observation.inspect(|view| {
         assert_eq!(view.stage, ObservationStage::NativeFailed);
+        assert!(
+            matches!(view.native_error, Some(ProviderError::Json(_))),
+            "Rig's decoder refused the frame itself: {:?}",
+            view.native_error
+        );
         assert_eq!(
             view.committed_prefix,
             [data[0].clone(), refused.clone()],

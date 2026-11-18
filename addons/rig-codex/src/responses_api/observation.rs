@@ -728,6 +728,10 @@ impl<H: HttpClientExt> HttpClientExt for ObservingHttpClient<H> {
 /// driver has decoded every event before it: the ledger holds exactly the
 /// frames Rig's decoder was given, and when the decoder refuses one, that
 /// frame is the ledger's last string.
+///
+/// Only a reply the driver streams is given this body (`accepted_sse`). A
+/// reply it refuses is read into its error by another reader, which counts
+/// chunks and decodes nothing, and is left as the transport delivered it.
 struct ObservedBody {
     body: BoxedStream,
     /// What is left of the transport's last chunk, not yet handed on.
