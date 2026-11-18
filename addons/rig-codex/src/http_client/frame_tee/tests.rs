@@ -7,6 +7,7 @@ use crate::responses_api::wire::CodexResponses;
 use crate::wire::CallerIdentity;
 use futures::StreamExt as _;
 use rig_core::Model;
+use rig_core::ProviderError;
 use rig_core::completion::CompletionRequest;
 use rig_core::providers::chatgpt;
 use rig_core::providers::openai::OpenAIConfig;
@@ -40,7 +41,7 @@ async fn drained(response: StreamingResponse) -> Vec<Result<Bytes>> {
 
 /// Each server-sent event's data is kept exactly as sent, whatever chunk
 /// boundaries it crossed; a heartbeat is not a frame; and the bytes handed on
-/// are the transport's own.
+/// are the transport's own, a chunk that completes two frames as two pieces.
 #[tokio::test]
 async fn a_streamed_reply_keeps_each_events_data_as_sent() {
     let chunks = [
@@ -63,9 +64,21 @@ async fn a_streamed_reply_keeps_each_events_data_as_sent() {
         .map(|chunk| chunk.expect("a chunk"))
         .collect();
     assert_eq!(
-        handed_on,
-        chunks.map(Bytes::from_static),
+        handed_on.concat(),
+        chunks.concat(),
         "the bytes handed on are the transport's own"
+    );
+    assert_eq!(
+        handed_on,
+        [
+            &b"data: {\"a\" : 1,  \"b\":[ ]}\n\n"[..],
+            &b"da"[..],
+            &b"ta: second\n\n"[..],
+            &b"data:  \n\n"[..],
+            &b"data: [DONE]\n\n"[..],
+        ]
+        .map(Bytes::from_static),
+        "a piece ends where a frame does, or where the transport's chunk does"
     );
     assert_eq!(
         kept.snapshot(),
@@ -78,8 +91,8 @@ async fn a_streamed_reply_keeps_each_events_data_as_sent() {
     assert_eq!(kept.last(), Some(text("[DONE]")));
 }
 
-/// The tee holds its capacity of most recent frames, and every frame of the
-/// chunk it last handed on even when that is more.
+/// The tee never holds more than its capacity of frames, however many one
+/// chunk completes: a chunk is handed on a frame at a time.
 #[tokio::test]
 async fn a_streamed_reply_keeps_only_its_most_recent_frames() {
     let transport = SequencedStreamingHttpClient::new(vec![
@@ -93,9 +106,8 @@ async fn a_streamed_reply_keeps_only_its_most_recent_frames() {
     assert_eq!(kept.take(), [text("2"), text("3")]);
     assert_eq!(kept.capacity(), capacity(2));
 
-    // One chunk that completes three frames: all three are kept while it
-    // is the chunk in hand, and the next chunk brings the store back to
-    // capacity.
+    // One chunk that completes three frames arrives as three pieces, and
+    // the store holds two frames at most after each.
     let transport = SequencedStreamingHttpClient::new(vec![
         chunk(b"data: 1\n\ndata: 2\n\ndata: 3\n\n"),
         chunk(b"data: 4\n\n"),
@@ -107,10 +119,88 @@ async fn a_streamed_reply_keeps_only_its_most_recent_frames() {
         .await
         .expect("the reply opens")
         .into_body();
-    body.next().await.expect("a chunk").expect("reads");
-    assert_eq!(kept.snapshot(), [text("1"), text("2"), text("3")]);
-    body.next().await.expect("a chunk").expect("reads");
-    assert_eq!(kept.snapshot(), [text("3"), text("4")]);
+    let mut seen = Vec::new();
+    while let Some(piece) = body.next().await {
+        seen.push((piece.expect("reads"), kept.snapshot()));
+    }
+    assert_eq!(
+        seen,
+        [
+            (Bytes::from_static(b"data: 1\n\n"), vec![text("1")]),
+            (
+                Bytes::from_static(b"data: 2\n\n"),
+                vec![text("1"), text("2")]
+            ),
+            (
+                Bytes::from_static(b"data: 3\n\n"),
+                vec![text("2"), text("3")]
+            ),
+            (
+                Bytes::from_static(b"data: 4\n\n"),
+                vec![text("3"), text("4")]
+            ),
+        ]
+    );
+}
+
+/// A reply is handed on with its bytes unchanged and in order, in pieces
+/// that each complete at most one frame, whatever the transport's chunks:
+/// several events in one chunk, an event across chunks, heartbeats and
+/// comments that are no frame, and each spelling of a line end. The frames
+/// kept are the frames Rig's framer cuts from the whole reply.
+#[tokio::test]
+async fn a_reply_is_handed_on_a_frame_at_a_time_with_its_bytes_unchanged() {
+    let chunks: [&'static [u8]; 6] = [
+        b": comment\n\ndata: 1\n\ndata:\n\ndata: 2\r\n\r\ndata: 3\r\rda",
+        b"ta: 4\nid: 9\n",
+        b"\ndata: 5\r",
+        b"\n\r",
+        b"\nevent: x\ndata: 6\ndata: 7\n\ndata: 8\n\n",
+        b"data: unfinished",
+    ];
+    let whole: Vec<u8> = chunks.concat();
+    let expected: Vec<FrameEvidence> = Framing::Sse
+        .split(&whole)
+        .into_iter()
+        .map(|frame| text(&frame.as_str()))
+        .collect();
+    assert_eq!(expected.len(), 7, "the fixture's frames: {expected:?}");
+
+    for frames in [1, 3, 64] {
+        let transport =
+            SequencedStreamingHttpClient::new(chunks.iter().map(|bytes| chunk(bytes)).collect());
+        let tee = HttpFrameTee::new(transport, Framing::Sse, capacity(frames));
+        let kept = tee.frames();
+        let mut body = tee
+            .send_streaming(get())
+            .await
+            .expect("the reply opens")
+            .into_body();
+        let mut handed_on = Vec::new();
+        let mut all = Vec::new();
+        while let Some(piece) = body.next().await {
+            handed_on.extend_from_slice(&piece.expect("reads"));
+            let now = kept.snapshot();
+            assert!(now.len() <= frames, "capacity {frames}: holds {now:?}");
+            let newest = now.last().cloned();
+            if newest.is_some() && newest.as_ref() != all.last() {
+                all.extend(newest);
+            }
+            let cut_so_far = Framing::Sse
+                .framer()
+                .map(|mut framer| framer.push(&handed_on).count());
+            assert_eq!(
+                cut_so_far,
+                Some(all.len()),
+                "capacity {frames}: each piece completes at most one frame"
+            );
+        }
+        assert_eq!(handed_on, whole, "capacity {frames}: the bytes handed on");
+        assert_eq!(
+            all, expected,
+            "capacity {frames}: the frames kept, in order"
+        );
+    }
 }
 
 /// A transport failure mid-reply is handed on as it is, and the frames cut
@@ -126,7 +216,8 @@ async fn a_failed_stream_keeps_the_frames_cut_before_it_failed() {
     let chunks = drained(tee.send_streaming(get()).await.expect("the reply opens")).await;
     assert!(matches!(
         chunks.as_slice(),
-        [Ok(_), Err(Error::StreamEnded)]
+        [Ok(first), Ok(rest), Err(Error::StreamEnded)]
+            if first == &b"data: first\n\n"[..] && rest == &b"data: unfin"[..]
     ));
     assert_eq!(
         kept.snapshot(),
@@ -271,7 +362,37 @@ async fn a_frame_rigs_decoder_refuses_is_kept_as_the_provider_sent_it() {
     assert_the_malformed_frame_was_kept(&kept.snapshot());
 }
 
-/// The same holds for a call the driver reads as one body.
+/// A unary body arrives whole, so its frames are cut together and all of
+/// them are kept, whatever the capacity: nothing says which one a failure
+/// would be about. They are held until taken.
+#[tokio::test]
+async fn a_unary_reply_keeps_every_frame_of_its_body_whatever_the_capacity() {
+    let mut events = String::new();
+    for index in 0..1000 {
+        events.push_str(&format!("data: {index}\n\n"));
+    }
+    let tee = HttpFrameTee::new(
+        RecordingHttpClient::new(Bytes::from(events)),
+        Framing::Sse,
+        capacity(2),
+    );
+    let kept = tee.frames();
+    let response = tee.send::<Bytes, Bytes>(get()).await.expect("answers");
+    response.into_body().await.expect("the body reads");
+    let frames = kept.snapshot();
+    assert_eq!(
+        frames.len(),
+        1000,
+        "every frame of the body, beyond capacity 2"
+    );
+    assert_eq!(frames.first(), Some(&text("0")));
+    assert_eq!(frames.last(), Some(&text("999")));
+    assert_eq!(kept.take().len(), 1000);
+    assert!(kept.snapshot().is_empty(), "taken, the store holds nothing");
+}
+
+/// The same holds for a call the driver reads as one body: the refused
+/// frame is among the kept frames wherever in the body it stands.
 #[tokio::test]
 async fn a_frame_rigs_decoder_refuses_in_a_unary_call_is_kept_too() {
     let wire = codex_wire();
@@ -379,31 +500,55 @@ async fn replacement_decoded_text_is_not_kept_as_exact() {
     );
 }
 
-/// A frame Rig's decoder refuses is still kept when the failure surfaces,
-/// however many frames followed it in the chunk that carried it and
-/// whatever the capacity: the frames of the chunk being handed on are never
-/// dropped for capacity.
+/// A frame Rig's decoder refuses is the newest kept frame when the failure
+/// surfaces, however many frames followed it in the chunk that carried it
+/// and whatever the capacity: the driver stops reading at the refused
+/// frame, and no frame after it was cut. The store holds no more than its
+/// capacity throughout.
 #[tokio::test]
-async fn the_refused_frame_is_kept_when_frames_follow_it_in_its_chunk() {
-    let malformed = MALFORMED_KNOWN_FRAMES[0].frame;
+async fn the_refused_frame_is_the_newest_kept_whatever_follows_it_in_its_chunk() {
+    // Not JSON, so Rig's decoder refuses it where it stands; a frame Rig
+    // can read but this crate's typed decoding cannot would instead fail
+    // the reply at its end, after every later frame was read.
+    let refused = r#"{nope}"#;
     let trailing = r#"{"type":"future.event"}"#;
+    let mut reply = format!("data: {CREATED}\n\ndata: {refused}\n\n");
+    for _ in 0..1000 {
+        reply.push_str(&format!("data: {trailing}\n\n"));
+    }
     for frames in [1, 8] {
-        let mut reply = format!("data: {CREATED}\n\ndata: {malformed}\n\n");
-        for _ in 0..9 {
-            reply.push_str(&format!("data: {trailing}\n\n"));
+        let wire = codex_wire();
+        let tee = HttpFrameTee::new(
+            SequencedStreamingHttpClient::new(vec![Ok(Bytes::from(reply.clone()))]),
+            Framing::Sse,
+            capacity(frames),
+        );
+        let kept = tee.frames();
+        let model = Model::new(wire.clone(), CodexHttpClient::new(tee, wire));
+        let mut stream = model
+            .stream(CompletionRequest::new("say hi"))
+            .expect("the request encodes");
+        let mut failure = None;
+        while let Some(event) = stream.next().await {
+            assert!(kept.snapshot().len() <= frames, "capacity {frames}");
+            if let Err(error) = event {
+                failure = Some(error);
+            }
         }
-        let kept = kept_after_a_failed_stream(reply.into_bytes(), frames).await;
-        assert_eq!(kept.len(), 11, "capacity {frames}: the whole chunk is kept");
-        let refused: Vec<_> = kept
-            .iter()
-            .filter_map(|frame| match frame {
-                FrameEvidence::Text(frame) => decode_frame(frame).err(),
-                other => panic!("every kept frame is exact text, got {other:?}"),
-            })
-            .collect();
-        let [corrupt] = refused.as_slice() else {
-            panic!("capacity {frames}: one kept frame fails to decode, got {refused:?}");
+        let failure = match failure {
+            Some(failure) => failure,
+            None => stream.finish().await.expect_err("the stream fails"),
         };
-        assert_eq!(corrupt.frame(), Some(malformed));
+        assert!(
+            matches!(failure, ProviderError::Json(_)),
+            "capacity {frames}: the decoder refused the frame itself: {failure:?}"
+        );
+        assert_eq!(kept.last(), Some(text(refused)), "capacity {frames}");
+        let expected = if frames == 1 {
+            vec![text(refused)]
+        } else {
+            vec![text(CREATED), text(refused)]
+        };
+        assert_eq!(kept.snapshot(), expected, "capacity {frames}");
     }
 }

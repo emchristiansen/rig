@@ -16,8 +16,18 @@
 //! [`decode_frame`](crate::responses_api::streaming::decode_frame) on a
 //! `Text` frame only.
 //!
-//! The store holds its capacity of the most recent frames, and never fewer
-//! than every frame of the chunk being handed on.
+//! A streamed reply is handed on in pieces that each complete at most one
+//! frame, so the driver has decoded a frame before the next is cut. The
+//! store then never holds more than its capacity of that reply's frames, and
+//! when Rig's decoder refuses a frame, that frame is the newest one kept
+//! ([`RetainedFrames::last`]), at any capacity.
+//!
+//! A unary reply arrives whole. Its frames are cut together, nothing says
+//! which of them a failure is about, and so all of them are kept, however
+//! many and whatever the capacity, until they are taken or the next reply's
+//! first frame is kept. The capacity bounds what is kept of streamed
+//! replies only; a caller that reads replies whole keeps each reply's
+//! frames whole.
 //!
 //! ```
 //! use rig_codex::http_client::HttpFrameTee;
@@ -48,8 +58,18 @@ use std::task::{Context, Poll};
 /// `inner` returns.
 ///
 /// A reply is cut as Rig's driver cuts it for a wire with the same
-/// [`Framing`]: a streamed reply chunk by chunk, a unary body as a whole.
-/// The bytes handed on are `inner`'s own, unchanged. Requests are not kept.
+/// [`Framing`]: a streamed reply as its bytes arrive, a unary body as a
+/// whole. The bytes handed on are `inner`'s own, unchanged and in order; a
+/// streamed chunk that completes more than one frame is handed on as
+/// several chunks, one per frame. Requests are not kept.
+///
+/// A streamed reply's frames are kept one at a time, so the store never
+/// holds more than its capacity of them, and when Rig's decoder refuses a
+/// frame, that frame is the newest one kept ([`RetainedFrames::last`]), at
+/// any capacity. A unary reply arrives whole: nothing says which of its
+/// frames a failure is about, so all of them are kept, however many and
+/// whatever the capacity, until they are taken or the next reply's first
+/// frame is kept.
 #[derive(Clone, Debug)]
 pub struct HttpFrameTee<H> {
     inner: H,
@@ -58,9 +78,11 @@ pub struct HttpFrameTee<H> {
 }
 
 impl<H> HttpFrameTee<H> {
-    /// Send through `inner`, keeping the `capacity` most recent frames of its
-    /// replies, cut by `framing`: the framing of the wire whose requests go
-    /// through this client ([`Framing::Sse`] for a Responses wire).
+    /// Send through `inner`, keeping the frames of its replies, cut by
+    /// `framing`: the framing of the wire whose requests go through this
+    /// client ([`Framing::Sse`] for a Responses wire). Of a streamed reply
+    /// the `capacity` most recent frames are kept; of a unary reply, every
+    /// frame.
     pub fn new(inner: H, framing: Framing, capacity: NonZeroUsize) -> Self {
         Self {
             inner,
@@ -101,7 +123,7 @@ impl<H: HttpClientExt> HttpClientExt for HttpFrameTee<H> {
             let body: LazyBody<U> = Box::pin(async move {
                 let bytes = body.await?;
                 let exact = std::str::from_utf8(&bytes).is_ok();
-                frames.keep_batch(
+                frames.keep_whole(
                     framing
                         .split(&bytes)
                         .into_iter()
@@ -138,6 +160,7 @@ impl<H: HttpClientExt> HttpClientExt for HttpFrameTee<H> {
             let (parts, body) = sending.await?.into_parts();
             let body: BoxedStream = Box::pin(TeedBody {
                 body,
+                pending: Bytes::new(),
                 cut: Cut::of(framing),
                 utf8: Utf8Watch::default(),
                 frames,
@@ -204,17 +227,67 @@ impl Utf8Watch {
     }
 }
 
-/// A streamed body that keeps each frame its chunks complete.
+/// The length of the first line of `bytes` with its line end: through a
+/// line feed, a carriage return and the line feed after it, or a carriage
+/// return alone. All of `bytes` when it holds no line end.
+fn first_line(bytes: &[u8]) -> usize {
+    match bytes.iter().position(|byte| matches!(byte, b'\n' | b'\r')) {
+        Some(at) if bytes.get(at) == Some(&b'\r') && bytes.get(at + 1) == Some(&b'\n') => at + 2,
+        Some(at) => at + 1,
+        None => bytes.len(),
+    }
+}
+
+/// A streamed body that keeps each frame its bytes complete, and hands the
+/// bytes on in pieces that each complete at most one frame.
 ///
-/// Every frame a chunk completes is kept before the chunk is handed on, and
-/// none of them is dropped for capacity until a later chunk arrives: a frame
-/// Rig's decoder refuses is among the kept frames when the failure
-/// surfaces, however many frames followed it in its chunk.
+/// Rig's driver decodes every frame of a chunk before it asks for the next
+/// chunk. So a frame is kept, and its piece handed on, only after the driver
+/// has decoded every frame before it: when the decoder refuses a frame and
+/// the driver stops reading, the newest kept frame is the refused one, and
+/// the store never holds more than its capacity of this reply's frames.
 struct TeedBody {
     body: BoxedStream,
+    /// What is left of the transport's last chunk, not yet handed on.
+    pending: Bytes,
     cut: Cut,
     utf8: Utf8Watch,
     frames: RetainedFrames<FrameEvidence>,
+}
+
+impl TeedBody {
+    /// Take the next piece of the pending chunk: its bytes through the line
+    /// that completes its first frame, or all of it when it completes none.
+    /// The frame, when there is one, is kept.
+    fn next_piece(&mut self) -> Bytes {
+        let chunk = std::mem::take(&mut self.pending);
+        let framer = match &mut self.cut {
+            Cut::Framed(framer) => framer,
+            Cut::Whole(body) => {
+                body.extend_from_slice(&chunk);
+                return chunk;
+            }
+            Cut::Ended => return chunk,
+        };
+        let exact = self.utf8.exact();
+        let mut end = 0;
+        // Both framers complete a frame only at a line end, so a frame's
+        // last byte is found by feeding the chunk line by line.
+        while let Some(rest) = chunk.get(end..).filter(|rest| !rest.is_empty()) {
+            let line = rest.get(..first_line(rest)).unwrap_or(rest);
+            end += line.len();
+            let mut completed = false;
+            for frame in framer.push(line) {
+                self.frames.keep(FrameEvidence::of_wire_frame(frame, exact));
+                completed = true;
+            }
+            if completed {
+                break;
+            }
+        }
+        self.pending = chunk.slice(end..);
+        chunk.slice(..end)
+    }
 }
 
 impl Stream for TeedBody {
@@ -222,41 +295,41 @@ impl Stream for TeedBody {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        let next = this.body.as_mut().poll_next(cx);
-        match &next {
-            Poll::Ready(Some(Ok(chunk))) => match &mut this.cut {
-                Cut::Framed(framer) => {
-                    this.utf8.feed(chunk);
-                    let exact = this.utf8.exact();
-                    this.frames.keep_batch(
-                        framer
-                            .push(chunk)
-                            .map(|frame| FrameEvidence::of_wire_frame(frame, exact)),
-                    );
-                }
-                Cut::Whole(body) => body.extend_from_slice(chunk),
-                Cut::Ended => {}
-            },
-            Poll::Ready(None) => match std::mem::replace(&mut this.cut, Cut::Ended) {
-                Cut::Framed(mut framer) => {
-                    if let Some(frame) = framer.finish() {
-                        let exact = this.utf8.exact_at_end();
-                        this.frames.keep(FrameEvidence::of_wire_frame(frame, exact));
+        if this.pending.is_empty() {
+            match this.body.as_mut().poll_next(cx) {
+                Poll::Ready(Some(Ok(chunk))) => {
+                    // Exactness is judged a transport chunk at a time: text
+                    // cut from the chunk holding the reply's first invalid
+                    // byte is not vouched for, wherever in it the byte is.
+                    if matches!(this.cut, Cut::Framed(_)) {
+                        this.utf8.feed(&chunk);
                     }
+                    this.pending = chunk;
                 }
-                Cut::Whole(body) if !body.is_empty() => {
-                    // A whole body is text only when all of it is UTF-8.
-                    this.frames.keep(FrameEvidence::of_wire_frame(
-                        WireFrame::from_bytes(body),
-                        true,
-                    ));
+                Poll::Ready(None) => {
+                    match std::mem::replace(&mut this.cut, Cut::Ended) {
+                        Cut::Framed(mut framer) => {
+                            if let Some(frame) = framer.finish() {
+                                let exact = this.utf8.exact_at_end();
+                                this.frames.keep(FrameEvidence::of_wire_frame(frame, exact));
+                            }
+                        }
+                        Cut::Whole(body) if !body.is_empty() => {
+                            // A whole body is text only when all of it is UTF-8.
+                            this.frames.keep(FrameEvidence::of_wire_frame(
+                                WireFrame::from_bytes(body),
+                                true,
+                            ));
+                        }
+                        Cut::Whole(_) | Cut::Ended => {}
+                    }
+                    return Poll::Ready(None);
                 }
-                Cut::Whole(_) | Cut::Ended => {}
-            },
-            // A transport error ends nothing the framer has not already cut.
-            Poll::Ready(Some(Err(_))) | Poll::Pending => {}
+                // A transport error ends nothing the framer has not already cut.
+                other @ (Poll::Ready(Some(Err(_))) | Poll::Pending) => return other,
+            }
         }
-        next
+        Poll::Ready(Some(Ok(this.next_piece())))
     }
 }
 
