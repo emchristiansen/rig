@@ -14,7 +14,7 @@ import tempfile
 import unittest
 
 sys.dont_write_bytecode = True
-SCRIPT = Path(__file__).resolve().parents[2] / ".github/scripts/check-frozen-release-docs.sh"
+SCRIPT = Path(__file__).resolve().parents[1] / ".github/scripts/check-frozen-release-docs.sh"
 
 
 class Repo:
