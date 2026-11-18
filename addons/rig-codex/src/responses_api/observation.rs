@@ -698,17 +698,23 @@ struct ObservingHttpClient<H> {
 
 /// Whether Rig's driver reads this reply as server-sent events on the
 /// Codex contract: a reply of status 200, the one status the driver streams,
-/// whose content type is `text/event-stream`, or which names no content
-/// type, which the Codex gateway sends and Rig's Codex wire accepts
-/// (`Encoded::with_relaxed_content_type`).
+/// whose content type the driver reads as `text/event-stream`, or which
+/// names no content type, which the Codex gateway sends and Rig's Codex wire
+/// accepts (`Encoded::with_relaxed_content_type`).
+///
+/// The content type is read as the driver reads it: the whole value parsed
+/// as a media type, not its text before the first `;`. A value the driver
+/// cannot parse is one it refuses, whatever it begins with.
 fn accepted_sse(status: http::StatusCode, headers: &http::HeaderMap) -> bool {
     driver_streams(status)
         && headers.get(http::header::CONTENT_TYPE).is_none_or(|value| {
             value
                 .to_str()
                 .ok()
-                .and_then(|value| value.split(';').next())
-                .is_some_and(|essence| essence.trim().eq_ignore_ascii_case("text/event-stream"))
+                .and_then(|value| value.parse::<mime::Mime>().ok())
+                .is_some_and(|media_type| {
+                    (media_type.type_(), media_type.subtype()) == (mime::TEXT, mime::EVENT_STREAM)
+                })
         })
 }
 

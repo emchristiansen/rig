@@ -14470,6 +14470,7 @@ dependencies = [
  "bytes",
  "futures",
  "http",
+ "mime",
  "rig-core",
  "rig-http",
  "serde",

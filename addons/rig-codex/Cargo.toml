@@ -21,6 +21,7 @@ rig-http = { path = "../../crates/rig-http", version = "0.46.0", features = ["we
 bytes = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
+mime = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -50,4 +51,4 @@ native-tls = ["tokio-tungstenite?/native-tls"]
 request-compression = ["dep:zstd"]
 # `responses_api::observation`: a caller-owned ledger of the original
 # server-sent events of one streamed Codex call.
-completion-observations = []
+completion-observations = ["dep:mime"]
