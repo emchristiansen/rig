@@ -10,7 +10,7 @@ use rig_core::message::{
 use rig_core::providers::chatgpt;
 use rig_core::providers::openai::OpenAIConfig;
 use rig_core::providers::openai::responses_api::wire::Responses;
-use rig_core::wire::{Mode, WireFrame, decode_reply};
+use rig_core::wire::{Mode, Response, WireFrame, decode_reply};
 use serde_json::value::RawValue;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -148,6 +148,28 @@ pub(crate) fn function_call_item() -> Value {
 /// and the call's answer `content`. It declares the typed `lookup` tool and
 /// the custom `apply_patch`.
 pub(crate) fn answering(item: Value, content: Vec<ToolResultContent>) -> CompletionRequest {
+    let turn = folded_call(&item);
+    let [call] = turn.tool_calls().collect::<Vec<_>>()[..] else {
+        panic!("the turn makes one call: {:?}", turn.choice);
+    };
+
+    let mut request = turn_declaring(json!([declared_custom()]));
+    request.chat_history.extend([
+        Arc::new(turn.message().expect("the turn's message")),
+        Arc::new(Message::User {
+            content: vec![UserContent::tool_result(
+                call.id.clone(),
+                call.function.name.clone(),
+                content,
+            )],
+        }),
+    ]);
+    request
+}
+
+/// The turn in which `gpt-5.4` made the call `item`, as Rig folds the
+/// provider's stream of it.
+pub(crate) fn folded_call(item: &Value) -> Response<Responses> {
     let response = |status: &str, output: Value| {
         json!({
             "id": "resp_1", "object": "response", "created_at": 0, "status": status,
@@ -166,7 +188,7 @@ pub(crate) fn answering(item: Value, content: Vec<ToolResultContent>) -> Complet
         event["sequence_number"] = json!(sequence);
         WireFrame::Text(event.to_string())
     });
-    let turn = decode_reply(
+    decode_reply(
         &Responses::new(
             OpenAIConfig::with_key(&chatgpt::DIALECT, "test-token"),
             "gpt-5.4",
@@ -175,23 +197,7 @@ pub(crate) fn answering(item: Value, content: Vec<ToolResultContent>) -> Complet
         Mode::Streaming,
         frames,
     )
-    .expect("the turn folds");
-    let [call] = turn.tool_calls().collect::<Vec<_>>()[..] else {
-        panic!("the turn makes one call: {:?}", turn.choice);
-    };
-
-    let mut request = turn_declaring(json!([declared_custom()]));
-    request.chat_history.extend([
-        Arc::new(turn.message().expect("the turn's message")),
-        Arc::new(Message::User {
-            content: vec![UserContent::tool_result(
-                call.id.clone(),
-                call.function.name.clone(),
-                content,
-            )],
-        }),
-    ]);
-    request
+    .expect("the turn folds")
 }
 
 /// A request that answers the custom call `call_c` with `content` and
