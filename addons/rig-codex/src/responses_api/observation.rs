@@ -41,6 +41,7 @@ use rig_http::http_client::{
 use rig_http::wasm_compat::WasmCompatSend;
 use serde_json::Value;
 use std::collections::TryReserveError;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
@@ -103,6 +104,20 @@ pub enum CaptureCause {
     /// A panic while the ledger was locked poisoned that lock.
     #[error("observation ledger lock is poisoned")]
     LockPoisoned,
+    /// The supplied string would take the committed strings past the limit
+    /// the ledger was prepared with.
+    #[error(
+        "observation ledger holds {committed} bytes and its limit is {limit}: \
+         a string of {offered} bytes does not fit"
+    )]
+    LimitExceeded {
+        /// The limit the ledger was prepared with, in bytes.
+        limit: usize,
+        /// The bytes of the strings already committed.
+        committed: usize,
+        /// The bytes of the string that did not fit.
+        offered: usize,
+    },
 }
 
 /// Capture fault and the whole supplied string that could not be committed.
@@ -120,6 +135,10 @@ struct Ledger {
     stage: ObservationStage,
     dispatch: ObservationDispatch,
     committed: Vec<String>,
+    /// The bytes of `committed`.
+    committed_bytes: usize,
+    /// The most bytes `committed` may hold, when the ledger is bounded.
+    limit: Option<NonZeroUsize>,
     fault: Option<CaptureFault>,
     native_cause: Option<ExistingDiagnosticBasis>,
     native_error: Option<Arc<ProviderError>>,
@@ -167,23 +186,39 @@ pub struct Observation;
 
 impl Observation {
     /// Prepare without validating input, opening HTTP or polling a future.
+    /// The ledger keeps every string the reply supplies, however many.
     pub fn prepare() -> (ObservationHandle, ObservationWriter) {
-        Self::with_provenance(ObservationProvenance::SuppliedSse)
+        Self::with_provenance(ObservationProvenance::SuppliedSse, None)
+    }
+
+    /// Prepare as [`prepare`](Self::prepare) does, with a ledger that keeps
+    /// at most `limit` bytes of supplied strings.
+    ///
+    /// A string that would take the ledger past `limit` is not committed
+    /// and fails the call with a capture fault
+    /// ([`CaptureCause::LimitExceeded`]), which holds that string whole. No
+    /// committed string is dropped or shortened to make room: the ledger of
+    /// a call that succeeded is the whole reply.
+    pub fn prepare_bounded(limit: NonZeroUsize) -> (ObservationHandle, ObservationWriter) {
+        Self::with_provenance(ObservationProvenance::SuppliedSse, Some(limit))
     }
 
     /// Prepare explicitly synthetic custody without fabricating SSE strings.
     pub fn prepare_synthetic() -> (ObservationHandle, ObservationWriter) {
-        Self::with_provenance(ObservationProvenance::Synthetic)
+        Self::with_provenance(ObservationProvenance::Synthetic, None)
     }
 
     fn with_provenance(
         provenance: ObservationProvenance,
+        limit: Option<NonZeroUsize>,
     ) -> (ObservationHandle, ObservationWriter) {
         let handle = ObservationHandle(Arc::new(Mutex::new(Ledger {
             provenance,
             stage: ObservationStage::Prepared,
             dispatch: ObservationDispatch::NotDispatched,
             committed: Vec::new(),
+            committed_bytes: 0,
+            limit,
             fault: None,
             native_cause: None,
             native_error: None,
@@ -273,14 +308,29 @@ impl ObservationHandle {
             }
             return Err(());
         }
-        if let Err(cause) = ledger.committed.try_reserve(1) {
+        let cause = match ledger.limit {
+            Some(limit) if original.len() > limit.get() - ledger.committed_bytes => {
+                Some(CaptureCause::LimitExceeded {
+                    limit: limit.get(),
+                    committed: ledger.committed_bytes,
+                    offered: original.len(),
+                })
+            }
+            _ => ledger
+                .committed
+                .try_reserve(1)
+                .err()
+                .map(CaptureCause::Allocation),
+        };
+        if let Some(cause) = cause {
             ledger.fault = Some(CaptureFault {
-                cause: CaptureCause::Allocation(cause),
+                cause,
                 offending_string: Some(original),
             });
             ledger.stage = ObservationStage::NativeFailed;
             return Err(());
         }
+        ledger.committed_bytes += original.len();
         ledger.committed.push(original);
         Ok(())
     }
