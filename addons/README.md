@@ -33,7 +33,7 @@ places where the fork's side must be re-applied.
 | File | Change | Why |
 |---|---|---|
 | `Cargo.toml` | One entry, `"addons/*"`, with its comment, in `[workspace] members` after `"crates/*"`. | Makes the add-on crates workspace members. |
-| `Cargo.lock` | Entries for the add-on crates and their dependencies. | Follows from the line above. Regenerate rather than merge by hand. |
+| `Cargo.lock` | Upstream's lockfile with what Cargo adds for the add-on crates: their packages, the edges those packages' features switch on in packages upstream already locks, and a newer version of a package upstream locks only where an add-on's requirement excludes upstream's. | Follows from the line above. Every other package stays at the version upstream locked. Take upstream's file and let Cargo complete it; never merge it by hand, and never delete and regenerate it, which resolves upstream's own packages again. |
 | `flake.nix` | `rustToolchain` reads `./addons/rust-toolchain.toml`; a `shellHook` links `target/` to a per-workspace cache under `~/.cache/cargo-target`. | The workstation's development shell. |
 | `flake.lock` | The `rust-overlay` input is newer. | Provides Rust 1.100.0. |
 | `.gitignore` | First line `target/` becomes `target`; the `.envrc` line is removed. | The development shell makes `target` a symlink, which `target/` does not match; `.envrc` is tracked. |
@@ -52,6 +52,11 @@ upstream wrote them for. The development shell takes its toolchain from
 
 1. Merge the release tag into the fork's line. Expect conflicts only in the
    files listed above; take upstream's side and re-apply the listed change.
-2. Regenerate `Cargo.lock`.
+2. Take upstream's `Cargo.lock` as the release has it and let Cargo complete
+   it for the add-on crates (`cargo metadata`); a `--locked` build then
+   passes. Do not delete the file and regenerate it: that resolves upstream's
+   own packages again, to versions upstream did not lock. Compare the result
+   with upstream's by package and version, not by reading the text: the
+   difference must be only what the add-ons need.
 3. Build and test the add-on crates and fix what upstream's API changes broke.
 4. Update "Current upstream base" above.
