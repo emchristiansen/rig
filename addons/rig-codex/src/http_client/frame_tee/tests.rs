@@ -13,7 +13,9 @@ use rig_core::providers::chatgpt;
 use rig_core::providers::openai::OpenAIConfig;
 use rig_core::providers::openai::responses_api::wire::Responses;
 use rig_http::http_client::Error;
-use rig_http::test_utils::{RecordingHttpClient, SequencedStreamingHttpClient};
+use rig_http::test_utils::{
+    NonSuccessStreamingClient, RecordingHttpClient, SequencedStreamingHttpClient,
+};
 
 fn capacity(frames: usize) -> NonZeroUsize {
     NonZeroUsize::new(frames).expect("a non-zero capacity")
@@ -306,8 +308,9 @@ fn codex_wire() -> CodexResponses {
 
 const CREATED: &str = r#"{"type":"response.created","sequence_number":0,"response":{"id":"resp_1","object":"response","created_at":0,"status":"in_progress","model":"gpt-5.4","output":[]}}"#;
 
-/// A reply whose second event is a frame of a modelled type that fails its
-/// typed decoding, written with irregular spacing.
+/// A reply whose second event is a frame of a modelled type that fails this
+/// crate's typed decoding, written with irregular spacing. It has no
+/// terminal event.
 fn malformed_reply() -> Bytes {
     Bytes::from(format!(
         "data: {CREATED}\n\ndata: {}\n\n",
@@ -335,11 +338,13 @@ fn assert_the_malformed_frame_was_kept(frames: &[FrameEvidence]) {
     assert_eq!(frames[1], FrameEvidence::Text(malformed.frame.to_owned()));
 }
 
-/// The use the tee exists for, through Rig's own driver: a streamed reply
-/// carrying a frame Rig's decoder refuses fails the stream, and the tee
-/// holds that frame exactly as the provider sent it.
+/// Through Rig's own driver, a streamed reply carrying a frame of a
+/// modelled type that this crate's typed decoding cannot read: the tee
+/// holds that frame exactly as the provider sent it. Rig's decoder reads
+/// past such a frame (the test below); this reply fails because it ends
+/// without a terminal.
 #[tokio::test]
-async fn a_frame_rigs_decoder_refuses_is_kept_as_the_provider_sent_it() {
+async fn a_frame_this_crate_cannot_decode_is_kept_as_the_provider_sent_it() {
     let wire = codex_wire();
     let tee = HttpFrameTee::new(
         SequencedStreamingHttpClient::new(vec![Ok(malformed_reply())]),
@@ -351,15 +356,57 @@ async fn a_frame_rigs_decoder_refuses_is_kept_as_the_provider_sent_it() {
     let mut stream = model
         .stream(CompletionRequest::new("say hi"))
         .expect("the request encodes");
-    let mut failed = false;
+    let mut failures = Vec::new();
     while let Some(event) = stream.next().await {
-        failed |= event.is_err();
+        failures.extend(event.err());
     }
     assert!(
-        failed || stream.finish().await.is_err(),
-        "a malformed frame of a modelled type fails the stream"
+        matches!(failures.as_slice(), [ProviderError::Truncated]),
+        "the reply ended without a terminal: {failures:?}"
     );
     assert_the_malformed_frame_was_kept(&kept.snapshot());
+}
+
+/// Rig's decoder reads past a frame of a modelled type that this crate's
+/// typed decoding refuses: followed by a terminal, the reply succeeds. The
+/// tee keeps the frame like any other, and [`decode_frame`] names it. So a
+/// frame `decode_frame` refuses is not, by that, a frame that failed a call.
+#[tokio::test]
+async fn rigs_decoder_reads_past_a_frame_this_crate_cannot_decode() {
+    const COMPLETED: &str = r#"{"type":"response.completed","sequence_number":9,"response":{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"gpt-5.4","output":[{"type":"message","id":"msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","annotations":[],"text":"hello"}]}],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}"#;
+    for malformed in &MALFORMED_KNOWN_FRAMES {
+        let reply = format!(
+            "data: {CREATED}\n\ndata: {}\n\ndata: {COMPLETED}\n\n",
+            malformed.frame
+        );
+        let wire = codex_wire();
+        let tee = HttpFrameTee::new(
+            SequencedStreamingHttpClient::new(vec![Ok(Bytes::from(reply))]),
+            Framing::Sse,
+            capacity(8),
+        );
+        let kept = tee.frames();
+        let model = Model::new(wire.clone(), CodexHttpClient::new(tee, wire));
+        let mut stream = model
+            .stream(CompletionRequest::new("say hi"))
+            .expect("the request encodes");
+        while let Some(event) = stream.next().await {
+            event.unwrap_or_else(|error| panic!("{}: {error:?}", malformed.case));
+        }
+        let response = stream
+            .finish()
+            .await
+            .unwrap_or_else(|error| panic!("{}: {error:?}", malformed.case));
+        assert_eq!(response.text(), "hello", "{}", malformed.case);
+        assert_eq!(
+            kept.snapshot(),
+            [text(CREATED), text(malformed.frame), text(COMPLETED)],
+            "{}",
+            malformed.case
+        );
+        let corrupt = decode_frame(malformed.frame).expect_err(malformed.case);
+        assert_eq!(corrupt.event_type(), Some(malformed.event_type));
+    }
 }
 
 /// A unary body arrives whole, so its frames are cut together and all of
@@ -391,10 +438,11 @@ async fn a_unary_reply_keeps_every_frame_of_its_body_whatever_the_capacity() {
     assert!(kept.snapshot().is_empty(), "taken, the store holds nothing");
 }
 
-/// The same holds for a call the driver reads as one body: the refused
-/// frame is among the kept frames wherever in the body it stands.
+/// The same holds for a call the driver reads as one body: the frame is
+/// among the kept frames wherever in the body it stands. This call too
+/// fails because its reply has no terminal.
 #[tokio::test]
-async fn a_frame_rigs_decoder_refuses_in_a_unary_call_is_kept_too() {
+async fn a_frame_this_crate_cannot_decode_in_a_unary_call_is_kept_too() {
     let wire = codex_wire();
     let tee = HttpFrameTee::new(
         RecordingHttpClient::new(malformed_reply()),
@@ -406,12 +454,12 @@ async fn a_frame_rigs_decoder_refuses_in_a_unary_call_is_kept_too() {
     model
         .call(CompletionRequest::new("say hi"))
         .await
-        .expect_err("a malformed frame of a modelled type fails the call");
+        .expect_err("a reply without a terminal fails the call");
     assert_the_malformed_frame_was_kept(&kept.snapshot());
 }
 
-/// A reply Rig's decoder refuses, drained through Rig's own driver over a
-/// tee of `capacity` frames. Returns what the tee holds when the failure
+/// A reply that fails, drained through Rig's own driver over a tee of
+/// `capacity` frames. Returns what the tee holds when the failure
 /// has surfaced.
 async fn kept_after_a_failed_stream(reply: Vec<u8>, frames: usize) -> Vec<FrameEvidence> {
     let wire = codex_wire();
@@ -431,6 +479,20 @@ async fn kept_after_a_failed_stream(reply: Vec<u8>, frames: usize) -> Vec<FrameE
     }
     assert!(failed || stream.finish().await.is_err(), "the stream fails");
     kept.snapshot()
+}
+
+/// The first failure of a stream read to its end, or its finishing failure.
+async fn first_failure(mut stream: rig_core::streaming::CompletionStream) -> ProviderError {
+    let mut failure = None;
+    while let Some(event) = stream.next().await {
+        if failure.is_none() {
+            failure = event.err();
+        }
+    }
+    match failure {
+        Some(failure) => failure,
+        None => stream.finish().await.expect_err("the stream fails"),
+    }
 }
 
 /// Text Rig's framer read from bytes that were not UTF-8 is kept as
@@ -507,9 +569,9 @@ async fn replacement_decoded_text_is_not_kept_as_exact() {
 /// capacity throughout.
 #[tokio::test]
 async fn the_refused_frame_is_the_newest_kept_whatever_follows_it_in_its_chunk() {
-    // Not JSON, so Rig's decoder refuses it where it stands; a frame Rig
-    // can read but this crate's typed decoding cannot would instead fail
-    // the reply at its end, after every later frame was read.
+    // Not JSON, so Rig's decoder refuses it where it stands. A frame of a
+    // modelled type that only this crate's typed decoding refuses would not
+    // do: Rig reads past it.
     let refused = r#"{nope}"#;
     let trailing = r#"{"type":"future.event"}"#;
     let mut reply = format!("data: {CREATED}\n\ndata: {refused}\n\n");
@@ -551,4 +613,81 @@ async fn the_refused_frame_is_the_newest_kept_whatever_follows_it_in_its_chunk()
         };
         assert_eq!(kept.snapshot(), expected, "capacity {frames}");
     }
+}
+
+/// A reply the driver does not stream, here a 201 that a transport returned
+/// as a response, is handed on as the transport delivered it and none of it
+/// is kept: the driver reads it into its error in a bounded number of
+/// chunks, and a body cut into one piece per event would be counted, and
+/// cut short, by that bound.
+#[tokio::test]
+async fn a_reply_the_driver_does_not_stream_is_handed_on_untouched_and_not_kept() {
+    let mut body = String::new();
+    // More events than the driver reads chunks of a refused reply (4096).
+    for index in 0..4100 {
+        body.push_str(&format!(
+            "data: {{\"type\":\"future.event\",\"n\":{index}}}\n\n"
+        ));
+    }
+    body.push_str(&format!("data: {CREATED}\n\nprovider-tail"));
+    let refusing = || {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("text/event-stream"),
+        );
+        NonSuccessStreamingClient {
+            status: http::StatusCode::CREATED,
+            headers,
+            body: Bytes::from(body.clone()),
+        }
+    };
+
+    // Handed on in the transport's one chunk.
+    let tee = HttpFrameTee::new(refusing(), Framing::Sse, capacity(8));
+    let kept = tee.frames();
+    let response = tee.send_streaming(get()).await.expect("the reply opens");
+    let chunks: Vec<Bytes> = drained(response)
+        .await
+        .into_iter()
+        .map(|chunk| chunk.expect("the body reads"))
+        .collect();
+    assert_eq!(chunks, [Bytes::from(body.clone())]);
+    assert!(
+        kept.snapshot().is_empty(),
+        "none of a refused reply is kept"
+    );
+
+    // Through Rig's driver the error is the one the bare transport gives,
+    // with the whole body.
+    let wire = codex_wire();
+    let bare = first_failure(
+        Model::new(wire.clone(), CodexHttpClient::new(refusing(), wire.clone()))
+            .stream(CompletionRequest::new("say hi"))
+            .expect("the request encodes"),
+    )
+    .await;
+    let tee = HttpFrameTee::new(refusing(), Framing::Sse, capacity(8));
+    let kept = tee.frames();
+    let teed = first_failure(
+        Model::new(wire.clone(), CodexHttpClient::new(tee, wire))
+            .stream(CompletionRequest::new("say hi"))
+            .expect("the request encodes"),
+    )
+    .await;
+    assert!(
+        kept.snapshot().is_empty(),
+        "none of a refused reply is kept"
+    );
+    assert_eq!(teed.to_string(), bare.to_string());
+    assert_eq!(teed.report(), bare.report());
+    assert_eq!(
+        teed.provider_response_status(),
+        Some(http::StatusCode::CREATED)
+    );
+    assert_eq!(
+        teed.provider_response_body(),
+        Some(body.as_str()),
+        "the whole body, its tail included"
+    );
 }

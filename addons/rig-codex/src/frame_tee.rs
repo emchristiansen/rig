@@ -26,6 +26,16 @@ use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+/// Whether Rig's driver reads a streamed reply of this status as frames.
+///
+/// It streams a 200 and nothing else. Any other reply, another success
+/// status included, is read into the error instead, in a bounded number of
+/// bytes and chunks (`rig_core`'s `driver::http_transport`). A wrapper that
+/// cuts frames therefore leaves such a reply as the transport delivered it.
+pub(crate) fn driver_streams(status: http::StatusCode) -> bool {
+    status == http::StatusCode::OK
+}
+
 /// The frames a tee has kept, shared with the tee.
 ///
 /// Of frames read one at a time, a websocket's or a streamed HTTP reply's,

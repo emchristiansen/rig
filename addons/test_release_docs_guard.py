@@ -163,5 +163,74 @@ class ForkHistory(unittest.TestCase):
         self.assertEqual(named(done), ["CHANGELOG.md"])
 
 
+class Renames(unittest.TestCase):
+    """Changes that Git's rename detection would report under one name."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Repo(self.tmp.name)
+        repo = self.repo
+        repo.commit("release one", {"CHANGELOG.md": "release one\n", "src/lib.rs": "one\n"})
+        repo.git("branch", "fork")
+        # The release adds a document with the bytes of an existing one.
+        self.two = repo.commit("release two", {"docs/migrations/new.md": "release one\n"})
+        repo.git("checkout", "--quiet", "fork")
+        self.fork_base = repo.commit("the fork's own code", {"addons/x.rs": "x\n"})
+        repo.git("merge", "--quiet", "--no-ff", "-m", "merge release two", self.two)
+
+    def test_a_document_deleted_beside_an_identical_one_the_release_added_fails(self):
+        done = self.repo.guard(self.fork_base, upstream=self.two)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.repo.commit("delete the changelog", remove=["CHANGELOG.md"])
+        self.assertEqual(
+            self.repo.git("diff", "--name-status", self.fork_base, "HEAD"),
+            "R100\tCHANGELOG.md\tdocs/migrations/new.md",
+            "Git reports the deletion and the release's addition as one rename",
+        )
+        done = self.repo.guard(self.fork_base, upstream=self.two)
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(named(done), ["CHANGELOG.md"])
+
+    def test_a_document_the_fork_moves_fails_under_each_frozen_name(self):
+        moves = {
+            "within": ("CHANGELOG.md", "docs/migrations/moved.md",
+                       ["CHANGELOG.md", "docs/migrations/moved.md"]),
+            "out": ("CHANGELOG.md", "notes/changelog.md", ["CHANGELOG.md"]),
+            "in": ("src/lib.rs", "docs/migrations/lib.md", ["docs/migrations/lib.md"]),
+        }
+        start = self.repo.git("rev-parse", "HEAD")
+        for name, (old, new, expected) in moves.items():
+            with self.subTest(name):
+                self.repo.git("checkout", "--quiet", "-B", "pr", start)
+                (self.repo.root / new).parent.mkdir(parents=True, exist_ok=True)
+                self.repo.git("mv", old, new)
+                self.repo.commit(f"move {old}")
+                done = self.repo.guard(self.fork_base, upstream=self.two)
+                self.assertEqual(done.returncode, 1)
+                self.assertEqual(named(done), expected)
+
+    def test_a_name_is_read_as_it_is_whatever_characters_it_holds(self):
+        start = self.repo.git("rev-parse", "HEAD")
+        for stem in ("a b", "caf\u00e9", "tab\there", 'quo"te', "back\\slash",
+                     "st*r", "[x]", ":(top)", "line\nbreak"):
+            name = f"docs/migrations/{stem}.md"
+            with self.subTest(name):
+                self.repo.git("checkout", "--quiet", "-B", "pr", start)
+                self.repo.commit("a note of the fork's", {name: "mine\n"})
+                done = self.repo.guard(self.fork_base, upstream=self.two)
+                self.assertEqual(done.returncode, 1, done.stdout)
+                self.assertIn(f"  {name}\n", done.stderr)
+
+    def test_a_listing_that_cannot_be_made_fails(self):
+        # A base whose tree object is gone: the merge base is found, the
+        # listing of what differs from it is not.
+        tree = self.repo.git("rev-parse", f"{self.fork_base}^{{tree}}")
+        (self.repo.root / ".git/objects" / tree[:2] / tree[2:]).unlink()
+        done = self.repo.guard(self.fork_base, upstream=self.two)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertNotIn("No frozen release docs", done.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -45,20 +45,30 @@ if [[ -n "${upstream_ref}" ]]; then
     fi
 fi
 
-touched=""
-while IFS= read -r file; do
-    [[ -n "${file}" ]] || continue
+# Every path that differs, both sides of a rename: with rename detection a
+# release document deleted here would be listed only under the name of an
+# identical file the release added. Names are read NUL-separated and matched
+# literally, so a name is what it is whatever characters it holds. The
+# listing is written out first so that a failure to produce it fails here.
+changed="$(mktemp)"
+trap 'rm -f "${changed}"' EXIT
+git diff --no-renames --name-only -z "${merge_base}" HEAD > "${changed}"
+
+touched=()
+while IFS= read -r -d '' file; do
+    [[ "${file}" =~ ${frozen_pattern} ]] || continue
     # The same bytes as the release history has, or absent from both.
-    if [[ -n "${upstream_base}" ]] && git diff --quiet "${upstream_base}" HEAD -- "${file}"; then
+    if [[ -n "${upstream_base}" ]] \
+        && git --literal-pathspecs diff --quiet "${upstream_base}" HEAD -- "${file}"; then
         continue
     fi
-    touched+="${file}"$'\n'
-done < <(git diff --name-only "${merge_base}" HEAD | grep -E "${frozen_pattern}" || true)
+    touched+=("${file}")
+done < "${changed}"
 
-if [[ -n "${touched}" ]]; then
+if ((${#touched[@]} > 0)); then
     {
         echo "This PR edits release documents that are generated on the release PR:"
-        printf '  %s\n' ${touched}
+        printf '  %s\n' "${touched[@]}"
         echo
         echo "Do not edit CHANGELOG.md, crates/*/CHANGELOG.md, MIGRATING.md or docs/migrations/"
         echo "in an ordinary PR. Put changelog bullets under '## Changelog' and migration notes"
