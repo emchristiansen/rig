@@ -22,7 +22,7 @@
 //! });
 //! ```
 
-use crate::frame_tee::first_line;
+use crate::frame_tee::{driver_streams, first_line};
 use crate::http_client::CodexHttpClient;
 use crate::responses_api::streaming::{
     DecodedFrame, ResponseChunkKind, StreamingCompletionChunk, decode_frame,
@@ -697,11 +697,12 @@ struct ObservingHttpClient<H> {
 }
 
 /// Whether Rig's driver reads this reply as server-sent events on the
-/// Codex contract: a success whose content type is `text/event-stream`, or
-/// a success that names no content type, which the Codex gateway sends and
-/// Rig's Codex wire accepts (`Encoded::with_relaxed_content_type`).
+/// Codex contract: a reply of status 200, the one status the driver streams,
+/// whose content type is `text/event-stream`, or which names no content
+/// type, which the Codex gateway sends and Rig's Codex wire accepts
+/// (`Encoded::with_relaxed_content_type`).
 fn accepted_sse(status: http::StatusCode, headers: &http::HeaderMap) -> bool {
-    status.is_success()
+    driver_streams(status)
         && headers.get(http::header::CONTENT_TYPE).is_none_or(|value| {
             value
                 .to_str()
@@ -777,6 +778,10 @@ impl<H: HttpClientExt> HttpClientExt for ObservingHttpClient<H> {
 /// driver has decoded every event before it: the ledger holds exactly the
 /// frames Rig's decoder was given, and when the decoder refuses one, that
 /// frame is the ledger's last string.
+///
+/// Only a reply the driver streams is given this body (`accepted_sse`). A
+/// reply it refuses is read into its error by another reader, which counts
+/// chunks and decodes nothing, and is left as the transport delivered it.
 struct ObservedBody {
     body: BoxedStream,
     /// What is left of the transport's last chunk, not yet handed on.
