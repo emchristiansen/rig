@@ -6,9 +6,9 @@
 //! sends a custom call's answer as the fork always has: its `output` is one
 //! string, the result's texts joined in order; a result carrying anything
 //! but text is refused; and the executed tool's `name` is stated. The name
-//! is the one the request's result gives for the call, else the one the
-//! request's call was made with; an answer neither names goes without one,
-//! as Rig wrote it.
+//! is the one given by the request's result that produced the answer, else
+//! the one the request's call was made with; an answer neither names goes
+//! without one, as Rig wrote it.
 //!
 //! The rule holds for every `custom_tool_call_output` in the `input` Rig
 //! encoded, whichever way the request states it: an answer in its history,
@@ -37,18 +37,24 @@ use std::collections::BTreeMap;
 
 const CUSTOM_CALL: &str = "custom_tool_call";
 const CUSTOM_OUTPUT: &str = "custom_tool_call_output";
+const FUNCTION_OUTPUT: &str = "function_call_output";
 
 /// The names of the tools a request's results say they ran, by the
 /// provider's call id.
 pub(crate) struct CustomOutputs {
-    executed: BTreeMap<String, String>,
+    /// The executed tool of each result under a call id, in the order the
+    /// results stand in the history.
+    executed: BTreeMap<String, Vec<String>>,
+    /// Whether the encoded `input` ends with the history's items. A request
+    /// whose `additional_params` state `input` replaces them.
+    history_sent: bool,
 }
 
 impl CustomOutputs {
     /// The executed tool of each result in `request` that answers a call the
     /// provider identified.
     pub(crate) fn of(request: &CompletionRequest) -> Self {
-        let mut executed = BTreeMap::new();
+        let mut executed: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for message in &request.chat_history {
             let Message::User { content } = message.as_ref() else {
                 continue;
@@ -57,11 +63,69 @@ impl CustomOutputs {
                 if let UserContent::ToolResult(result) = part
                     && let CallId::Provider(call_id) = &result.call
                 {
-                    executed.insert(call_id.as_str().to_owned(), result.name.as_str().to_owned());
+                    executed
+                        .entry(call_id.as_str().to_owned())
+                        .or_default()
+                        .push(result.name.as_str().to_owned());
                 }
             }
         }
-        Self { executed }
+        let history_sent = request
+            .additional_params
+            .as_ref()
+            .is_none_or(|params| params.get("input").is_none());
+        Self {
+            executed,
+            history_sent,
+        }
+    }
+
+    /// The executed tool for each of `items`, the `input` Rig encoded, that
+    /// answers a call: `None` for every other item.
+    ///
+    /// Rig writes one output item per result, in history order, after the
+    /// caller's own items. So the last outputs under a call id are its
+    /// results' outputs, matched in order; an earlier one is a caller's item
+    /// and is named after the last result under its id.
+    fn executed_by_item<'a>(
+        &self,
+        items: impl Iterator<Item = Option<&'a Value>>,
+    ) -> Vec<Option<String>> {
+        let call_ids: Vec<Option<&str>> = items
+            .map(|item| {
+                let item = item?;
+                matches!(
+                    item.get("type").and_then(Value::as_str),
+                    Some(CUSTOM_OUTPUT | FUNCTION_OUTPUT)
+                )
+                .then(|| item.get("call_id").and_then(Value::as_str))
+                .flatten()
+            })
+            .collect();
+        let mut outputs: BTreeMap<&str, usize> = BTreeMap::new();
+        for call_id in call_ids.iter().flatten() {
+            *outputs.entry(call_id).or_default() += 1;
+        }
+        let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+        call_ids
+            .iter()
+            .map(|call_id| {
+                let call_id = (*call_id)?;
+                let names = self.executed.get(call_id)?;
+                let ordinal = seen.entry(call_id).or_default();
+                let at = *ordinal;
+                *ordinal += 1;
+                let total = outputs.get(call_id).copied().unwrap_or_default();
+                let callers = if self.history_sent {
+                    total.saturating_sub(names.len())
+                } else {
+                    total
+                };
+                at.checked_sub(callers)
+                    .map_or_else(|| names.last(), |at| names.get(at))
+                    .cloned()
+            })
+            .collect()
     }
 
     /// Rewrite each custom call's answer among `items`, the `input` Rig
@@ -71,20 +135,28 @@ impl CustomOutputs {
         &self,
         items: &mut [Box<RawValue>],
     ) -> Result<bool, CodexRequestError> {
+        // An answer's place among the answers of its call id decides its name
+        // only when that id has more than one result. Only then is a
+        // function call's answer read as well; otherwise only a custom call
+        // or its answer is, and every other item keeps its bytes unread.
+        let placed = self.executed.values().any(|names| names.len() > 1);
         let mut values: Vec<Option<Value>> = Vec::with_capacity(items.len());
         for item in items.iter() {
-            // Only a custom call or its answer is read.
-            values.push(if item.get().contains(CUSTOM_CALL) {
-                Some(serde_json::from_str(item.get()).map_err(CodexRequestError::Body)?)
-            } else {
-                None
-            });
+            let text = item.get();
+            values.push(
+                if text.contains(CUSTOM_CALL) || (placed && text.contains(FUNCTION_OUTPUT)) {
+                    Some(serde_json::from_str(text).map_err(CodexRequestError::Body)?)
+                } else {
+                    None
+                },
+            );
         }
         let called = called_names(values.iter().flatten());
+        let executed = self.executed_by_item(values.iter().map(Option::as_ref));
         let mut changed = false;
-        for (item, value) in items.iter_mut().zip(values) {
+        for ((item, value), executed) in items.iter_mut().zip(values).zip(executed) {
             let Some(mut value) = value else { continue };
-            if self.rewrite(&mut value, &called)? {
+            if Self::rewrite(&mut value, executed.as_deref(), &called)? {
                 *item = serde_json::value::to_raw_value(&value).map_err(CodexRequestError::Body)?;
                 changed = true;
             }
@@ -95,17 +167,19 @@ impl CustomOutputs {
     /// [`Self::restore_raw`] over parsed items.
     pub(crate) fn restore(&self, items: &mut [Value]) -> Result<(), CodexRequestError> {
         let called = called_names(items.iter());
-        for item in items {
-            self.rewrite(item, &called)?;
+        let executed = self.executed_by_item(items.iter().map(Some));
+        for (item, executed) in items.iter_mut().zip(executed) {
+            Self::rewrite(item, executed.as_deref(), &called)?;
         }
         Ok(())
     }
 
-    /// Rewrite `item` if it is a custom call's answer. Returns whether it
-    /// changed.
+    /// Rewrite `item` if it is a custom call's answer, naming it `executed`,
+    /// else after its call in `called`, when it states no name. Returns whether
+    /// it changed.
     fn rewrite(
-        &self,
         item: &mut Value,
+        executed: Option<&str>,
         called: &BTreeMap<String, String>,
     ) -> Result<bool, CodexRequestError> {
         let Value::Object(item) = item else {
@@ -139,9 +213,9 @@ impl CustomOutputs {
             _ => return Err(CodexRequestError::CustomOutput { call_id }),
         }
         if !item.contains_key("name")
-            && let Some(name) = self.executed.get(&call_id).or_else(|| called.get(&call_id))
+            && let Some(name) = executed.or_else(|| called.get(&call_id).map(String::as_str))
         {
-            item.insert("name".to_owned(), Value::String(name.clone()));
+            item.insert("name".to_owned(), Value::String(name.to_owned()));
             changed = true;
         }
         Ok(changed)
@@ -161,3 +235,6 @@ fn called_names<'a>(items: impl Iterator<Item = &'a Value>) -> BTreeMap<String, 
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests;
