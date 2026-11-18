@@ -60,7 +60,7 @@
 //! ```
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -524,6 +524,109 @@ pub(crate) struct Memo {
     given: Vec<Arc<Message>>,
     shaped: Vec<Option<Arc<Message>>>,
     taken: HashSet<String>,
+    /// The ids the calls of the messages before that turn were shaped
+    /// under.
+    landed: Vec<Landed>,
+}
+
+/// One tool call of a history being adapted, at `from` (message, block) in
+/// it, and the id it was shaped under: the one [`Renamed::claim`] gave it,
+/// or `None` when it was not shaped as a call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Landed {
+    pub(crate) from: (usize, usize),
+    pub(crate) id: Option<CallId>,
+}
+
+/// What a prepared request sends for one tool call of the history as the
+/// caller wrote it ([`SentIds`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Sent {
+    /// Sent as a call under this call id, spelled exactly as the encoded
+    /// request spells it.
+    Under(String),
+    /// Not sent as a call at all: its turn was dropped, the request
+    /// declares no tools so it went as text, or adapting left it out for
+    /// another reason.
+    Not,
+}
+
+/// The call id a prepared request sends for each tool call of the history
+/// as the caller gave it to [`Completion::prepare_with_sent_ids`],
+/// addressed by the message's index in that history and the block's index
+/// in that message. It is the id adapting gave the call, read off the
+/// request's final history and spelled by the same rules every encoder
+/// spells ids by, so it is the id the encoded body carries for that call,
+/// not an inference from the body. Results are not stated: a result is
+/// found in the body under the id stated for the call it answers.
+///
+/// Provider ids are made distinct by adapting, so each stated provider id
+/// names one call of the body. Two calls the caller wrote under one
+/// rig-issued id ([`CallId::Local`]) are not renamed: both are stated under
+/// the same spelling, and the body holds two call items under it, which a
+/// consumer's check of distinct ids in the body refuses.
+///
+/// This statement is a divergence of Eric's fork (`emchristiansen/rig`)
+/// from upstream Rig: a consumer that checks its own requests needs the ids
+/// stated, not inferred.
+///
+/// [`Completion::prepare_with_sent_ids`]: crate::operation::Completion::prepare_with_sent_ids
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SentIds {
+    calls: BTreeMap<(usize, usize), Sent>,
+}
+
+impl SentIds {
+    /// What is sent for the tool call at block `block` of message
+    /// `message`; `None` when there is no tool call there.
+    pub fn call(&self, message: usize, block: usize) -> Option<&Sent> {
+        self.calls.get(&(message, block))
+    }
+
+    /// Every tool call's (message, block) and what is sent for it, in
+    /// history order.
+    pub fn calls(&self) -> impl Iterator<Item = ((usize, usize), &Sent)> {
+        self.calls.iter().map(|(at, sent)| (*at, sent))
+    }
+}
+
+/// The statement of what `adapted`, a prepared request's final history for
+/// `model` on `target`, sends for each call `landed` names, with each
+/// one's position in the caller's history given by `caller` (`None` for a
+/// block the caller did not write). A call is sent when `adapted` holds a
+/// call under the id it was shaped under: no step after shaping changes the
+/// id of a call it keeps. Ids are spelled by [`WireIds`], as every encoder
+/// spells them.
+///
+/// [`WireIds`]: crate::providers::internal::wire_ids::WireIds
+pub(crate) fn sent_ids(
+    landed: &[Landed],
+    adapted: &[Arc<Message>],
+    target: &dyn ReplayTarget,
+    model: &str,
+    caller: impl Fn((usize, usize)) -> Option<(usize, usize)>,
+) -> SentIds {
+    let ids = crate::providers::internal::wire_ids::WireIds::for_target(adapted, target, model);
+    let held: HashSet<&CallId> = adapted
+        .iter()
+        .filter_map(|message| match &**message {
+            Message::Assistant(turn) => Some(turn.tool_calls().map(|call| &call.id)),
+            Message::User { .. } | Message::System { .. } => None,
+        })
+        .flatten()
+        .collect();
+    let mut sent = SentIds::default();
+    for landed in landed {
+        let Some(at) = caller(landed.from) else {
+            continue;
+        };
+        let said = match &landed.id {
+            Some(id) if held.contains(id) => Sent::Under(ids.spell(id)),
+            _ => Sent::Not,
+        };
+        sent.calls.insert(at, said);
+    }
+    sent
 }
 
 /// What adapting reads besides the messages.
@@ -630,6 +733,17 @@ pub(crate) fn adapt_for(
     request: &Request<'_>,
     memo: &mut Memo,
 ) -> Vec<Arc<Message>> {
+    adapt_stated(history, target, request, memo).0
+}
+
+/// [`adapt_for`], with the id each tool call of `history` was shaped under
+/// ([`Landed`]).
+pub(crate) fn adapt_stated(
+    history: Vec<Arc<Message>>,
+    target: &dyn ReplayTarget,
+    request: &Request<'_>,
+    memo: &mut Memo,
+) -> (Vec<Arc<Message>>, Vec<Landed>) {
     let model = request.model.unwrap_or(target.model());
     let stored = request.stored;
     let same = Same {
@@ -673,6 +787,7 @@ pub(crate) fn adapt_for(
     };
     let mut claimed = Vec::new();
     let mut kept = 0;
+    let mut kept_landed = 0;
     let form = Form {
         target,
         model,
@@ -681,10 +796,12 @@ pub(crate) fn adapt_for(
     // A message adapting leaves as it is goes on as the same `Arc`.
     let mut shaped: Vec<Option<Arc<Message>>> = Vec::with_capacity(history.len());
     shaped.extend(memo.shaped.iter().cloned());
+    let mut landed: Vec<Landed> = memo.landed.clone();
     for (at, message) in history.iter().enumerate().skip(from) {
         if Some(at) == last_turn {
             claimed = ids.taken.iter().map(|id| id.to_string()).collect();
             kept = shaped.len();
+            kept_landed = landed.len();
         }
         match &**message {
             Message::System { content } => {
@@ -700,12 +817,14 @@ pub(crate) fn adapt_for(
                 );
             }
             Message::Assistant(turn) if matches!(turn.stop, Some(StopReason::Aborted(_))) => {
+                landed.extend(dropped_calls(at, turn));
                 shaped.push(stopped(turn));
             }
             // A failed turn is skipped, with the results answering it.
             Message::Assistant(turn)
                 if turn.stop.as_ref().is_some_and(|stop| stop.is_failure()) =>
             {
+                landed.extend(dropped_calls(at, turn));
                 shaped.push(None);
             }
             Message::Assistant(turn) => {
@@ -726,9 +845,12 @@ pub(crate) fn adapt_for(
                     .filter(|(message, _)| *message == at)
                     .map(|(_, block)| *block)
                     .collect();
-                shaped.push(assistant(
-                    message, turn, &form, &same, &mut ids, &here, last,
-                ));
+                let (turn, calls) = assistant(message, turn, &form, &same, &mut ids, &here, last);
+                landed.extend(calls.into_iter().map(|(block, id)| Landed {
+                    from: (at, block),
+                    id,
+                }));
+                shaped.push(turn);
             }
         }
     }
@@ -745,6 +867,7 @@ pub(crate) fn adapt_for(
                 let shaped = shaped.get(memo.shaped.len()..kept).unwrap_or_default();
                 memo.shaped.extend(shaped.iter().cloned());
                 memo.taken.extend(claimed);
+                memo.landed = landed.get(..kept_landed).unwrap_or_default().to_vec();
                 memo.shape = Some(shape);
             }
             None => *memo = Memo::default(),
@@ -761,7 +884,7 @@ pub(crate) fn adapt_for(
                 "a settled history changed"
             );
         }
-        return settled;
+        return (settled, landed);
     }
     drop(ids);
     *memo = Memo::default();
@@ -769,7 +892,20 @@ pub(crate) fn adapt_for(
         .into_iter()
         .map(|message| message.map(Arc::unwrap_or_clone));
     let shaped = reshaped(shaped.collect(), target, model, stored, accepts.tools);
-    shaped.into_iter().map(Arc::new).collect()
+    (shaped.into_iter().map(Arc::new).collect(), landed)
+}
+
+/// The calls of `turn`, message `at`, as not shaped as calls.
+fn dropped_calls(at: usize, turn: &AssistantMessage) -> impl Iterator<Item = Landed> + '_ {
+    turn.content
+        .iter()
+        .enumerate()
+        .filter_map(move |(block, content)| {
+            matches!(content, AssistantContent::ToolCall(_)).then_some(Landed {
+                from: (at, block),
+                id: None,
+            })
+        })
 }
 
 /// Whether `history`, shaped message by message, is already what pairing
@@ -1216,7 +1352,8 @@ impl Same<'_> {
 
 /// The turn `message`, holding `turn`, shaped for `form` and the target
 /// named by `same`: `message` itself when nothing in it changes, nothing
-/// when no block it sends alone is left.
+/// when no block it sends alone is left. Beside it, each call's block in
+/// `turn` and the id it is shaped under, if it is shaped as a call.
 fn assistant<'a>(
     message: &Arc<Message>,
     turn: &'a AssistantMessage,
@@ -1225,7 +1362,7 @@ fn assistant<'a>(
     ids: &mut Renamed<'a>,
     hosted: &HashSet<usize>,
     last: bool,
-) -> Option<Arc<Message>> {
+) -> (Option<Arc<Message>>, Vec<(usize, Option<CallId>)>) {
     let Form {
         target,
         model,
@@ -1318,13 +1455,30 @@ fn assistant<'a>(
             (!block.is_blank()).then_some(block)
         })
         .collect();
-    let content: Vec<Cow<'a, AssistantContent>> = if same {
+    let content = if same {
         paired(content, target, accepts.tools, hosted, last)
     } else {
-        content.into_iter().flatten().collect()
+        content
     };
+    // The id each call of the turn as written is shaped under, if it is
+    // shaped as a call.
+    let calls: Vec<(usize, Option<CallId>)> = turn
+        .content
+        .iter()
+        .zip(&content)
+        .enumerate()
+        .filter(|(_, (written, _))| matches!(written, AssistantContent::ToolCall(_)))
+        .map(|(block, (_, kept))| {
+            let id = match kept.as_deref() {
+                Some(AssistantContent::ToolCall(call)) => Some(call.id.clone()),
+                _ => None,
+            };
+            (block, id)
+        })
+        .collect();
     let content: Vec<Cow<'a, AssistantContent>> = content
         .into_iter()
+        .flatten()
         .map(|block| match &*block {
             AssistantContent::Image(image) if image.native.is_none() => {
                 if sendable_as_is(image) && form.sends(image, Place::Assistant) {
@@ -1345,20 +1499,22 @@ fn assistant<'a>(
         })
         .collect();
     if !turn.content.is_empty() && !content.iter().any(|block| target.sends_alone(block)) {
-        return None;
+        let calls = calls.into_iter().map(|(block, _)| (block, None)).collect();
+        return (None, calls);
     }
     if content.len() == turn.content.len()
         && content
             .iter()
             .all(|block| matches!(block, Cow::Borrowed(_)))
     {
-        return Some(message.clone());
+        return (Some(message.clone()), calls);
     }
-    Some(Arc::new(Message::Assistant(AssistantMessage {
+    let shaped = Arc::new(Message::Assistant(AssistantMessage {
         content: content.into_iter().map(Cow::into_owned).collect(),
         origin: turn.origin.clone(),
         stop: turn.stop.clone(),
-    })))
+    }));
+    (Some(shaped), calls)
 }
 
 /// The stopped turn `turn` as the text it had sent, shaped as a reply from
@@ -1444,7 +1600,7 @@ fn paired<'a>(
     tools: bool,
     hosted: &HashSet<usize>,
     last: bool,
-) -> Vec<Cow<'a, AssistantContent>> {
+) -> Vec<Option<Cow<'a, AssistantContent>>> {
     let pair = |block: &AssistantContent| match block {
         AssistantContent::Opaque(opaque) if opaque.replay => target.hosted_pair(&opaque.item),
         _ => None,
@@ -1517,7 +1673,7 @@ fn paired<'a>(
             *slot = None;
         }
     }
-    content.into_iter().flatten().collect()
+    content
 }
 
 /// The target a user message is shaped for.

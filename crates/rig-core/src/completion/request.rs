@@ -1401,8 +1401,11 @@ impl CompletionRequest {
 /// so document context lands after any leading system messages. A user
 /// message already there takes the documents at its front instead, so the
 /// history keeps alternating roles. Telemetry and the sent request must
-/// agree on this placement.
-pub(crate) fn insert_after_leading_system(chat_history: &mut Vec<Arc<Message>>, message: Message) {
+/// agree on this placement. Returns where the documents went.
+pub(crate) fn insert_after_leading_system(
+    chat_history: &mut Vec<Arc<Message>>,
+    message: Message,
+) -> Inserted {
     let insert_at = chat_history
         .iter()
         .position(|message| !matches!(&**message, Message::System { .. }))
@@ -1417,9 +1420,41 @@ pub(crate) fn insert_after_leading_system(chat_history: &mut Vec<Arc<Message>>, 
         message,
     ) {
         (Some(Message::User { content }), Message::User { content: documents }) => {
+            let parts = documents.len();
             content.splice(0..0, documents);
+            Inserted::Joined {
+                message: insert_at,
+                parts,
+            }
         }
-        (_, message) => chat_history.insert(insert_at, Arc::new(message)),
+        (_, message) => {
+            chat_history.insert(insert_at, Arc::new(message));
+            Inserted::Message(insert_at)
+        }
+    }
+}
+
+/// Where [`insert_after_leading_system`] put a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Inserted {
+    /// As a message of its own at this index.
+    Message(usize),
+    /// As `parts` parts at the front of the user message at `message`.
+    Joined { message: usize, parts: usize },
+}
+
+impl Inserted {
+    /// The position in the history before the insertion of the block at
+    /// `at` (message, block) after it; `None` for an inserted one.
+    pub(crate) fn before(self, (message, block): (usize, usize)) -> Option<(usize, usize)> {
+        match self {
+            Self::Message(at) if message == at => None,
+            Self::Message(at) if message > at => Some((message - 1, block)),
+            Self::Joined { message: at, parts } if message == at => {
+                Some((message, block.checked_sub(parts)?))
+            }
+            _ => Some((message, block)),
+        }
     }
 }
 
