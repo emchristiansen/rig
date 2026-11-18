@@ -107,9 +107,68 @@ impl Operation for Completion {
     /// is reported first, through
     /// [`options::check`](crate::completion::options::check).
     fn prepare(
-        mut request: Self::Request,
+        request: Self::Request,
         wire: &Descriptor<'_>,
     ) -> Result<Self::Request, ProviderError> {
+        Self::prepared(request, wire).map(|prepared| prepared.request)
+    }
+}
+
+/// A request [`Completion::prepared`] shaped, and the id each tool call of
+/// the history it was given was shaped under.
+struct Placed<'w> {
+    request: CompletionRequest,
+    /// The target the request was adapted for.
+    target: &'w dyn crate::completion::ReplayTarget,
+    /// The id each call of the history, documents placed, was shaped under.
+    landed: Vec<crate::completion::history::Landed>,
+    /// Where the documents went into the history, if they did.
+    documents: Option<crate::completion::request::Inserted>,
+}
+
+impl Completion {
+    /// [`Operation::prepare`], with the statement of what the prepared
+    /// request sends for each tool call of `request`'s history as given:
+    /// the call id the encoded request spells for it, or that it is not
+    /// sent as a call at all ([`SentIds`]). The request
+    /// is the one [`Operation::prepare`] returns; encoding it with the
+    /// wire `wire` describes sends exactly the stated ids.
+    ///
+    /// This is a divergence of Eric's fork (`emchristiansen/rig`) from
+    /// upstream Rig: a consumer that checks its own requests needs the ids
+    /// stated, not inferred.
+    ///
+    /// # Errors
+    ///
+    /// What [`Operation::prepare`] rejects.
+    ///
+    /// [`SentIds`]: crate::completion::history::SentIds
+    pub fn prepare_with_sent_ids(
+        request: CompletionRequest,
+        wire: &Descriptor<'_>,
+    ) -> Result<(CompletionRequest, crate::completion::history::SentIds), ProviderError> {
+        let Placed {
+            request,
+            target,
+            landed,
+            documents,
+        } = Self::prepared(request, wire)?;
+        let model = request.model.as_deref().unwrap_or(target.model());
+        let sent = crate::completion::history::sent_ids(
+            &landed,
+            &request.chat_history,
+            target,
+            model,
+            |at| documents.map_or(Some(at), |documents| documents.before(at)),
+        );
+        Ok((request, sent))
+    }
+
+    /// [`Operation::prepare`], with what adapting placed where.
+    fn prepared<'w>(
+        mut request: CompletionRequest,
+        wire: &Descriptor<'w>,
+    ) -> Result<Placed<'w>, ProviderError> {
         let Some(target) = wire.replay else {
             return Err(ProviderError::request(format!(
                 "completion wire `{}` names no replay target",
@@ -162,9 +221,13 @@ impl Operation for Completion {
         // the adapter's rules apply to them, unless the encoder sends them
         // itself.
         let mut history = std::mem::take(&mut request.chat_history);
+        let mut inserted = None;
         if !target.takes_documents() {
             if let Some(documents) = request.normalized_documents() {
-                crate::completion::request::insert_after_leading_system(&mut history, documents);
+                inserted = Some(crate::completion::request::insert_after_leading_system(
+                    &mut history,
+                    documents,
+                ));
             }
             request.documents.clear();
         }
@@ -172,7 +235,8 @@ impl Operation for Completion {
         let mut kept = wire.prepared.and_then(|prepared| prepared.0.lock().ok());
         let mut fresh = Default::default();
         let memo = kept.as_deref_mut().unwrap_or(&mut fresh);
-        let adapted = crate::completion::history::adapt_for(history, target, &shape, memo);
+        let (adapted, landed) =
+            crate::completion::history::adapt_stated(history, target, &shape, memo);
         drop(kept);
         if let Some((written, documents)) = written {
             request.cache_points = crate::completion::history::cache_points(
@@ -186,7 +250,12 @@ impl Operation for Completion {
         }
         request.chat_history = adapted;
         request.validate_message_content()?;
-        Ok(request)
+        Ok(Placed {
+            request,
+            target,
+            landed,
+            documents: inserted,
+        })
     }
 }
 
