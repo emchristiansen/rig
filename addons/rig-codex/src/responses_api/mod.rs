@@ -1452,6 +1452,8 @@ mod fold_contract_tests;
 mod fold_edge_tests;
 #[cfg(test)]
 mod serde_fixed_point_tests;
+#[cfg(test)]
+mod trailing_reasoning_tests;
 
 #[cfg(test)]
 mod tests;

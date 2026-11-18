@@ -2,10 +2,10 @@
 
 This directory holds everything Eric's fork (`emchristiansen/rig`) adds to
 upstream Rig (`0xPlaygrounds/rig`). The fork is an upstream release tag plus
-the crates here. The crates build on the public API of upstream's crates and
-edit none of their source, so merging the next upstream release cannot
-conflict with fork code. After such a merge, only these crates need adjusting
-to upstream's API changes.
+the crates here and the changes to upstream files listed below. The crates
+build on the public API of upstream's crates and edit none of their source.
+After merging the next upstream release, only these crates and the listed
+changes need adjusting to upstream's changes.
 
 Current upstream base: `v0.46.0`.
 
@@ -40,6 +40,8 @@ places where the fork's side must be re-applied.
 | `.cargo/config.toml` | Appended `[registry] global-min-publish-age = "14 days"` and `[resolver] incompatible-publish-age = "deny"`. | The workstation's fourteen-day rule for registry crates. |
 | `.github/scripts/check-frozen-release-docs.sh` | The release documents' history is named apart from the PR's base (`UPSTREAM_REF`; in a fork's CI, upstream's `main`, fetched), and a release document that differs from the base passes when it is byte for byte what the newest upstream commit contained in the PR has. | Upstream's guard fails any PR that touches a release document, and a PR that merges an upstream release touches all of them. With the change such a PR passes and every other edit, addition or deletion of a release document still fails. The changed files are listed with rename detection off and their names read NUL-separated and matched literally: with upstream's listing, a document deleted beside an identical one the release added was reported only as the added one, and a document moved out of the set, or one whose name Git quotes, was not seen at all. In upstream's own repository the rule is unchanged and that listing is the one difference. Tested by `addons/test_release_docs_guard.py`, which the fork's workflow runs. |
 | `.github/workflows/slow.yaml` | In the `stable / test all features` job's condition, `github.repository == '0xPlaygrounds/rig'` becomes `(github.repository == '0xPlaygrounds/rig' \|\| github.event_name == 'workflow_dispatch')`, with one sentence added to the comment above the job. | Upstream runs its whole-workspace, all-features test run only in its own repository, so that a fork's nightly schedule does not start it. That left the fork no way to run it at all. A manual dispatch, which needs write access to the fork, now runs it on the dispatched ref. There are two: of this workflow (`gh workflow run slow.yaml --ref <branch>`), and of `cd.yaml`, which calls this workflow and passes its own event on, so that dispatching `cd.yaml` by hand runs the lane as well. Pull requests, the schedule, the merge queue and `cd.yaml` on a push to `main` behave as before on the fork: skipped. The job reads no secret. The dependency-floors job is unchanged. |
+| `crates/rig-core/src/completion/history.rs` | `ReplayTarget` gains `replays_when_last`, default `false`; `paired` reads it for the last block of a turn as written, so an item that needs the item after it is kept there when the target says so. | A divergence from upstream Rig's replay rule, which never sends a Responses reasoning item without the item it preceded, so a turn that holds only reasoning, or ends in it, loses that reasoning. Every target but the one below keeps upstream's rule. A reasoning item whose following block exists but is not replayed as its item is still not sent. |
+| `crates/rig-core/src/providers/openai/responses_api/wire.rs` | `Responses` answers `replays_when_last` with `true` for a reasoning item on the Codex contract (`ResponsesContract::Codex`, the ChatGPT backend) only. | The fork's consumer, Muninn's Conta, serves turns that hold only reasoning and must replay them (its spec: "Reasoning continuity is preserved"); the fork's earlier line sent such items. That the ChatGPT backend accepts them, and that its own client keeps them in the history it sends, is not tested here. Tested by `addons/rig-codex/src/responses_api/trailing_reasoning_tests.rs`. |
 
 Files the fork adds outside this directory: `.envrc` (`use flake`), and `.github/workflows/addons.yaml`, which runs the add-on crates' format check, lints and tests, and `addons/test_release_docs_guard.py`, on pull requests. A directory directly under `addons/` must be a crate: the workspace takes every one as a member. Upstream's own workflows compile the add-ons as workspace members but do not run their tests: its test jobs name `crates/` packages, and its all-features lane runs outside upstream's repository only when dispatched by hand.
 

@@ -324,6 +324,17 @@ pub trait ReplayTarget: std::fmt::Debug + WasmCompatSync {
         false
     }
 
+    /// Whether `item`, one that needs the item after it
+    /// ([`Self::needs_next`]), still goes back when it is the last block of
+    /// its turn as the caller wrote it, with no block after it at all. A
+    /// block that follows it and is not replayed as its item still takes it
+    /// out. By default it does not go back. This hook is an addition of
+    /// Eric's fork (`emchristiansen/rig`), not upstream Rig's.
+    fn replays_when_last(&self, item: &serde_json::Value) -> bool {
+        let _ = item;
+        false
+    }
+
     /// The hosted-tool pair this opaque item belongs to: whether it is the
     /// use or the result, and the id they share. A use and its result
     /// replay only together, in one turn or across the model's turns. A use
@@ -1421,10 +1432,12 @@ fn hosted_pairs(
 /// A same-model turn's kept blocks (`None` where `adapt` dropped one), with
 /// every block whose partner is gone dropped too: an item that needs the one
 /// after it ([`ReplayTarget::needs_next`]), edited or not, when that one is
-/// dropped or only rebuilt, and a hosted use or result whose block position
-/// is not in `hosted` ([`ReplayTarget::hosted_pair`]). In the `last` turn,
-/// one that ends the history or awaits a client call, a use followed only by
-/// calls and opaque items is still running and stays.
+/// dropped or only rebuilt, or when it ends the turn and the target does not
+/// replay it there ([`ReplayTarget::replays_when_last`]), and a hosted use
+/// or result whose block position is not in `hosted`
+/// ([`ReplayTarget::hosted_pair`]). In the `last` turn, one that ends the
+/// history or awaits a client call, a use followed only by calls and opaque
+/// items is still running and stays.
 fn paired<'a>(
     mut content: Vec<Option<Cow<'a, AssistantContent>>>,
     target: &dyn ReplayTarget,
@@ -1463,10 +1476,14 @@ fn paired<'a>(
     // The item each block goes back as, read once: its item while current,
     // or a rebuild that keeps the item's identity (an edited block rebuilt
     // under it needs its partner as much as the item itself); whether it
-    // goes back as one, and whether that item needs the block after it.
+    // goes back as one, and whether that item needs the block after it. The
+    // last block of the turn as written needs none where the target says so
+    // ([`ReplayTarget::replays_when_last`]).
+    let end = content.len();
     let (kept, needs): (Vec<bool>, Vec<bool>) = content
         .iter()
-        .map(|block| {
+        .enumerate()
+        .map(|(at, block)| {
             let item = block.as_deref().and_then(|block| match block {
                 AssistantContent::Opaque(opaque) => opaque.replay.then_some(&opaque.item),
                 block => block
@@ -1476,7 +1493,9 @@ fn paired<'a>(
             });
             (
                 item.is_some(),
-                item.is_some_and(|item| target.needs_next(item)),
+                item.is_some_and(|item| {
+                    target.needs_next(item) && !(at + 1 == end && target.replays_when_last(item))
+                }),
             )
         })
         .unzip();
