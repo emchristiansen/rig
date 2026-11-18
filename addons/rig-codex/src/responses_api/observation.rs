@@ -22,6 +22,7 @@
 //! });
 //! ```
 
+use crate::frame_tee::driver_streams;
 use crate::http_client::CodexHttpClient;
 use crate::responses_api::streaming::{
     DecodedFrame, ResponseChunkKind, StreamingCompletionChunk, decode_frame,
@@ -646,11 +647,12 @@ struct ObservingHttpClient<H> {
 }
 
 /// Whether Rig's driver reads this reply as server-sent events on the
-/// Codex contract: a success whose content type is `text/event-stream`, or
-/// a success that names no content type, which the Codex gateway sends and
-/// Rig's Codex wire accepts (`Encoded::with_relaxed_content_type`).
+/// Codex contract: a reply of status 200, the one status the driver streams,
+/// whose content type is `text/event-stream`, or which names no content
+/// type, which the Codex gateway sends and Rig's Codex wire accepts
+/// (`Encoded::with_relaxed_content_type`).
 fn accepted_sse(status: http::StatusCode, headers: &http::HeaderMap) -> bool {
-    status.is_success()
+    driver_streams(status)
         && headers.get(http::header::CONTENT_TYPE).is_none_or(|value| {
             value
                 .to_str()

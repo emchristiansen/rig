@@ -349,12 +349,13 @@ async fn a_refused_reply_is_a_stream_failure_with_its_head_and_no_captured_strin
     });
 }
 
-/// A frame of a modelled type that fails to decode is committed, exactly as
-/// supplied, before it fails the stream. Here it is the reply's last frame,
-/// so it is the ledger's last string; the test below shows that is not so
-/// in general.
+/// A frame of a modelled type that this crate's typed decoding cannot read
+/// is committed exactly as supplied, and [`decode_frame`] names it. Rig's
+/// decoder reads past such a frame: this reply fails because it ends
+/// without a terminal, and the same frame followed by a terminal is part of
+/// a turn that succeeds.
 #[tokio::test]
-async fn a_corrupt_frame_is_committed_before_it_fails_the_stream() {
+async fn a_frame_this_crate_cannot_decode_is_committed_as_supplied() {
     let malformed = crate::responses_api::corrupt_frame_fixtures::MALFORMED_KNOWN_FRAMES[0].frame;
     let data = vec![turn_data().remove(0), malformed.to_owned()];
     let transport = replying(sse(&data));
@@ -370,11 +371,92 @@ async fn a_corrupt_frame_is_committed_before_it_fails_the_stream() {
     assert_eq!(failure.kind, ObservedFailureKind::Stream);
     observation.inspect(|view| {
         assert_eq!(view.stage, ObservationStage::NativeFailed);
+        assert!(
+            matches!(view.native_error, Some(ProviderError::Truncated)),
+            "the reply ended without a terminal: {:?}",
+            view.native_error
+        );
         assert_eq!(view.committed_prefix, data.as_slice());
         let last = view.committed_prefix.last().expect("the malformed frame");
-        let corrupt = decode_frame(last).expect_err("the kept frame is the corrupt one");
+        let corrupt = decode_frame(last).expect_err("this crate's decoding refuses it");
         assert_eq!(corrupt.frame(), Some(malformed));
     });
+
+    // With the turn's remaining frames after it, the same frame is read past.
+    let mut data = turn_data();
+    data.insert(1, malformed.to_owned());
+    let transport = replying(sse(&data));
+    let (observation, writer) = Observation::prepare();
+    let mut stream = wire()
+        .raw_stream_observed(&transport, CompletionRequest::new("say hi"), writer)
+        .expect("the request encodes");
+    for item in drain(&mut stream).await {
+        item.expect("the turn has no failure");
+    }
+    let result = stream.finish().await.expect("the turn finishes");
+    assert_eq!(result.body.response.text(), "hello");
+    observation.inspect(|view| assert_eq!(view.committed_prefix, data.as_slice()));
+}
+
+/// A reply of a success status other than 200 is one Rig's driver does not
+/// stream: it is refused with its whole body in Rig's error, as an ordinary
+/// stream refuses it, and none of it is captured, whatever it holds: a
+/// terminal event with bytes after it, or more events than the driver reads
+/// chunks of a refused reply.
+#[tokio::test]
+async fn a_success_status_the_driver_does_not_stream_is_refused_whole_and_not_captured() {
+    use rig_http::test_utils::NonSuccessStreamingClient;
+    let terminal_and_tail = {
+        let mut body = String::from_utf8(sse(&turn_data()).to_vec()).expect("text");
+        body.push_str("provider-tail");
+        body
+    };
+    let many_events = {
+        let mut body = String::new();
+        for index in 0..4100 {
+            body.push_str(&format!(
+                "data: {{\"type\":\"future.event\",\"n\":{index}}}\n\n"
+            ));
+        }
+        body
+    };
+    for body in [terminal_and_tail, many_events] {
+        let refusing = || {
+            let mut headers = http::HeaderMap::new();
+            headers.insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("text/event-stream"),
+            );
+            NonSuccessStreamingClient {
+                status: StatusCode::CREATED,
+                headers,
+                body: Bytes::from(body.clone()),
+            }
+        };
+        let expected = ordinary(&refusing())
+            .await
+            .expect_err("the reply is refused");
+        assert_eq!(expected.provider_response_body(), Some(body.as_str()));
+
+        let (observation, writer) = Observation::prepare();
+        let mut stream = wire()
+            .raw_stream_observed(&refusing(), CompletionRequest::new("say hi"), writer)
+            .expect("the request encodes");
+        let items = drain(&mut stream).await;
+        assert!(matches!(items.as_slice(), [Err(_)]), "{items:?}");
+        observation.inspect(|view| {
+            let head = view.reply_head.expect("the refused reply's head");
+            assert_eq!(head.status, StatusCode::CREATED);
+            assert!(!head.accepted_sse);
+            assert!(view.committed_prefix.is_empty());
+            assert!(view.capture_fault.is_none());
+            let error = view.native_error.expect("Rig's error is kept");
+            assert_eq!(error.provider_response_status(), Some(StatusCode::CREATED));
+            assert_eq!(error.provider_response_body(), Some(body.as_str()));
+            assert_eq!(error.to_string(), expected.to_string());
+            assert_eq!(error.report(), expected.report());
+        });
+    }
 }
 
 /// The ledger of a failed call holds the frame Rig's decoder refused, and
@@ -551,8 +633,8 @@ async fn the_body_ends_with_the_chunk_that_completes_the_terminal() {
 
 /// One ordinary (unobserved) stream of the same request on the same wire,
 /// read to its end: what it sent and how it ended.
-async fn ordinary(
-    transport: &SequencedHttpClient,
+async fn ordinary<H: HttpClientExt + Clone + 'static>(
+    transport: &H,
 ) -> Result<rig_core::completion::CompletionResponse, ProviderError> {
     let wire = wire();
     let model = Model::new(wire.clone(), CodexHttpClient::new(transport.clone(), wire));
