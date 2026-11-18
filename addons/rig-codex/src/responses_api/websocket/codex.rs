@@ -64,8 +64,8 @@ use super::{
 // The shared session types this session's API speaks, re-exported beside it.
 pub use super::{
     EmptyInputDeltaError, IncrementalSendRefused, InputDelta, KeepaliveDrain,
-    ResponsesWebSocketCreateOptions, ResponsesWebSocketEvent, UncollectedRecoveredFrames,
-    UnconfirmedSend, UnrecognizedEvent,
+    ResponsesWebSocketCreateOptions, ResponsesWebSocketEvent, TurnFrame,
+    UncollectedRecoveredFrames, UnconfirmedSend, UnrecognizedEvent,
 };
 use crate::error::CodexSessionError;
 use crate::responses_api::ResponseStatus;
@@ -772,7 +772,26 @@ impl CodexWebSocketSession {
     ///
     /// A frame that fails to decode fails the session and is returned as
     /// [`CodexSessionError::CorruptFrame`], carrying the frame as received.
+    ///
+    /// [`next_frame`](Self::next_frame) returns the same event with the text
+    /// it was decoded from.
     pub async fn next_event(&mut self) -> Result<ResponsesWebSocketEvent, CodexSessionError> {
+        self.next_frame().await.map(|frame| frame.event)
+    }
+
+    /// Reads the next server frame for the current in-flight turn: its text
+    /// as the server sent it, and the event that text decodes to.
+    ///
+    /// The texts of a turn, from its first frame through its terminal event,
+    /// are what the turn's events were decoded from, in order, and nothing
+    /// else. Frames that carry no event of this turn are not among them: a
+    /// ping or pong, and the `response.done` that trails the previous turn.
+    /// A binary frame whose bytes are UTF-8 is returned as that text; one
+    /// whose bytes are not fails the session with
+    /// [`CodexSessionError::CorruptFrame`], which carries the bytes.
+    ///
+    /// Failures are those of [`next_event`](Self::next_event).
+    pub async fn next_frame(&mut self) -> Result<TurnFrame, CodexSessionError> {
         self.ensure_open()?;
 
         if !self.in_flight {
@@ -823,7 +842,10 @@ impl CodexWebSocketSession {
                 }
             }
             self.update_state_for_event(&event);
-            return Ok(event);
+            return Ok(TurnFrame {
+                text: payload,
+                event,
+            });
         }
     }
 

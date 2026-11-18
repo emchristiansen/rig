@@ -299,6 +299,20 @@ pub enum ResponsesWebSocketEvent {
     Unknown(UnrecognizedEvent),
 }
 
+/// One server frame of a turn: its text, and the event that text decodes to.
+///
+/// Returned by [`codex::CodexWebSocketSession::next_frame`]. The text is the
+/// frame's payload as the server sent it, so a caller that keeps a turn's
+/// texts in order keeps what the turn's events were decoded from.
+#[derive(Debug, Clone)]
+pub struct TurnFrame {
+    /// The frame's payload as received: a text frame's text, or a binary
+    /// frame's bytes when they are UTF-8.
+    pub text: String,
+    /// The event `text` decodes to.
+    pub event: ResponsesWebSocketEvent,
+}
+
 /// A server event this client does not model.
 ///
 /// A named value rather than inline variant fields because

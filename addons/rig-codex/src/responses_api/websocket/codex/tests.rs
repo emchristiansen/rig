@@ -2190,3 +2190,4 @@ async fn a_binary_frame_that_is_not_utf8_carries_its_bytes_as_received() {
 }
 
 mod fidelity;
+mod frames;
