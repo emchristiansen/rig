@@ -495,6 +495,168 @@ async fn a_reply_of_another_content_type_is_refused_and_not_captured() {
     });
 }
 
+/// A transport that replies 200 with `headers` and `body`, and counts each
+/// poll of the reply's body.
+#[derive(Clone, Debug)]
+struct CountingClient {
+    headers: http::HeaderMap,
+    body: Bytes,
+    body_polls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl CountingClient {
+    fn new(content_type: Option<&[u8]>, body: Bytes) -> Self {
+        let mut headers = http::HeaderMap::new();
+        if let Some(value) = content_type {
+            headers.insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_bytes(value).expect("a header value"),
+            );
+        }
+        Self {
+            headers,
+            body,
+            body_polls: Arc::default(),
+        }
+    }
+
+    fn body_polls(&self) -> usize {
+        self.body_polls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// The reply of a surface `CountingClient` does not script.
+fn unscripted() -> http_client::Error {
+    http_client::Error::non_success_with_details(
+        StatusCode::NOT_IMPLEMENTED,
+        http::HeaderMap::new(),
+        String::new(),
+    )
+}
+
+impl HttpClientExt for CountingClient {
+    fn send<T, U>(
+        &self,
+        _req: Request<T>,
+    ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
+    where
+        T: Into<Bytes> + WasmCompatSend,
+        U: From<Bytes> + WasmCompatSend + 'static,
+    {
+        std::future::ready(Err(unscripted()))
+    }
+
+    fn send_multipart<U>(
+        &self,
+        _req: Request<MultipartForm>,
+    ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
+    where
+        U: From<Bytes> + WasmCompatSend + 'static,
+    {
+        std::future::ready(Err(unscripted()))
+    }
+
+    fn send_streaming<T>(
+        &self,
+        _req: Request<T>,
+    ) -> impl Future<Output = http_client::Result<StreamingResponse>> + WasmCompatSend
+    where
+        T: Into<Bytes> + WasmCompatSend,
+    {
+        let headers = self.headers.clone();
+        let polls = self.body_polls.clone();
+        let mut chunk = Some(self.body.clone());
+        async move {
+            let body: BoxedStream = Box::pin(futures::stream::poll_fn(move |_| {
+                polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::task::Poll::Ready(chunk.take().map(Ok::<Bytes, http_client::Error>))
+            }));
+            let mut response = Response::builder()
+                .status(StatusCode::OK)
+                .body(body)
+                .map_err(http_client::Error::Protocol)?;
+            *response.headers_mut() = headers;
+            Ok(response)
+        }
+    }
+}
+
+/// What the reply's head says of a content type is what Rig's driver did
+/// with the reply. The driver reads the whole value as a media type: a
+/// value it reads as `text/event-stream`, with any parameters and in any
+/// letter case, is streamed and captured, as is a reply that names none. A
+/// value it cannot read as that is refused without its body being polled,
+/// whatever the value begins with, and the head does not say it was
+/// accepted.
+#[tokio::test]
+async fn the_reply_head_says_of_a_content_type_what_the_driver_did_with_the_reply() {
+    let data = turn_data();
+    let cases: [(Option<&[u8]>, bool); 17] = [
+        (None, true),
+        (Some(b"text/event-stream"), true),
+        (Some(b"text/event-stream; charset=utf-8"), true),
+        (Some(b"text/event-stream;charset=UTF-8"), true),
+        (Some(b"Text/Event-Stream; Charset=\"utf-8\""), true),
+        (Some(b"TEXT/EVENT-STREAM"), true),
+        (Some(b"text/event-stream; charset=utf-8; boundary=x"), true),
+        (Some(b"text/event-stream;"), true),
+        // The driver compares the subtype without its suffix.
+        (Some(b"text/event-stream+json"), true),
+        (Some(b"text/event-stream; ="), false),
+        (Some(b"text/event-stream; charset"), false),
+        (Some(b"text/event-stream, text/event-stream"), false),
+        (Some(b" text/event-stream"), false),
+        (Some(b"text/event-stream\xff"), false),
+        (Some(b"text/event-streams"), false),
+        (Some(b"application/json"), false),
+        (Some(b""), false),
+    ];
+    for (content_type, streamed) in cases {
+        let named = content_type.map(String::from_utf8_lossy);
+        let plain = CountingClient::new(content_type, sse(&data));
+        let expected = ordinary(&plain).await;
+        assert_eq!(
+            expected.is_ok(),
+            streamed,
+            "{named:?}: what Rig's driver does with the reply"
+        );
+
+        let transport = CountingClient::new(content_type, sse(&data));
+        let (observation, writer) = Observation::prepare();
+        let mut stream = wire()
+            .raw_stream_observed(&transport, CompletionRequest::new("say hi"), writer)
+            .expect("the request encodes");
+        let items = drain(&mut stream).await;
+        let accepted =
+            observation.inspect(|view| view.reply_head.expect("the reply's head").accepted_sse);
+        assert_eq!(accepted, streamed, "{named:?}: what the head says");
+        match expected {
+            Ok(_) => {
+                stream.finish().await.expect("the turn finishes");
+                observation.inspect(|view| {
+                    assert_eq!(view.committed_prefix, data.as_slice(), "{named:?}");
+                });
+            }
+            Err(expected) => {
+                assert!(matches!(items.as_slice(), [Err(_)]), "{named:?}: {items:?}");
+                assert_eq!(plain.body_polls(), 0, "{named:?}: the driver reads none");
+                assert_eq!(
+                    transport.body_polls(),
+                    0,
+                    "{named:?}: nor does the observer"
+                );
+                observation.inspect(|view| {
+                    assert!(view.committed_prefix.is_empty(), "{named:?}");
+                    assert!(view.capture_fault.is_none(), "{named:?}");
+                    let error = view.native_error.expect("Rig's error is kept");
+                    assert_eq!(error.to_string(), expected.to_string(), "{named:?}");
+                    assert_eq!(error.report(), expected.report(), "{named:?}");
+                });
+            }
+        }
+    }
+}
+
 /// The ledger holds exactly the frames Rig's decoder was given. A frame the
 /// decoder refuses is the ledger's last string, whatever followed it in the
 /// chunk that carried it: the reply is handed on an event at a time, and
