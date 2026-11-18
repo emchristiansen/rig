@@ -51,10 +51,11 @@ jobs:
           printf '%s\n' $line >> "$GITHUB_OUTPUT"
 
   # `schedule` fires on forks too; the repository guard keeps a fork from
-  # running a suite it did not ask for. The plan job is skipped on non-PR
-  # events, which would skip its dependents by default, hence `!cancelled()`
-  # and the explicit result check; a failed plan never lets a lane run or
-  # skip quietly.
+  # running a suite it did not ask for. A manual dispatch is a fork asking:
+  # the all-features run then executes there too, on the dispatched ref.
+  # The plan job is skipped on non-PR events, which would skip its dependents
+  # by default, hence `!cancelled()` and the explicit result check; a failed
+  # plan never lets a lane run or skip quietly.
   test-all-features:
     name: stable / test all features
     runs-on: ubuntu-latest
@@ -66,7 +67,7 @@ jobs:
     if: >-
       !cancelled() &&
       (needs.plan.result == 'success' || needs.plan.result == 'skipped') &&
-      github.repository == '0xPlaygrounds/rig' &&
+      (github.repository == '0xPlaygrounds/rig' || github.event_name == 'workflow_dispatch') &&
       (github.event_name != 'pull_request' || needs.plan.outputs.full == 'true')
     steps:
       # This run builds every workspace test binary under all features and
