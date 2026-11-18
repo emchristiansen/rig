@@ -14,13 +14,22 @@
 //! from the chunk holding the reply's first invalid byte, or from any chunk
 //! after it, is [`FrameEvidence::Decoded`]. Name a failure with
 //! [`decode_frame`](crate::responses_api::streaming::decode_frame) on a
-//! `Text` frame only.
+//! `Text` frame only. `decode_frame` is stricter than Rig's decoder: Rig
+//! reads past a frame of a modelled type whose payload `decode_frame`
+//! refuses, and a reply holding one succeeds when it reaches its terminal.
+//! So a kept frame that `decode_frame` refuses is not, by that, the cause
+//! of a failed call.
 //!
 //! A streamed reply is handed on in pieces that each complete at most one
 //! frame, so the driver has decoded a frame before the next is cut. The
 //! store then never holds more than its capacity of that reply's frames, and
 //! when Rig's decoder refuses a frame, that frame is the newest one kept
 //! ([`RetainedFrames::last`]), at any capacity.
+//!
+//! Only a reply the driver streams is cut. It streams a reply of status 200
+//! and reads any other into its error, so a streamed reply of another
+//! status is handed on as the transport delivered it and none of it is
+//! kept: what the provider said is in Rig's error.
 //!
 //! A unary reply arrives whole. Its frames are cut together, nothing says
 //! which of them a failure is about, and so all of them are kept, however
@@ -41,7 +50,7 @@
 //! ```
 
 use crate::error::FrameEvidence;
-use crate::frame_tee::{RetainedFrames, first_line};
+use crate::frame_tee::{RetainedFrames, driver_streams, first_line};
 use bytes::Bytes;
 use futures::Stream;
 use rig_http::http_client::framing::{Framer, Framing, WireFrame};
@@ -63,7 +72,10 @@ use std::task::{Context, Poll};
 /// streamed chunk that completes more than one frame is handed on as
 /// several chunks, one per frame. Requests are not kept.
 ///
-/// A streamed reply's frames are kept one at a time, so the store never
+/// A streamed reply is cut only when its status is 200, the one status
+/// whose reply Rig's driver streams; a reply of any other status is handed
+/// on untouched and none of it is kept. A cut reply's frames are kept one
+/// at a time, so the store never
 /// holds more than its capacity of them, and when Rig's decoder refuses a
 /// frame, that frame is the newest one kept ([`RetainedFrames::last`]), at
 /// any capacity. A unary reply arrives whole: nothing says which of its
@@ -158,13 +170,19 @@ impl<H: HttpClientExt> HttpClientExt for HttpFrameTee<H> {
         let framing = self.framing;
         async move {
             let (parts, body) = sending.await?.into_parts();
-            let body: BoxedStream = Box::pin(TeedBody {
-                body,
-                pending: Bytes::new(),
-                cut: Cut::of(framing),
-                utf8: Utf8Watch::default(),
-                frames,
-            });
+            // A reply the driver does not stream is not cut: its body goes
+            // into Rig's error, chunk for chunk as the transport gave it.
+            let body: BoxedStream = if driver_streams(parts.status) {
+                Box::pin(TeedBody {
+                    body,
+                    pending: Bytes::new(),
+                    cut: Cut::of(framing),
+                    utf8: Utf8Watch::default(),
+                    frames,
+                })
+            } else {
+                body
+            };
             Ok(Response::from_parts(parts, body))
         }
     }
