@@ -3,8 +3,9 @@
 # packages only, and the all-features lane that would run add-on tests is
 # skipped outside upstream's repository. This workflow runs the add-on
 # tests, lints and record-replay guard on the toolchain upstream's
-# rust-toolchain.toml names. It is the fork's own file; no upstream workflow
-# is edited.
+# rust-toolchain.toml names, and the tests of the one upstream script the
+# fork changes (addons/README.md lists it). It is the fork's own file; no
+# upstream workflow is edited.
 name: Add-ons
 
 on:
@@ -42,3 +43,5 @@ jobs:
         run: cargo test --locked -p rig-live -p rig-webrtc -p rig-codex --all-features
       - if: ${{ !cancelled() }}
         run: cargo test --locked -p rig-codex
+      - if: ${{ !cancelled() }}
+        run: python3 -I -B -m unittest discover -s addons/tests -p 'test_*.py' -v
