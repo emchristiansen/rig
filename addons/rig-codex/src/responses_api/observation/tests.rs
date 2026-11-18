@@ -589,6 +589,55 @@ async fn a_bounded_ledger_keeps_the_whole_reply_or_fails_the_call() {
     });
 }
 
+/// A ledger's limit has no say over a reply the driver refuses: none of
+/// that reply is offered to the ledger, so a limit its events would pass is
+/// never reached, and the failure is Rig's own error with the whole body,
+/// the same with a limit of one byte as with none.
+#[tokio::test]
+async fn a_bounded_ledger_leaves_a_refused_reply_to_its_own_error() {
+    use rig_http::test_utils::NonSuccessStreamingClient;
+    let mut body = String::from_utf8(sse(&turn_data()).to_vec()).expect("text");
+    body.push_str("provider-tail");
+    let refusing = || {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("text/event-stream"),
+        );
+        NonSuccessStreamingClient {
+            status: StatusCode::CREATED,
+            headers,
+            body: Bytes::from(body.clone()),
+        }
+    };
+    let expected = ordinary(&refusing())
+        .await
+        .expect_err("the reply is refused");
+    for prepared in [
+        Observation::prepare(),
+        Observation::prepare_bounded(NonZeroUsize::MIN),
+    ] {
+        let (observation, writer) = prepared;
+        let mut stream = wire()
+            .raw_stream_observed(&refusing(), CompletionRequest::new("say hi"), writer)
+            .expect("the request encodes");
+        let items = drain(&mut stream).await;
+        let [Err(failure)] = items.as_slice() else {
+            panic!("exactly one failure, got {items:?}");
+        };
+        assert_eq!(failure.kind, ObservedFailureKind::Stream);
+        observation.inspect(|view| {
+            assert!(view.committed_prefix.is_empty());
+            assert!(view.capture_fault.is_none());
+            let error = view.native_error.expect("Rig's error is kept");
+            assert_eq!(error.provider_response_status(), Some(StatusCode::CREATED));
+            assert_eq!(error.provider_response_body(), Some(body.as_str()));
+            assert_eq!(error.to_string(), expected.to_string());
+            assert_eq!(error.report(), expected.report());
+        });
+    }
+}
+
 /// The observed body hands the reply on with its bytes unchanged and in
 /// order, in pieces that each complete at most one event, and commits an
 /// event before its piece is handed on. It ends with the piece that
