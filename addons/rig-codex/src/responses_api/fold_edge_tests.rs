@@ -305,10 +305,12 @@ fn text_and_reasoning_never_done_and_left_out_replay_as_rebuilt_text_alone() {
 
 // ── c. a done item that disagrees with what streamed ────────────────────
 
-/// A done item that disagrees with the deltas wins outright, for every
-/// kind: the block's modelled field holds the done item's text, input or
-/// arguments, the block's item is the done item, and that is what
-/// replays. What streamed is gone.
+/// Where a done item states text, input or arguments that the deltas also
+/// stated, differently, the done item wins, for every kind: the block's
+/// modelled field holds the done item's value, the block's item is the done
+/// item, and that is what replays. What streamed is gone. This is the rule
+/// for a field both filled; a done item that leaves a field empty is not
+/// tested here, and Rig fills an empty done message from the streamed text.
 #[test]
 fn a_done_item_that_disagrees_with_the_deltas_wins_in_the_field_and_the_item() {
     let done = disagreeing();
@@ -341,8 +343,10 @@ fn a_done_item_that_disagrees_with_the_deltas_wins_in_the_field_and_the_item() {
 }
 
 /// After a done item that disagrees with the deltas, a terminal that
-/// restates what streamed changes nothing: the done item stays in the
-/// field, the item and the replay.
+/// restates what streamed changes none of the fields the done item filled:
+/// the done item stays in the field, the item and the replay. A terminal
+/// can still supply what a done item lacks, reasoning ciphertext for one,
+/// which is not tested here.
 #[test]
 fn a_terminal_restating_the_deltas_does_not_override_a_disagreeing_done_item() {
     let done = disagreeing();
@@ -437,9 +441,12 @@ fn assert_stale(block: &AssistantContent, item: &Value) {
     );
 }
 
-/// An edited text block replays rebuilt under its item's id, status and
-/// role: its one text part is the edited text, and the refusal part the
-/// provider sent is gone. Every neighbour replays verbatim.
+/// An edited text block replays rebuilt under its item's id: its one text
+/// part is the edited text, and the refusal part the provider sent is gone.
+/// The id is the item's; the role and status are written anew by Rig
+/// (`assistant`, `completed`), which here are also what the item said, so
+/// this test does not show a differing status surviving. Every neighbour
+/// replays verbatim.
 #[test]
 fn an_edited_text_block_replays_rebuilt_under_its_id_without_its_refusal_part() {
     let (blocks, replay) = replayed_after(|block| {
@@ -516,8 +523,10 @@ fn an_edited_custom_call_replays_rebuilt_without_its_namespace_or_status() {
 
 /// Reasoning whose text is edited replays rebuilt under its item's id with
 /// the edited text as its summary, and still carries the original
-/// ciphertext: the provider gets a summary its ciphertext was not made
-/// with. Every neighbour replays verbatim.
+/// ciphertext: the new summary is sent beside the ciphertext that came with
+/// the old one. The fixture's ciphertext is a placeholder string, so
+/// nothing here shows how a provider treats the pair. Every neighbour
+/// replays verbatim.
 #[test]
 fn edited_reasoning_replays_its_new_summary_beside_the_original_ciphertext() {
     let (blocks, replay) = replayed_after(|block| {
