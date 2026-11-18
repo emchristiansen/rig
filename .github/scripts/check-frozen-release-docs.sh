@@ -7,19 +7,53 @@
 # rebase cleanly. This guard fails a PR whose diff against its base touches
 # any of them. Release PRs (`release-plz-*` head branch or the `release`
 # label) are exempted by the workflow's job condition, not here.
+#
+# A fork does not write these documents: it takes them from this repository
+# when it merges a release. There the base is the fork's own line, and a PR
+# that merges a release differs from it in every release document the
+# release wrote. So where the documents come from is named separately from
+# the base (UPSTREAM_REF, by default the base). A release document may differ
+# from the base only by being, byte for byte, what the newest commit of that
+# history contained in HEAD says it is: a merged release passes, and any
+# other edit of a release document fails as it does here. In this repository
+# the two refs are the same and the rule is the one above.
 
 set -euo pipefail
 
 base_ref="${1:-${BASE_REF:-origin/main}}"
 readonly base_ref
 readonly frozen_pattern='^(CHANGELOG\.md|MIGRATING\.md|crates/[^/]+/CHANGELOG\.md|docs/migrations/.+)$'
+readonly canonical_repository='0xPlaygrounds/rig'
 
 if ! merge_base="$(git merge-base "${base_ref}" HEAD)"; then
     echo "Cannot find the merge base of ${base_ref} and HEAD." >&2
     exit 1
 fi
 
-touched="$(git diff --name-only "${merge_base}" HEAD | grep -E "${frozen_pattern}" || true)"
+# In a fork's CI the documents' history is this repository's main branch.
+upstream_ref="${UPSTREAM_REF:-}"
+if [[ -z "${upstream_ref}" && -n "${GITHUB_REPOSITORY:-}" && "${GITHUB_REPOSITORY}" != "${canonical_repository}" ]]; then
+    git fetch --no-tags --quiet "https://github.com/${canonical_repository}.git" main
+    upstream_ref="$(git rev-parse FETCH_HEAD)"
+fi
+
+upstream_base=""
+if [[ -n "${upstream_ref}" ]]; then
+    if ! upstream_base="$(git merge-base "${upstream_ref}" HEAD)"; then
+        echo "Cannot find the merge base of ${upstream_ref} and HEAD." >&2
+        exit 1
+    fi
+fi
+
+touched=""
+while IFS= read -r file; do
+    [[ -n "${file}" ]] || continue
+    # The same bytes as the release history has, or absent from both.
+    if [[ -n "${upstream_base}" ]] && git diff --quiet "${upstream_base}" HEAD -- "${file}"; then
+        continue
+    fi
+    touched+="${file}"$'\n'
+done < <(git diff --name-only "${merge_base}" HEAD | grep -E "${frozen_pattern}" || true)
 
 if [[ -n "${touched}" ]]; then
     {
@@ -35,4 +69,8 @@ if [[ -n "${touched}" ]]; then
     exit 1
 fi
 
-echo "No frozen release docs touched since ${merge_base:0:9}."
+if [[ -n "${upstream_base}" ]]; then
+    echo "No frozen release docs edited since ${merge_base:0:9}; any that differ are as ${upstream_base:0:9} has them."
+else
+    echo "No frozen release docs touched since ${merge_base:0:9}."
+fi
